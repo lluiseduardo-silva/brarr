@@ -1,0 +1,26 @@
+# Não enviar artefatos de build pro contexto Docker — é o maior
+# delinquente em tempo de build.
+target/
+**/target/
+
+# Caches do cargo (caso alguém tenha apontado CARGO_HOME pro repo)
+.cargo/
+
+# Metadados de Git e IDE
+.git/
+.gitignore
+.gitattributes
+.idea/
+.vscode/
+
+# Logs e arquivos locais de runtime
+*.log
+.env
+.env.*
+config.local.toml
+/config.toml
+
+# Documentação que não precisa ir pro build context
+docs/
+*.md
+!CLAUDE.md

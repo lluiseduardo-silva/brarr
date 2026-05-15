@@ -8,22 +8,26 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 This is a personal Rust learning project. The author values quality, correctness, and architectural clarity over speed of delivery.
 
-## Current State — Phase 1 complete (workspace + stubs)
+## Current State — Phases 1-5 complete (MVP closed)
 
-Repository structure:
-- Root `Cargo.toml` — virtual workspace (`resolver = "3"`, global `[workspace.lints.rust]` + `[workspace.lints.clippy]`, `[workspace.package]` for shared metadata).
-- `crates/brarr-*` — 7 stub crates (5 libs + 2 bins). Each `lib.rs` / `main.rs` is a module-level doc comment describing intent + phase number.
-- `rustfmt.toml`, `clippy.toml`, `.gitignore` — configured.
-- `README.md` (PT) and `docs/ARCHITECTURE.md` — architecture documented.
-- `INITIAL_PROMPT.md` — **the authoritative project spec (9.6 KB)**. Always consult before adding crates, dependencies, or making architectural decisions.
+Implemented end-to-end pipeline: `brarr search --tmdb <id>` reads a TOML config, hits every configured UNIT3D tracker in parallel, parses each response (JSON + embedded MediaInfo dump), scores releases by PT-BR audio/subtitle presence + quality, prints a ranked list to stdout.
 
-Next phase: **Phase 2 — `brarr-mediainfo` parser** (see `INITIAL_PROMPT.md`).
+- `brarr-mediainfo` (Phase 2): textual MediaInfo dump → `ParsedMediaInfo` + `ParseError`. Handles CRLF and LF, lenient to unknown fields.
+- `brarr-core` (Phase 3): shared domain types — `Release`, `TrackerSource`, `Language`, `ReleaseEnrichment`, newtype IDs (`TmdbId`, `ImdbId`, `TvdbId`, `MalId`), `DecisionScore` (0..=1000), `ReleaseKind`, `Resolution`.
+- `brarr-tracker-unit3d` (Phase 4): async `reqwest`-based `Unit3dClient` with `search_by_tmdb` + `get_torrent`. Tolerant deserializers for the UNIT3D JSON variance between trackers.
+- `brarr-cli` (Phase 5): binary `brarr` with `search` subcommand, TOML config (`directories` crate for default paths), parallel fan-out via `futures::join_all`, `tracing` logging, `anyhow` at the binary boundary.
+- `brarr-orchestrator`, `brarr-decision-service`, `brarr-plugin-host` — stubs only; deferred per spec until explicitly requested.
+
+102 tests pass (`cargo test --workspace --all-targets`) plus 2 doctests. `INITIAL_PROMPT.md` remains the authoritative spec — consult before adding crates, dependencies, or making architectural decisions.
 
 ## Toolchain notes
 
-- Active toolchain on this machine: `stable-x86_64-pc-windows-gnu` (rustc 1.95.0). Switched away from MSVC because `link.exe` was not installed; the GNU toolchain ships mingw-w64 ld.
-- Cargo is at `C:\Users\pc\.cargo\bin\cargo.exe` and may not be on PowerShell's default PATH. Prepend with: `$env:Path = "C:\Users\pc\.cargo\bin;$env:Path"` at the start of each shell session.
-- MSRV pinned to **1.85** (`edition = "2024"` requires it).
+- **Deployment target**: Linux (Docker). Windows local dev is supported but not the primary path.
+- **Active toolchain on this machine**: `stable-x86_64-pc-windows-msvc` (rustc 1.95.0). Visual Studio 2022 Build Tools with the "Desktop development with C++" workload provides `link.exe` + `cl.exe`; crates with C build scripts (`aws-lc-sys`, `openssl-sys`, etc.) compile cleanly through MSVC.
+- We previously used the GNU toolchain + MSYS2 mingw-w64 as a workaround. It worked but hit two sharp edges (rustup's `rust-mingw` self-contained bundle missing internal binutils that `dlltool` spawns; mingw-w64-crt 13.0.0 renaming `nanosleep` → `nanosleep64` while `aws-lc-sys` still calls the old name). MSVC sidesteps both. The GNU toolchain is still installed but no longer the default.
+- **Cargo PATH**: `C:\Users\pc\.cargo\bin` may not be on PowerShell's default PATH. Prepend with: `$env:Path = "C:\Users\pc\.cargo\bin;$env:Path"` at the start of each shell session.
+- **MSRV** pinned to **1.85** (`edition = "2024"` requires it).
+- **Dev container alternative** for Linux-native builds: `Dockerfile.dev` + `.devcontainer/devcontainer.json` + `docker-compose.dev.yml`. Run `docker compose -f docker-compose.dev.yml run --rm dev cargo test --workspace` for a one-shot Linux build, or open the repo in a Dev Container-aware IDE (VS Code, JetBrains Gateway → RustRover).
 
 ## Build / Test / Lint
 

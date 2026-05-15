@@ -1,0 +1,30 @@
+# Alternativa ao devcontainer para uso direto via `docker compose`.
+#
+# Uso:
+#   docker compose -f docker-compose.dev.yml run --rm dev          # shell interativo
+#   docker compose -f docker-compose.dev.yml run --rm dev cargo test --workspace
+#
+# Volumes nomeados pra cargo registry/git evitam re-baixar deps a cada
+# `run --rm`. Source é bind-mount; target/ vive dentro do bind-mount
+# (mesma localização que o host vê em ./target).
+
+services:
+  dev:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    image: brarr-dev:latest
+    volumes:
+      - ./:/workspace
+      - cargo-registry:/usr/local/cargo/registry
+      - cargo-git:/usr/local/cargo/git
+    working_dir: /workspace
+    tty: true
+    stdin_open: true
+    environment:
+      RUST_BACKTRACE: "1"
+    command: bash
+
+volumes:
+  cargo-registry:
+  cargo-git:

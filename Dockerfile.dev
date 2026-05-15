@@ -1,0 +1,51 @@
+# brarr development image.
+#
+# Imagem mínima de Linux com toolchain Rust pinada na MSRV declarada
+# em Cargo.toml (1.85) ou superior. Usada por:
+#
+# - `.devcontainer/devcontainer.json` (JetBrains Gateway, VS Code, etc.)
+# - `docker-compose.dev.yml` (uso ad-hoc via `docker compose`)
+# - CI futura (mesma base reduz "works on my machine")
+#
+# Não copia o código-fonte: o source vai como bind-mount em runtime.
+# `cargo build` roda dentro do container, escrevendo target/ no host.
+
+ARG RUST_VERSION=1.95
+FROM rust:${RUST_VERSION}-slim-bookworm
+
+# Pacotes APT necessários:
+# - build-essential, cmake → crates com build.rs em C (aws-lc-sys, openssl-sys, etc.)
+# - pkg-config + libssl-dev → backend native-tls do reqwest, se voltarmos pra ele
+# - git → algumas crates puxam deps de git remotes
+# - ca-certificates → HTTPS no cargo fetch e nos próprios binários em testes
+# - mediainfo → CLI oficial; útil pra regenerar fixtures e validar parser
+# - curl → debug / fetch ad-hoc
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        cmake \
+        curl \
+        git \
+        libssl-dev \
+        mediainfo \
+        pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+# Componentes Rust comuns em dev (rustfmt e clippy já vêm na imagem oficial,
+# mas garantimos com `rustup component add` que estão atualizados).
+RUN rustup component add rustfmt clippy
+
+# Cargo registry / git cache vão em volume nomeado (ver compose/devcontainer)
+# pra não baixar tudo de novo em cada `docker compose run`.
+ENV CARGO_HOME=/usr/local/cargo
+ENV PATH=$CARGO_HOME/bin:$PATH
+
+# Target dir dentro de /workspace/target — host vê os artefatos via bind mount.
+# Pode ser sobrescrito por env do compose se preferir target em volume nomeado
+# (mais rápido em macOS/Windows hosts onde bind-mount tem overhead de FS).
+ENV CARGO_TARGET_DIR=/workspace/target
+
+WORKDIR /workspace
+
+CMD ["bash"]
