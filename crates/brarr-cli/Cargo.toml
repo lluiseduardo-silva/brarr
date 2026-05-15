@@ -7,7 +7,32 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 
+# Renomeia o binário de `brarr-cli` (default = nome do package) para
+# `brarr` — o nome que o INITIAL_PROMPT.md usa nos exemplos de invocação.
+[[bin]]
+name = "brarr"
+path = "src/main.rs"
+
+[lib]
+path = "src/lib.rs"
+
 [dependencies]
+anyhow = "1.0.102"
+brarr-core = { version = "0.1.0", path = "../brarr-core" }
+brarr-tracker-unit3d = { version = "0.1.0", path = "../brarr-tracker-unit3d" }
+clap = { version = "4.6.1", features = ["derive"] }
+directories = "6.0.0"
+futures = "0.3.32"
+serde = { version = "1.0.228", features = ["derive"] }
+thiserror = "2.0.18"
+tokio = { version = "1.52.3", features = ["macros", "rt-multi-thread", "fs"] }
+toml = "1.1.2"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
+url = { version = "2.5.8", features = ["serde"] }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+wiremock = "0.6.5"
