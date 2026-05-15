@@ -1,8 +1,13 @@
 //! Idiomas reconhecidos e normalização específica para Português
 //! brasileiro vs. europeu — o ponto chave do brarr.
+//!
+//! Esse tipo vive em `brarr-core` (e não em `brarr-mediainfo`) porque
+//! todos os crates de aplicação consomem ele: o parser de `MediaInfo`
+//! popula a partir do par `(Language, Title)`, o cliente de tracker
+//! desserializa direto de JSON, o decision-service pontua releases por
+//! presença de PT-BR, e o CLI/orchestrator exibe para o usuário.
 
-/// Idioma de uma faixa de áudio ou legenda, normalizado a partir do par
-/// `(Language, Title)` do `MediaInfo`.
+/// Idioma de uma faixa de áudio ou legenda, normalizado.
 ///
 /// Variantes nomeadas para os casos que o brarr precisa pontuar
 /// diretamente (PT-BR, PT-PT, inglês). Tudo o mais cai em
@@ -33,7 +38,7 @@ pub enum Language {
 }
 
 impl Language {
-    /// Normaliza o par `(language_field, title)` de uma faixa.
+    /// Normaliza o par `(language_field, title)` de uma faixa do `MediaInfo`.
     ///
     /// Ordem das regras (primeira que casa ganha):
     /// 1. `language_field` igual a `Portuguese (BR)` (case-insensitive) →
@@ -76,10 +81,19 @@ impl Language {
         }
         Self::Other(lang.to_string())
     }
+
+    /// Indica se este idioma é uma variante de Português (qualquer
+    /// região — útil em regras de scoring que aceitam ambígua).
+    #[must_use]
+    pub const fn is_portuguese(&self) -> bool {
+        matches!(self, Self::PtBr | Self::PtPt | Self::Pt)
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
     use super::Language;
 
     #[test]
@@ -170,5 +184,14 @@ mod tests {
             Language::from_mediainfo("  Portuguese (BR)  ", None),
             Language::PtBr,
         );
+    }
+
+    #[test]
+    fn is_portuguese_returns_true_for_all_pt_variants() {
+        assert!(Language::PtBr.is_portuguese());
+        assert!(Language::PtPt.is_portuguese());
+        assert!(Language::Pt.is_portuguese());
+        assert!(!Language::En.is_portuguese());
+        assert!(!Language::Other("Spanish".to_string()).is_portuguese());
     }
 }

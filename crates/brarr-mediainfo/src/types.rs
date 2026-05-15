@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use crate::language::Language;
+use brarr_core::Language;
 
 /// Resultado completo do parsing — todas as seções relevantes de um
 /// dump de `MediaInfo`, distribuídas por tipo.

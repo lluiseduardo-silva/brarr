@@ -14,8 +14,9 @@
 
 use std::time::Duration;
 
+use brarr_core::Language;
+
 use crate::error::ParseError;
-use crate::language::Language;
 use crate::types::{AudioTrack, GeneralInfo, ParsedMediaInfo, SubtitleTrack, VideoTrack};
 
 /// Faz o parse de um dump textual de `MediaInfo`.
