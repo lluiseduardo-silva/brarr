@@ -8,6 +8,17 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+brarr-core = { version = "0.1.0", path = "../brarr-core" }
+brarr-mediainfo = { version = "0.1.0", path = "../brarr-mediainfo" }
+reqwest = { version = "0.13.3", default-features = false, features = ["json", "default-tls", "http2", "charset", "stream", "query"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+thiserror = "2.0.18"
+url = "2.5.8"
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+tokio = { version = "1.52.3", features = ["macros", "rt", "rt-multi-thread"] }
+wiremock = "0.6.5"
