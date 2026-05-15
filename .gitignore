@@ -25,3 +25,7 @@ config.local.toml
 tarpaulin-report.html
 cobertura.xml
 config.toml
+
+# Session checkpoints (handoff notes between Claude Code sessions)
+CHECKPOINT.md
+CHECKPOINT-*.md
