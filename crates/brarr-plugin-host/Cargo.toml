@@ -8,6 +8,19 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+anyhow = "1.0.102"
+brarr-core = { version = "0.1.0", path = "../brarr-core" }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+thiserror = "2.0.18"
+tokio = { version = "1.52.3", default-features = false, features = ["rt", "sync"] }
+tracing = "0.1.44"
+url = "2.5.8"
+wasmtime = { version = "34.0.2", default-features = false, features = ["cranelift", "parallel-compilation", "runtime", "cache", "wat"] }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+tokio = { version = "1.52.3", default-features = false, features = ["macros", "rt"] }
+wat = "1.249.0"

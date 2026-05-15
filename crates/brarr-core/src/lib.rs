@@ -22,6 +22,7 @@
 mod enrichment;
 mod ids;
 mod language;
+mod provider;
 mod release;
 mod score;
 mod tracker;
@@ -29,6 +30,7 @@ mod tracker;
 pub use enrichment::ReleaseEnrichment;
 pub use ids::{ImdbId, ImdbIdError, MalId, MalIdError, TmdbId, TmdbIdError, TvdbId, TvdbIdError};
 pub use language::Language;
+pub use provider::{ProviderError, ProviderFuture, TrackerProvider};
 pub use release::{ExternalIds, Release, ReleaseError, ReleaseKind, ReleaseUrls, Resolution};
 pub use score::{DecisionScore, ScoreOutOfRange};
 pub use tracker::{TrackerSource, TrackerSourceError};

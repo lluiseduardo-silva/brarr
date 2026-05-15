@@ -8,19 +8,19 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 This is a personal Rust learning project. The author values quality, correctness, and architectural clarity over speed of delivery.
 
-## Current State — Phases 1-6b complete
+## Current State — Phases 1-6c complete
 
-Implemented end-to-end pipeline plus rules engine and orchestrator service:
+Implemented end-to-end pipeline plus rules engine, orchestrator service, and WASM plugin host:
 
 - `brarr-mediainfo` (Phase 2): textual MediaInfo dump → `ParsedMediaInfo` + `ParseError`. Handles CRLF and LF, lenient to unknown fields.
-- `brarr-core` (Phase 3): shared domain types — `Release`, `TrackerSource`, `Language`, `ReleaseEnrichment`, newtype IDs (`TmdbId`, `ImdbId`, `TvdbId`, `MalId`), `DecisionScore` (0..=1000), `ReleaseKind`, `Resolution`.
-- `brarr-tracker-unit3d` (Phase 4): async `reqwest`-based `Unit3dClient` with `search_by_tmdb` + `get_torrent`. Tolerant deserializers for the UNIT3D JSON variance between trackers.
+- `brarr-core` (Phase 3): shared domain types — `Release`, `TrackerSource`, `Language`, `ReleaseEnrichment`, newtype IDs (`TmdbId`, `ImdbId`, `TvdbId`, `MalId`), `DecisionScore` (0..=1000), `ReleaseKind`, `Resolution`. Plus the `TrackerProvider` trait + `ProviderError` (Phase 6c).
+- `brarr-tracker-unit3d` (Phase 4): async `reqwest`-based `Unit3dClient` with `search_by_tmdb` + `get_torrent`. Tolerant deserializers for the UNIT3D JSON variance between trackers. Implements `TrackerProvider`.
 - `brarr-cli` (Phase 5): binary `brarr` with `search` subcommand, TOML config (`directories` crate for default paths), parallel fan-out via `futures::join_all`, `tracing` logging, `anyhow` at the binary boundary.
 - `brarr-decision-service` (Phase 6a): declarative rules engine, TOML schema, `Engine::baseline()` reproduces the legacy Phase 5 scoring exactly.
 - `brarr-orchestrator` (Phase 6b): tonic gRPC server (`Brarr` service: `Search`, `ListTrackers`, `RecentSearches`) + Axum admin web UI (dashboard, trackers CRUD, releases history, search detail) backed by SQLite via `sqlx`. Server-side rendered with Askama templates + HTMX, Tailwind via CDN, no frontend build pipeline. Binary `brarr-orchestrator` launches both servers concurrently.
-- `brarr-plugin-host` — stub (deferred to Phase 6c).
+- `brarr-plugin-host` (Phase 6c): wasmtime-backed sandbox that loads third-party tracker scrapers as core WASM modules. Plugin ABI v1 documented in the crate-level rustdoc (exports: `plugin_alloc/free`, `plugin_abi_version`, `plugin_name`, `plugin_search_by_tmdb`; imports: `env.host_log` gated by `HostCapabilities`). `WasmTrackerProvider` implements `TrackerProvider`, so the orchestrator can mix direct UNIT3D clients and plugin-loaded providers in the same fan-out.
 
-170 tests pass (`cargo test --workspace --all-targets`). `INITIAL_PROMPT.md` remains the authoritative spec — consult before adding crates, dependencies, or making architectural decisions.
+178 tests pass (`cargo test --workspace --all-targets`). `INITIAL_PROMPT.md` remains the authoritative spec — consult before adding crates, dependencies, or making architectural decisions.
 
 ### Running the orchestrator
 

@@ -76,6 +76,15 @@ impl Unit3dClient {
         self
     }
 
+    /// Reference to the [`TrackerSource`] this client was built with.
+    ///
+    /// Exposed so the [`brarr_core::TrackerProvider`] impl (defined in
+    /// `provider_impl.rs`) can read the tracker name without cloning.
+    #[must_use]
+    pub const fn tracker_source(&self) -> &TrackerSource {
+        &self.tracker
+    }
+
     /// Endpoint `GET /api/torrents/filter?tmdbId=<id>` — retorna a lista
     /// de releases que combinam com o ID TMDB no tracker.
     ///
