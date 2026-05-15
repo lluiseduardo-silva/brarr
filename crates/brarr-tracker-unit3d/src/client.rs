@@ -81,8 +81,22 @@ impl Unit3dClient {
             .error_for_status()?;
 
         let body = resp.text().await?;
-        let envelope: Envelope<Vec<Unit3dTorrent>> =
-            serde_json::from_str(&body).map_err(ClientError::BadJson)?;
+        let envelope: Envelope<Vec<Unit3dTorrent>> = match serde_json::from_str(&body) {
+            Ok(v) => v,
+            Err(e) => {
+                // Log o body cru em debug para que falhas de
+                // desserialização sejam diagnosticáveis sem precisar
+                // re-rodar a request fora do brarr.
+                tracing::debug!(
+                    target: "brarr_tracker_unit3d::client",
+                    error = %e,
+                    body_len = body.len(),
+                    body_excerpt = %body.chars().take(2000).collect::<String>(),
+                    "search_by_tmdb: failed to decode envelope"
+                );
+                return Err(ClientError::BadJson(e));
+            }
+        };
 
         envelope
             .data

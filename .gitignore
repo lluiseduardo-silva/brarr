@@ -24,3 +24,4 @@ config.local.toml
 *.profdata
 tarpaulin-report.html
 cobertura.xml
+config.toml
