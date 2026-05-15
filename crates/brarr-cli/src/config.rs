@@ -17,15 +17,25 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use brarr_decision_service::Rule;
 use serde::Deserialize;
 use url::Url;
 
 /// Configuração completa parseada do TOML.
+///
+/// Aceita opcionalmente `[[rule]]` blocos que substituem o scoring
+/// default — veja [`brarr_decision_service`] para o schema. Quando
+/// ausentes, [`Engine::baseline`](brarr_decision_service::Engine::baseline)
+/// é usado em [`main.rs`](../main.rs.html).
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     /// Lista de trackers configurados. Mapeia para `[[tracker]]` no TOML.
     #[serde(rename = "tracker", default)]
     pub trackers: Vec<TrackerConfig>,
+    /// Regras opcionais do motor de decisão. Mapeia para `[[rule]]` no TOML.
+    /// Vazio → caller usa [`Engine::baseline`].
+    #[serde(rename = "rule", default)]
+    pub rules: Vec<Rule>,
 }
 
 /// Configuração de um único tracker `UNIT3D`.

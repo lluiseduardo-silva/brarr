@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use anyhow::{Context, Result};
-use brarr_cli::{Cli, Command, Config, OutputFormat, ScoringWeights, SearchArgs, run_search};
+use brarr_cli::{Cli, Command, Config, Engine, OutputFormat, RuleSet, SearchArgs, run_search};
 use brarr_core::TmdbId;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
@@ -74,12 +74,16 @@ fn dispatch_search(config: &Config, args: &SearchArgs) -> Result<()> {
         .build()
         .context("building tokio runtime")?;
 
+    let engine = if config.rules.is_empty() {
+        Engine::baseline()
+    } else {
+        Engine::new(RuleSet {
+            rules: config.rules.clone(),
+        })
+    };
+
     let outcome = runtime
-        .block_on(run_search(
-            &config.trackers,
-            tmdb,
-            &ScoringWeights::default(),
-        ))
+        .block_on(run_search(&config.trackers, tmdb, &engine))
         .context("running search across trackers")?;
 
     let rendered = match args.format {

@@ -14,10 +14,12 @@
 
 pub mod cli;
 pub mod config;
-pub mod scoring;
 pub mod search;
 
 pub use cli::{Cli, Command, OutputFormat, SearchArgs};
 pub use config::{Config, ConfigError, TrackerConfig};
-pub use scoring::{ScoringWeights, score_release};
 pub use search::{ScoredRelease, SearchOutcome, format_outcome, format_outcome_json, run_search};
+
+// Re-export do motor de decisão para que callers (tests, main.rs) não
+// precisem importar `brarr_decision_service` separadamente.
+pub use brarr_decision_service::{Engine, RuleSet};

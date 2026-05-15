@@ -12,21 +12,30 @@ use std::fmt::Write as _;
 use brarr_core::{
     DecisionScore, ExternalIds, Language, Release, ReleaseKind, Resolution, TmdbId, TrackerSource,
 };
+use brarr_decision_service::Engine;
 use brarr_tracker_unit3d::{ClientError, Unit3dClient};
 use futures::future::join_all;
 use serde::Serialize;
 use tracing::{debug, info, warn};
 
 use crate::config::TrackerConfig;
-use crate::scoring::{ScoringWeights, score_release};
 
 /// Um release pontuado, pronto para ordenação/exibição.
 #[derive(Debug, Clone)]
 pub struct ScoredRelease {
     /// O release original.
     pub release: Release,
-    /// Score calculado pelos pesos do [`ScoringWeights`] em uso.
-    pub score: DecisionScore,
+    /// Resultado da avaliação pelo motor de regras: score, tags,
+    /// flag de rejeição e nomes das regras que casaram.
+    pub outcome: brarr_decision_service::DecisionOutcome,
+}
+
+impl ScoredRelease {
+    /// Atalho conveniente para `outcome.score`.
+    #[must_use]
+    pub fn score(&self) -> DecisionScore {
+        self.outcome.score
+    }
 }
 
 /// Resultado de uma operação de busca, separando sucessos de falhas.
@@ -52,7 +61,7 @@ pub struct SearchOutcome {
 pub async fn run_search(
     trackers: &[TrackerConfig],
     tmdb: TmdbId,
-    weights: &ScoringWeights,
+    engine: &Engine,
 ) -> Result<SearchOutcome, ClientError> {
     // Construção dos clients é síncrona e barata; falhas aqui são
     // bug de configuração (token mal-formado), abortar.
@@ -94,8 +103,17 @@ pub async fn run_search(
                     "tracker returned releases"
                 );
                 for release in releases {
-                    let score = score_release(&release, weights);
-                    scored.push(ScoredRelease { release, score });
+                    let outcome = engine.evaluate(&release);
+                    if outcome.rejected {
+                        debug!(
+                            target: "brarr_cli::search",
+                            id = %release.tracker_release_id,
+                            title = %release.title,
+                            "release rejected by rules engine"
+                        );
+                        continue;
+                    }
+                    scored.push(ScoredRelease { release, outcome });
                 }
             }
             Err(e) => {
@@ -112,8 +130,9 @@ pub async fn run_search(
 
     // Ordena por score desc, depois por seeders desc como tiebreaker.
     scored.sort_by(|a, b| {
-        b.score
-            .cmp(&a.score)
+        b.outcome
+            .score
+            .cmp(&a.outcome.score)
             .then_with(|| b.release.seeders.cmp(&a.release.seeders))
     });
 
@@ -147,11 +166,14 @@ pub fn format_outcome(outcome: &SearchOutcome, limit: usize) -> String {
             out,
             "{rank_idx:>2}. [{score:>4}] {title}",
             rank_idx = rank + 1,
-            score = sr.score.get(),
+            score = sr.outcome.score.get(),
             title = r.title,
         );
 
-        let flags = release_flags(r);
+        let mut flags = release_flags(r);
+        for tag in &sr.outcome.tags {
+            flags.push(tag.clone());
+        }
         let flags_str = if flags.is_empty() {
             "—".to_string()
         } else {
@@ -258,6 +280,8 @@ struct FailureJson {
 struct ReleaseJson {
     rank: usize,
     score: u32,
+    tags: Vec<String>,
+    matched_rules: Vec<String>,
     title: String,
     tracker: String,
     tracker_release_id: String,
@@ -310,7 +334,9 @@ impl ReleaseJson {
 
         Self {
             rank,
-            score: sr.score.get(),
+            score: sr.outcome.score.get(),
+            tags: sr.outcome.tags.clone(),
+            matched_rules: sr.outcome.matched_rules.clone(),
             title: r.title.clone(),
             tracker: r.tracker.name.clone(),
             tracker_release_id: r.tracker_release_id.clone(),
@@ -521,11 +547,17 @@ mod tests {
 
     use super::{ScoredRelease, SearchOutcome, format_outcome_json};
     use brarr_core::DecisionScore;
+    use brarr_decision_service::DecisionOutcome;
 
     fn scored(release: Release, score: u32) -> ScoredRelease {
         ScoredRelease {
             release,
-            score: DecisionScore::saturating(score),
+            outcome: DecisionOutcome {
+                score: DecisionScore::saturating(score),
+                tags: Vec::new(),
+                rejected: false,
+                matched_rules: Vec::new(),
+            },
         }
     }
 

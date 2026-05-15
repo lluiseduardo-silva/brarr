@@ -156,6 +156,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "brarr-core",
+ "brarr-decision-service",
  "brarr-tracker-unit3d",
  "clap",
  "directories",
@@ -182,6 +183,13 @@ dependencies = [
 [[package]]
 name = "brarr-decision-service"
 version = "0.1.0"
+dependencies = [
+ "brarr-core",
+ "serde",
+ "thiserror",
+ "toml",
+ "url",
+]
 
 [[package]]
 name = "brarr-mediainfo"

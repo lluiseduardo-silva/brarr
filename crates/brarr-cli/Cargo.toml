@@ -19,6 +19,7 @@ path = "src/lib.rs"
 [dependencies]
 anyhow = "1.0.102"
 brarr-core = { version = "0.1.0", path = "../brarr-core" }
+brarr-decision-service = { version = "0.1.0", path = "../brarr-decision-service" }
 brarr-tracker-unit3d = { version = "0.1.0", path = "../brarr-tracker-unit3d" }
 clap = { version = "4.6.1", features = ["derive"] }
 directories = "6.0.0"

@@ -12,7 +12,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use brarr_cli::{ScoringWeights, TrackerConfig, run_search};
+use brarr_cli::{Engine, TrackerConfig, run_search};
 use brarr_core::TmdbId;
 use url::Url;
 use wiremock::matchers::{header, method, path, query_param};
@@ -79,7 +79,7 @@ async fn search_aggregates_two_trackers_and_orders_by_score() {
     let outcome = run_search(
         &trackers,
         TmdbId::new(603).expect("valid"),
-        &ScoringWeights::default(),
+        &Engine::baseline(),
     )
     .await
     .expect("search ok");
@@ -91,10 +91,10 @@ async fn search_aggregates_two_trackers_and_orders_by_score() {
     let top = &outcome.scored[0];
     let second = &outcome.scored[1];
     assert!(
-        top.score >= second.score,
+        top.score() >= second.score(),
         "top score {} should be >= second {}",
-        top.score.get(),
-        second.score.get(),
+        top.score().get(),
+        second.score().get(),
     );
 
     // Shadow (2160p HDR + PT-BR audio) deve vencer Vnlls (1080p SDR
@@ -134,7 +134,7 @@ async fn tracker_failure_is_collected_not_fatal() {
     let outcome = run_search(
         &trackers,
         TmdbId::new(603).expect("valid"),
-        &ScoringWeights::default(),
+        &Engine::baseline(),
     )
     .await
     .expect("search ok overall");
@@ -157,7 +157,7 @@ async fn search_with_no_results_returns_empty_outcome() {
     let outcome = run_search(
         &trackers,
         TmdbId::new(1).expect("valid"),
-        &ScoringWeights::default(),
+        &Engine::baseline(),
     )
     .await
     .expect("search ok");
@@ -176,7 +176,7 @@ async fn format_outcome_includes_pt_br_flag_for_shadow_release() {
     let outcome = run_search(
         &trackers,
         TmdbId::new(603).expect("valid"),
-        &ScoringWeights::default(),
+        &Engine::baseline(),
     )
     .await
     .expect("search ok");

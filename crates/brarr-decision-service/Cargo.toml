@@ -8,6 +8,13 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+brarr-core = { version = "0.1.0", path = "../brarr-core" }
+serde = { version = "1.0.228", features = ["derive"] }
+thiserror = "2.0.18"
+toml = "1.1.2"
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+url = "2.5.8"
