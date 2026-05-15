@@ -1,0 +1,216 @@
+//! HTTP integration tests for the admin UI.
+//!
+//! Builds the Axum router against an in-memory SQLite, spawns it on a
+//! random local port, and exercises endpoints via real reqwest calls.
+//! Catches wiring bugs the unit tests miss: route matching, handler
+//! state, template rendering, HTMX form parsing.
+
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::similar_names,
+    clippy::doc_markdown
+)]
+
+use std::net::SocketAddr;
+use std::time::Duration;
+
+use brarr_decision_service::Engine;
+use brarr_orchestrator::{AppState, db, web};
+
+async fn spawn() -> (SocketAddr, AppState) {
+    let pool = db::open_memory().await.expect("open in-memory db");
+    let state = AppState::new(pool, Engine::baseline());
+    let static_dir = std::env::temp_dir().join("brarr-orchestrator-test-static");
+    let _ = tokio::fs::create_dir_all(&static_dir).await;
+    let router = web::router(state.clone(), &static_dir);
+
+    let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+    // Give the listener a beat to start accepting.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    (addr, state)
+}
+
+#[tokio::test]
+async fn healthz_returns_ok() {
+    let (addr, _state) = spawn().await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("http://{addr}/healthz"))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.text().await.unwrap(), "ok");
+}
+
+#[tokio::test]
+async fn dashboard_renders_with_zero_state() {
+    let (addr, _state) = spawn().await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("http://{addr}/"))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("Dashboard"));
+    assert!(body.contains("Trackers configurados"));
+    assert!(body.contains("Ainda não há buscas"));
+}
+
+#[tokio::test]
+async fn trackers_index_renders_empty_state() {
+    let (addr, _state) = spawn().await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("http://{addr}/trackers"))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("Adicionar tracker"));
+    assert!(body.contains("Nenhum tracker configurado"));
+}
+
+#[tokio::test]
+async fn create_then_delete_tracker_roundtrip() {
+    let (addr, _state) = spawn().await;
+    let client = reqwest::Client::new();
+
+    // POST /trackers form
+    let resp = client
+        .post(format!("http://{addr}/trackers"))
+        .form(&[
+            ("name", "capybara"),
+            ("base_url", "https://capybarabr.com/"),
+            ("api_token", "secret-token"),
+            ("kind", "unit3d"),
+        ])
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+    // Partial returned should contain the newly added tracker row.
+    assert!(body.contains("capybara"));
+    assert!(body.contains("https://capybarabr.com/"));
+
+    // GET /trackers should now show it.
+    let resp = client
+        .get(format!("http://{addr}/trackers"))
+        .send()
+        .await
+        .expect("send");
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("capybara"));
+
+    // Extract tracker id from the row's id attribute `tracker-<uuid>`.
+    let marker = "id=\"tracker-";
+    let pos = body.find(marker).expect("tracker row marker");
+    let rest = &body[pos + marker.len()..];
+    let end = rest.find('"').expect("closing quote");
+    let id = &rest[..end];
+
+    let resp = client
+        .delete(format!("http://{addr}/trackers/{id}"))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 200);
+
+    // After delete, list should be empty again.
+    let resp = client
+        .get(format!("http://{addr}/trackers"))
+        .send()
+        .await
+        .expect("send");
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("Nenhum tracker configurado"));
+}
+
+#[tokio::test]
+async fn invalid_tracker_id_returns_400() {
+    let (addr, _state) = spawn().await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .delete(format!("http://{addr}/trackers/not-a-uuid"))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 400);
+}
+
+#[tokio::test]
+async fn delete_unknown_tracker_returns_404() {
+    let (addr, _state) = spawn().await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .delete(format!(
+            "http://{addr}/trackers/00000000-0000-4000-8000-000000000000"
+        ))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 404);
+}
+
+#[tokio::test]
+async fn search_with_no_trackers_redirects_to_detail() {
+    let (addr, _state) = spawn().await;
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let resp = client
+        .post(format!("http://{addr}/searches"))
+        .form(&[("tmdb_id", "603")])
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 303);
+    let location = resp.headers().get("location").expect("location header");
+    assert!(location.to_str().unwrap().starts_with("/searches/"));
+    let hx_redirect = resp.headers().get("HX-Redirect").expect("hx-redirect");
+    assert!(hx_redirect.to_str().unwrap().starts_with("/searches/"));
+}
+
+#[tokio::test]
+async fn releases_index_renders_empty_state() {
+    let (addr, _state) = spawn().await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("http://{addr}/releases"))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("Histórico de decisões"));
+    assert!(body.contains("Ainda não há decisões"));
+}
+
+#[tokio::test]
+async fn invalid_base_url_in_form_returns_400() {
+    let (addr, _state) = spawn().await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{addr}/trackers"))
+        .form(&[
+            ("name", "bad"),
+            ("base_url", "not a url"),
+            ("api_token", "tok"),
+        ])
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 400);
+}

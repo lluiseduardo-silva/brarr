@@ -1,0 +1,36 @@
+<section id="trackers-list" class="bg-white rounded-lg shadow overflow-x-auto">
+    {% if trackers.is_empty() %}
+    <p class="p-4 text-slate-500 italic">Nenhum tracker configurado ainda.</p>
+    {% else %}
+    <table class="w-full text-sm">
+        <thead class="bg-slate-100 text-left">
+            <tr>
+                <th class="px-3 py-2">Nome</th>
+                <th class="px-3 py-2">Base URL</th>
+                <th class="px-3 py-2">Kind</th>
+                <th class="px-3 py-2">Criado em</th>
+                <th class="px-3 py-2"></th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for t in trackers %}
+            <tr class="border-t" id="tracker-{{ t.id }}">
+                <td class="px-3 py-2 font-medium">{{ t.name }}</td>
+                <td class="px-3 py-2"><a href="{{ t.base_url }}" class="text-blue-600 hover:underline" target="_blank" rel="noopener">{{ t.base_url }}</a></td>
+                <td class="px-3 py-2 text-xs uppercase tracking-wide">{{ t.kind }}</td>
+                <td class="px-3 py-2 font-mono text-xs">{{ t.created_at }}</td>
+                <td class="px-3 py-2 text-right">
+                    <button hx-delete="/trackers/{{ t.id }}"
+                            hx-target="#tracker-{{ t.id }}"
+                            hx-swap="outerHTML"
+                            hx-confirm="Remover este tracker?"
+                            class="text-red-600 hover:underline text-xs">
+                        remover
+                    </button>
+                </td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+</section>

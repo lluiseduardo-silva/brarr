@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}Trackers — brarr{% endblock %}
+{% block content %}
+<h1 class="text-2xl font-bold mb-4">Trackers</h1>
+
+<section class="bg-white rounded-lg shadow p-4 mb-6">
+    <h2 class="text-lg font-semibold mb-2">Adicionar tracker</h2>
+    <form hx-post="/trackers"
+          hx-target="#trackers-list"
+          hx-swap="outerHTML"
+          hx-on::after-request="this.reset()"
+          class="grid grid-cols-1 md:grid-cols-4 gap-3 items-end">
+        <label class="text-xs uppercase tracking-wide text-slate-500">
+            Nome
+            <input name="name" required class="w-full mt-1 border rounded px-2 py-1 text-sm" placeholder="capybara">
+        </label>
+        <label class="text-xs uppercase tracking-wide text-slate-500">
+            Base URL
+            <input name="base_url" required type="url" class="w-full mt-1 border rounded px-2 py-1 text-sm" placeholder="https://capybarabr.com/">
+        </label>
+        <label class="text-xs uppercase tracking-wide text-slate-500">
+            API token
+            <input name="api_token" required type="password" class="w-full mt-1 border rounded px-2 py-1 text-sm">
+        </label>
+        <button type="submit" class="bg-amber-500 hover:bg-amber-600 text-white text-sm font-semibold px-3 py-2 rounded">
+            Salvar
+        </button>
+    </form>
+</section>
+
+{% include "partials/trackers_list.html" %}
+
+{% endblock %}

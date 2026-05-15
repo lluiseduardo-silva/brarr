@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}Releases — brarr{% endblock %}
+{% block content %}
+<h1 class="text-2xl font-bold mb-4">Histórico de decisões</h1>
+
+{% if decisions.is_empty() %}
+<p class="text-slate-500 italic">Ainda não há decisões persistidas.</p>
+{% else %}
+<div class="bg-white rounded-lg shadow overflow-x-auto">
+    <table class="w-full text-sm">
+        <thead class="bg-slate-100 text-left">
+            <tr>
+                <th class="px-3 py-2">Score</th>
+                <th class="px-3 py-2">Tracker</th>
+                <th class="px-3 py-2">Release</th>
+                <th class="px-3 py-2">Tipo</th>
+                <th class="px-3 py-2">Resolução</th>
+                <th class="px-3 py-2">Tamanho</th>
+                <th class="px-3 py-2">Seeders</th>
+                <th class="px-3 py-2">Tags</th>
+                <th class="px-3 py-2">Status</th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for d in decisions %}
+            <tr class="border-t {% if d.rejected %}bg-red-50{% endif %}">
+                <td class="px-3 py-2 font-bold">{{ d.score }}</td>
+                <td class="px-3 py-2">{{ d.tracker_name }}</td>
+                <td class="px-3 py-2">{{ d.release_name }}</td>
+                <td class="px-3 py-2">{{ d.kind }}</td>
+                <td class="px-3 py-2">{{ d.resolution }}</td>
+                <td class="px-3 py-2 font-mono text-xs">{{ d.size_human }}</td>
+                <td class="px-3 py-2">{{ d.seeders }}</td>
+                <td class="px-3 py-2 text-xs">{{ d.tags }}</td>
+                <td class="px-3 py-2">
+                    {% if d.rejected %}
+                    <span class="badge bg-red-100 text-red-800">rejeitado</span>
+                    {% else %}
+                    <span class="badge bg-emerald-100 text-emerald-800">mantido</span>
+                    {% endif %}
+                </td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+{% endblock %}

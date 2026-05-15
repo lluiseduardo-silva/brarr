@@ -1,0 +1,96 @@
+{% extends "base.html" %}
+{% block title %}Dashboard — brarr{% endblock %}
+{% block content %}
+<h1 class="text-2xl font-bold mb-4">Dashboard</h1>
+
+<div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
+    <div class="bg-white rounded-lg shadow p-4">
+        <p class="text-xs uppercase tracking-wide text-slate-500">Trackers configurados</p>
+        <p class="text-3xl font-bold">{{ tracker_count }}</p>
+    </div>
+    <div class="bg-white rounded-lg shadow p-4">
+        <p class="text-xs uppercase tracking-wide text-slate-500">Buscas recentes</p>
+        <p class="text-3xl font-bold">{{ search_count }}</p>
+    </div>
+    <div class="bg-white rounded-lg shadow p-4">
+        <form hx-post="/searches" hx-swap="none" class="flex gap-2 items-end">
+            <div class="flex-1">
+                <label class="text-xs uppercase tracking-wide text-slate-500" for="tmdb_id">Nova busca por TMDb</label>
+                <input id="tmdb_id" name="tmdb_id" type="number" min="1" required
+                       class="w-full mt-1 border rounded px-2 py-1 text-sm" placeholder="ex. 603">
+            </div>
+            <button type="submit" class="bg-amber-500 hover:bg-amber-600 text-white text-sm font-semibold px-3 py-1 rounded">
+                Buscar
+            </button>
+        </form>
+    </div>
+</div>
+
+<section class="mb-8">
+    <h2 class="text-lg font-semibold mb-2">Buscas recentes</h2>
+    {% if recent_searches.is_empty() %}
+    <p class="text-slate-500 italic">Ainda não há buscas registradas.</p>
+    {% else %}
+    <div class="bg-white rounded-lg shadow overflow-x-auto">
+        <table class="w-full text-sm">
+            <thead class="bg-slate-100 text-left">
+                <tr>
+                    <th class="px-3 py-2">Quando</th>
+                    <th class="px-3 py-2">TMDb</th>
+                    <th class="px-3 py-2">Resultados</th>
+                    <th class="px-3 py-2">ID</th>
+                </tr>
+            </thead>
+            <tbody>
+            {% for s in recent_searches %}
+                <tr class="border-t">
+                    <td class="px-3 py-2 font-mono text-xs">{{ s.submitted_at }}</td>
+                    <td class="px-3 py-2">{{ s.tmdb_id }}</td>
+                    <td class="px-3 py-2">{{ s.result_count }}</td>
+                    <td class="px-3 py-2 font-mono text-xs">
+                        <a class="text-blue-600 hover:underline" href="/searches/{{ s.id }}">{{ s.id }}</a>
+                    </td>
+                </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+</section>
+
+<section>
+    <h2 class="text-lg font-semibold mb-2">Decisões recentes</h2>
+    {% if recent_decisions.is_empty() %}
+    <p class="text-slate-500 italic">Ainda não há decisões persistidas.</p>
+    {% else %}
+    <div class="bg-white rounded-lg shadow overflow-x-auto">
+        <table class="w-full text-sm">
+            <thead class="bg-slate-100 text-left">
+                <tr>
+                    <th class="px-3 py-2">Score</th>
+                    <th class="px-3 py-2">Tracker</th>
+                    <th class="px-3 py-2">Release</th>
+                    <th class="px-3 py-2">Resolução</th>
+                    <th class="px-3 py-2">Tamanho</th>
+                    <th class="px-3 py-2">Seeders</th>
+                    <th class="px-3 py-2">Tags</th>
+                </tr>
+            </thead>
+            <tbody>
+            {% for d in recent_decisions %}
+                <tr class="border-t">
+                    <td class="px-3 py-2 font-bold">{{ d.score }}</td>
+                    <td class="px-3 py-2">{{ d.tracker_name }}</td>
+                    <td class="px-3 py-2">{{ d.release_name }}</td>
+                    <td class="px-3 py-2">{{ d.resolution }}</td>
+                    <td class="px-3 py-2 font-mono text-xs">{{ d.size_human }}</td>
+                    <td class="px-3 py-2">{{ d.seeders }}</td>
+                    <td class="px-3 py-2 text-xs">{{ d.tags }}</td>
+                </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+</section>
+{% endblock %}
