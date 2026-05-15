@@ -13,8 +13,10 @@
 use std::fs;
 use std::path::PathBuf;
 
+use std::time::Duration;
+
 use brarr_core::{Language, TmdbId, TrackerSource};
-use brarr_tracker_unit3d::Unit3dClient;
+use brarr_tracker_unit3d::{RetryConfig, Unit3dClient};
 use url::Url;
 use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -118,6 +120,56 @@ async fn search_returns_empty_vec_when_envelope_is_empty() {
         .await
         .expect("empty search");
     assert!(releases.is_empty());
+}
+
+#[tokio::test]
+async fn search_retries_on_5xx_then_succeeds() {
+    let server = MockServer::start().await;
+    let body = wrap_as_filter_response(&fixture("shadow.json"));
+
+    // Primeira chamada: 503 (transient). Subsequente: 200 com body válido.
+    Mock::given(method("GET"))
+        .and(path("/api/torrents/filter"))
+        .respond_with(ResponseTemplate::new(503))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/torrents/filter"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(body))
+        .mount(&server)
+        .await;
+
+    let client = client_for(&server, "mock").with_retry(RetryConfig {
+        max_attempts: 3,
+        base_delay: Duration::from_millis(0),
+    });
+    let releases = client
+        .search_by_tmdb(TmdbId::new(603).expect("valid"))
+        .await
+        .expect("retry should recover");
+    assert_eq!(releases.len(), 1);
+}
+
+#[tokio::test]
+async fn search_does_not_retry_on_4xx() {
+    let server = MockServer::start().await;
+    // 401 (auth) é permanente — não retentar. expect(1) garante isso.
+    Mock::given(method("GET"))
+        .and(path("/api/torrents/filter"))
+        .respond_with(ResponseTemplate::new(401))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = client_for(&server, "mock").with_retry(RetryConfig {
+        max_attempts: 3,
+        base_delay: Duration::from_millis(0),
+    });
+    let result = client
+        .search_by_tmdb(TmdbId::new(603).expect("valid"))
+        .await;
+    assert!(result.is_err());
 }
 
 #[tokio::test]

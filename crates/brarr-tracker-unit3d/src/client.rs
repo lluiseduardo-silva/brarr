@@ -8,6 +8,7 @@ use url::Url;
 
 use crate::dto::{Envelope, Unit3dTorrent};
 use crate::error::ClientError;
+use crate::retry::{RetryConfig, run_with_retry};
 
 /// Default timeout para qualquer request feito pelo cliente.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -26,11 +27,13 @@ pub struct Unit3dClient {
     http: Client,
     base_url: Url,
     tracker: TrackerSource,
+    retry: RetryConfig,
 }
 
 impl Unit3dClient {
     /// Constrói um cliente. Configura o header `Authorization: Bearer <token>`
-    /// e um timeout default de 30s.
+    /// e um timeout default de 30s. Aplica [`RetryConfig::default`] em
+    /// chamadas de busca; use [`Self::with_retry`] para customizar.
     ///
     /// # Errors
     ///
@@ -60,17 +63,37 @@ impl Unit3dClient {
             http,
             base_url,
             tracker,
+            retry: RetryConfig::default(),
         })
+    }
+
+    /// Substitui a política de retry. Útil em testes (`RetryConfig::disabled()`
+    /// para não esperar entre as tentativas) ou para configurar mais
+    /// tentativas em ambientes flakey.
+    #[must_use]
+    pub const fn with_retry(mut self, retry: RetryConfig) -> Self {
+        self.retry = retry;
+        self
     }
 
     /// Endpoint `GET /api/torrents/filter?tmdbId=<id>` — retorna a lista
     /// de releases que combinam com o ID TMDB no tracker.
+    ///
+    /// Aplica [`RetryConfig`] em falhas transientes (timeout, 5xx,
+    /// JSON truncado).
     ///
     /// # Errors
     ///
     /// Veja [`ClientError`] — qualquer falha de rede, status
     /// `4xx`/`5xx`, JSON malformado, ou conversão DTO inválida propaga aqui.
     pub async fn search_by_tmdb(&self, tmdb: TmdbId) -> Result<Vec<Release>, ClientError> {
+        run_with_retry(self.retry, "search_by_tmdb", || {
+            self.search_by_tmdb_once(tmdb)
+        })
+        .await
+    }
+
+    async fn search_by_tmdb_once(&self, tmdb: TmdbId) -> Result<Vec<Release>, ClientError> {
         let url = self.base_url.join("api/torrents/filter")?;
         let resp = self
             .http
@@ -112,6 +135,10 @@ impl Unit3dClient {
     ///
     /// Veja [`ClientError`].
     pub async fn get_torrent(&self, id: &str) -> Result<Release, ClientError> {
+        run_with_retry(self.retry, "get_torrent", || self.get_torrent_once(id)).await
+    }
+
+    async fn get_torrent_once(&self, id: &str) -> Result<Release, ClientError> {
         let url = self.base_url.join(&format!("api/torrents/{id}"))?;
         let body = self
             .http

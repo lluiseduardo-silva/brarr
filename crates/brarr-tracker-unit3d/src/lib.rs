@@ -51,7 +51,9 @@ mod client;
 mod convert;
 mod dto;
 mod error;
+mod retry;
 
 pub use client::Unit3dClient;
 pub use convert::ConversionError;
 pub use error::ClientError;
+pub use retry::RetryConfig;
