@@ -1,0 +1,14 @@
+# clippy.toml — knobs do clippy.
+#
+# Os *níveis* dos lints (warn/deny/allow) vivem em [workspace.lints.clippy]
+# no Cargo.toml raiz. Aqui ficam apenas os parâmetros configuráveis de
+# alguns lints específicos.
+
+# Limites de complexidade — alinhados com o objetivo de manter funções
+# legíveis num projeto pedagógico.
+cognitive-complexity-threshold = 25
+too-many-arguments-threshold = 6
+type-complexity-threshold = 250
+
+# MSRV usado pelo clippy para sugerir só APIs disponíveis.
+msrv = "1.85.0"

@@ -1,0 +1,26 @@
+# Cargo build output
+/target
+**/*.rs.bk
+
+# Runtime data
+*.log
+*.pid
+
+# Local config / segredos (tokens de tracker, etc.)
+.env
+.env.*
+!.env.example
+config.local.toml
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Coverage / profiling
+*.profraw
+*.profdata
+tarpaulin-report.html
+cobertura.xml

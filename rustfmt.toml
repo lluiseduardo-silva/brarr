@@ -1,0 +1,5 @@
+# rustfmt config — comportamento padrão da comunidade Rust.
+# Mantemos a config explícita só para travar a edition e a largura de linha
+# (a default do rustfmt já é 100, mas é bom deixar declarado).
+edition = "2024"
+max_width = 100
