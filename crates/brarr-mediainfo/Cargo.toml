@@ -8,6 +8,7 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+thiserror = "2.0.18"
 
 [lints]
 workspace = true

@@ -1,0 +1,121 @@
+General
+Unique ID                                : 297094684719333395808144091055599573856 (0xDF825ADEC8E2D44BEE2F12AD11D2DB60)
+Complete name                            : Matrix.1999.2160p.HMAX.WEB-DL.DDP5.1.Atmos.HDR.x265.DUAL-sh4down.mkv
+Format                                   : Matroska
+Format version                           : Version 4
+File size                                : 18.1 GiB
+Duration                                 : 2 h 16 min
+Overall bit rate                         : 19.0 Mb/s
+Frame rate                               : 23.976 FPS
+Encoded date                             : 2023-03-22 18:28:07 UTC
+Writing application                      : mkvmerge v68.0.0 ('sh4down') 64-bit
+Writing library                          : libebml v1.4.2 + libmatroska v1.6.4
+
+Video
+ID                                       : 1
+Format                                   : HEVC
+Format/Info                              : High Efficiency Video Coding
+Format profile                           : Main 10@L5@Main
+HDR format                               : SMPTE ST 2086, HDR10 compatible
+Codec ID                                 : V_MPEGH/ISO/HEVC
+Duration                                 : 2 h 16 min
+Bit rate                                 : 17.9 Mb/s
+Width                                    : 3 840 pixels
+Height                                   : 2 160 pixels
+Display aspect ratio                     : 16:9
+Frame rate mode                          : Constant
+Frame rate                               : 23.976 (24000/1001) FPS
+Color space                              : YUV
+Chroma subsampling                       : 4:2:0
+Bit depth                                : 10 bits
+Bits/(Pixel*Frame)                       : 0.090
+Stream size                              : 17.1 GiB (95%)
+Writing library                          : x265 3.4hy:[Linux][GCC 7.5.0][64 bit] 10bit
+Encoding settings                        : cpuid=1111039 / frame-threads=1 / wpp / no-pmode / no-pme / no-psnr / no-ssim / log-level=2 / input-csp=1 / input-res=3840x2160 / interlace=0 / total-frames=0 / level-idc=0 / high-tier=1 / uhd-bd=0 / ref=4 / no-allow-non-conformance / repeat-headers / annexb / no-aud / no-hrd / info / hash=0 / no-temporal-layers / no-open-gop / min-keyint=96 / keyint=96 / gop-lookahead=0 / bframes=3 / b-adapt=2 / b-pyramid / bframe-bias=0 / rc-lookahead=25 / lookahead-slices=4 / scenecut=40 / hist-scenecut=0 / radl=0 / no-splice / no-intra-refresh / ctu=64 / min-cu-size=8 / rect / no-amp / max-tu-size=32 / tu-inter-depth=1 / tu-intra-depth=1 / limit-tu=0 / rdoq-level=2 / dynamic-rd=0.00 / no-ssim-rd / signhide / no-tskip / nr-intra=0 / nr-inter=0 / no-constrained-intra / strong-intra-smoothing / max-merge=3 / limit-refs=3 / limit-modes / me=3 / subme=3 / merange=57 / temporal-mvp / no-frame-dup / no-hme / weightp / no-weightb / no-analyze-src-pics / deblock=0:0 / sao / no-sao-non-deblock / rd=4 / selective-sao=4 / no-early-skip / rskip / no-fast-intra / no-tskip-fast / no-cu-lossless / no-b-intra / no-splitrd-skip / rdpenalty=0 / psy-rd=2.00 / psy-rdoq=1.00 / no-rd-refine / no-lossless / cbqpoffs=0 / crqpoffs=0 / rc=abr / bitrate=18000 / qcomp=0.60 / qpstep=4 / stats-write=0 / stats-read=2 / cplxblur=20.0 / qblur=0.5 / vbv-maxrate=24500 / vbv-bufsize=24500 / vbv-init=0.6 / vbv-end=0.6 / vbv-end-fr-adj=0.0 / ipratio=1.40 / pbratio=1.30 / aq-mode=2 / aq-strength=1.00 / cutree / zone-count=0 / no-strict-cbr / qg-size=32 / no-rc-grain / qpmax=69 / qpmin=0 / no-const-vbv / sar=0 / overscan=0 / videoformat=5 / range=0 / colorprim=9 / transfer=16 / colormatrix=9 / chromaloc=0 / display-window=0 / master-display=G(8500,39850)B(6550,2300)R(35400,14600)WP(15635,16450)L(10000000,20) / cll=992,518 / min-luma=0 / max-luma=1023 / log2-max-poc-lsb=8 / vui-timing-info / vui-hrd-info / no-concatenation / slices=1 / no-opt-qp-pps / no-opt-ref-list-length-pps / no-multi-pass-opt-rps / scenecut-bias=0.05 / hist-threshold=0.01 / no-opt-cu-delta-qp / no-aq-motion / hdr10 / no-hdr10-opt / no-dhdr10-opt / no-idr-recovery-sei / analysis-reuse-level=0 / analysis-save-reuse-level=0 / analysis-load-reuse-level=0 / scale-factor=0 / refine-intra=0 / refine-inter=0 / refine-mv=1 / refine-ctu-distortion=0 / no-limit-sao / ctu-info=0 / no-lowpass-dct / refine-analysis-type=0 / copy-pic=1 / max-ausize-factor=1.0 / no-dynamic-refine / no-single-sei / no-hevc-aq / no-svt / no-field / qp-adaptation-range=1.00 / no-scenecut-aware-qpconformance-window-offsets / right=0 / bottom=0 / decoder-max-rate=0
+Default                                  : Yes
+Forced                                   : No
+Color range                              : Limited
+Color primaries                          : BT.2020
+Transfer characteristics                 : PQ
+Matrix coefficients                      : BT.2020 non-constant
+Mastering display color primaries        : BT.2020
+Mastering display luminance              : min: 0.0020 cd/m2, max: 1000 cd/m2
+Maximum Content Light Level              : 992 cd/m2
+Maximum Frame-Average Light Level        : 518 cd/m2
+
+Audio #1
+ID                                       : 2
+Format                                   : E-AC-3
+Format/Info                              : Enhanced AC-3
+Commercial name                          : Dolby Digital Plus
+Codec ID                                 : A_EAC3
+Duration                                 : 2 h 16 min
+Bit rate mode                            : Constant
+Bit rate                                 : 256 kb/s
+Channel(s)                               : 2 channels
+Channel layout                           : L R
+Sampling rate                            : 48.0 kHz
+Frame rate                               : 31.250 FPS (1536 SPF)
+Compression mode                         : Lossy
+Stream size                              : 250 MiB (1%)
+Title                                    : Brazilian Portuguese
+Language                                 : Portuguese
+Service kind                             : Complete Main
+Default                                  : Yes
+Forced                                   : No
+
+Audio #2
+ID                                       : 3
+Format                                   : E-AC-3 JOC
+Format/Info                              : Enhanced AC-3 with Joint Object Coding
+Commercial name                          : Dolby Digital Plus with Dolby Atmos
+Codec ID                                 : A_EAC3
+Duration                                 : 2 h 16 min
+Bit rate mode                            : Constant
+Bit rate                                 : 768 kb/s
+Channel(s)                               : 6 channels
+Channel layout                           : L R C LFE Ls Rs
+Sampling rate                            : 48.0 kHz
+Frame rate                               : 31.250 FPS (1536 SPF)
+Compression mode                         : Lossy
+Stream size                              : 749 MiB (4%)
+Title                                    : English
+Language                                 : English
+Service kind                             : Complete Main
+Default                                  : No
+Forced                                   : No
+Complexity index                         : 16
+Number of dynamic objects                : 15
+Bed channel count                        : 1 channel
+Bed channel configuration                : LFE
+
+Text #1
+ID                                       : 4
+Format                                   : UTF-8
+Codec ID                                 : S_TEXT/UTF8
+Codec ID/Info                            : UTF-8 Plain Text
+Duration                                 : 2 h 7 min
+Bit rate                                 : 0 b/s
+Frame rate                               : 0.003 FPS
+Count of elements                        : 20
+Stream size                              : 405 Bytes (0%)
+Title                                    : Forced
+Language                                 : Portuguese
+Default                                  : No
+Forced                                   : Yes
+
+Text #2
+ID                                       : 5
+Format                                   : UTF-8
+Codec ID                                 : S_TEXT/UTF8
+Codec ID/Info                            : UTF-8 Plain Text
+Duration                                 : 2 h 7 min
+Bit rate                                 : 41 b/s
+Frame rate                               : 0.170 FPS
+Count of elements                        : 1302
+Stream size                              : 38.4 KiB (0%)
+Language                                 : Portuguese
+Default                                  : No
+Forced                                   : No
+
+ReportBy                                 : MediaInfoLib - v23.10

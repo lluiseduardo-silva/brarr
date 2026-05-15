@@ -1,0 +1,14 @@
+# Default: deixar o Git auto-detectar texto e armazenar com LF no index.
+# Convertido pra LF no checkout cross-plataforma para evitar pegadinhas
+# em diffs e em testes que dependem de byte-exact content.
+* text=auto eol=lf
+
+# Fixtures de teste preservam line endings reais (CRLF do UNIT3D/Windows
+# vs LF do Unix) — o parser MediaInfo precisa exercitar os dois caminhos.
+# Tratar como binário garante que `git add` / checkout não normalize.
+crates/brarr-mediainfo/tests/fixtures/** binary
+
+# JSON capturado de API: preservar como veio do servidor (CRLF é comum
+# em respostas PHP/Laravel-style das UNIT3D builds que servem `\r\n`
+# dentro do campo `media_info`).
+docs/requests-response-examples/*.json -text
