@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use anyhow::{Context, Result};
-use brarr_cli::{Cli, Command, Config, ScoringWeights, SearchArgs, run_search};
+use brarr_cli::{Cli, Command, Config, OutputFormat, ScoringWeights, SearchArgs, run_search};
 use brarr_core::TmdbId;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
@@ -82,7 +82,11 @@ fn dispatch_search(config: &Config, args: &SearchArgs) -> Result<()> {
         ))
         .context("running search across trackers")?;
 
-    let rendered = brarr_cli::search::format_outcome(&outcome, args.limit);
+    let rendered = match args.format {
+        OutputFormat::Text => brarr_cli::format_outcome(&outcome, args.limit),
+        OutputFormat::Json => brarr_cli::format_outcome_json(&outcome, args.limit)
+            .context("serializing search outcome to JSON")?,
+    };
     // Stdout é a saída user-facing oficial da CLI. O lint `print_stdout`
     // existe pra impedir uso acidental em código de lib/serviço — aqui
     // é deliberado.
@@ -91,7 +95,10 @@ fn dispatch_search(config: &Config, args: &SearchArgs) -> Result<()> {
         reason = "CLI user-facing output goes to stdout by design"
     )]
     {
-        print!("{rendered}");
+        match args.format {
+            OutputFormat::Text => print!("{rendered}"),
+            OutputFormat::Json => println!("{rendered}"),
+        }
     }
 
     if outcome.scored.is_empty() && !outcome.failures.is_empty() {

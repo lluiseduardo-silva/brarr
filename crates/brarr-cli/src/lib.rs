@@ -17,7 +17,7 @@ pub mod config;
 pub mod scoring;
 pub mod search;
 
-pub use cli::{Cli, Command, SearchArgs};
+pub use cli::{Cli, Command, OutputFormat, SearchArgs};
 pub use config::{Config, ConfigError, TrackerConfig};
 pub use scoring::{ScoringWeights, score_release};
-pub use search::{ScoredRelease, SearchOutcome, run_search};
+pub use search::{ScoredRelease, SearchOutcome, format_outcome, format_outcome_json, run_search};

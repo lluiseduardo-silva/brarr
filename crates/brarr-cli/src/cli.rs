@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 /// Brarr — agregador de busca em trackers `UNIT3D` com foco em PT-BR.
 #[derive(Debug, Parser)]
@@ -42,6 +42,23 @@ pub struct SearchArgs {
     /// Quantos releases mostrar, ordenados por score (decrescente).
     #[arg(long, default_value_t = 10)]
     pub limit: usize,
+
+    /// Formato de saída.
+    ///
+    /// - `text` (default): tabela humana com flags PT/HDR.
+    /// - `json`: objeto JSON em uma só linha, útil para pipe em `jq` ou
+    ///   integração com outras ferramentas.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    pub format: OutputFormat,
+}
+
+/// Formato escolhido para `brarr search`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum OutputFormat {
+    /// Saída legível em texto plano.
+    Text,
+    /// Saída JSON, uma linha, pronta para pipe.
+    Json,
 }
 
 impl Cli {
@@ -71,10 +88,19 @@ mod tests {
             Command::Search(args) => {
                 assert_eq!(args.tmdb, 603);
                 assert_eq!(args.limit, 10);
+                assert_eq!(args.format, super::OutputFormat::Text);
             }
         }
         assert_eq!(cli.verbose, 0);
         assert!(cli.config.is_none());
+    }
+
+    #[test]
+    fn parses_search_with_json_format() {
+        let cli = Cli::try_parse_from(["brarr", "search", "--tmdb", "603", "--format", "json"])
+            .expect("valid args");
+        let Command::Search(args) = cli.command;
+        assert_eq!(args.format, super::OutputFormat::Json);
     }
 
     #[test]
@@ -111,7 +137,11 @@ mod tests {
         let make = |v: u8| Cli {
             config: None,
             verbose: v,
-            command: Command::Search(super::SearchArgs { tmdb: 1, limit: 1 }),
+            command: Command::Search(super::SearchArgs {
+                tmdb: 1,
+                limit: 1,
+                format: super::OutputFormat::Text,
+            }),
         };
         assert!(make(0).log_directive().contains("warn"));
         assert!(make(1).log_directive().contains("info"));

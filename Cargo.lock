@@ -161,6 +161,7 @@ dependencies = [
  "directories",
  "futures",
  "serde",
+ "serde_json",
  "thiserror",
  "tokio",
  "toml",
