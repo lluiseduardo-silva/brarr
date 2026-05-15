@@ -397,6 +397,7 @@ dependencies = [
  "axum",
  "brarr-core",
  "brarr-decision-service",
+ "brarr-plugin-host",
  "brarr-tracker-unit3d",
  "futures",
  "prost",
@@ -418,6 +419,8 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
+ "wasmtime",
+ "wat",
 ]
 
 [[package]]

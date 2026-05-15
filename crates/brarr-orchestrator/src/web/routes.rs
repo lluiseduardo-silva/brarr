@@ -116,6 +116,11 @@ struct CreateTrackerForm {
     api_token: String,
     #[serde(default)]
     kind: Option<String>,
+    /// Optional filesystem path to a `.wasm`/`.wat` plugin module.
+    /// When supplied, this tracker is served by the WASM plugin host
+    /// instead of the built-in UNIT3D client.
+    #[serde(default)]
+    plugin_path: Option<String>,
 }
 
 async fn trackers_create(
@@ -124,18 +129,33 @@ async fn trackers_create(
 ) -> Result<Response, AppError> {
     let url = url::Url::parse(form.base_url.trim())
         .map_err(|e| AppError::InvalidInput(format!("invalid base_url: {e}")))?;
+    let plugin_path_buf: Option<std::path::PathBuf> = form
+        .plugin_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from);
     let kind = form
         .kind
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .unwrap_or("unit3d");
+        .unwrap_or_else(|| {
+            if plugin_path_buf.is_some() {
+                "plugin"
+            } else {
+                "unit3d"
+            }
+        });
     trackers::insert(
         state.pool(),
-        form.name.trim(),
-        &url,
-        form.api_token.trim(),
-        kind,
+        trackers::NewTracker {
+            name: form.name.trim(),
+            base_url: &url,
+            api_token: form.api_token.trim(),
+            kind,
+            plugin_path: plugin_path_buf.as_deref(),
+        },
     )
     .await?;
 

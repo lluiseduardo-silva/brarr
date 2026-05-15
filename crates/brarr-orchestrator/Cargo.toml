@@ -20,6 +20,7 @@ askama = "0.14.0"
 axum = { version = "0.8.9", default-features = false, features = ["macros", "http1", "tokio", "json", "query", "tracing", "form"] }
 brarr-core = { version = "0.1.0", path = "../brarr-core" }
 brarr-decision-service = { version = "0.1.0", path = "../brarr-decision-service" }
+brarr-plugin-host = { version = "0.1.0", path = "../brarr-plugin-host" }
 brarr-tracker-unit3d = { version = "0.1.0", path = "../brarr-tracker-unit3d" }
 futures = "0.3.32"
 prost = "0.14.3"
@@ -37,6 +38,7 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 url = { version = "2.5.8", features = ["serde"] }
 uuid = { version = "1.23.1", features = ["v4", "serde"] }
+wasmtime = { version = "34.0.2", default-features = false, features = ["cranelift", "parallel-compilation", "runtime", "cache", "wat"] }
 
 [lints]
 workspace = true
@@ -48,3 +50,4 @@ tonic-prost-build = "0.14.5"
 
 [dev-dependencies]
 reqwest = { version = "0.13.3", default-features = false, features = ["default-tls", "form", "json"] }
+wat = "1.249.0"

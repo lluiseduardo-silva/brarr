@@ -9,7 +9,7 @@
           hx-target="#trackers-list"
           hx-swap="outerHTML"
           hx-on::after-request="this.reset()"
-          class="grid grid-cols-1 md:grid-cols-4 gap-3 items-end">
+          class="grid grid-cols-1 md:grid-cols-5 gap-3 items-end">
         <label class="text-xs uppercase tracking-wide text-slate-500">
             Nome
             <input name="name" required class="w-full mt-1 border rounded px-2 py-1 text-sm" placeholder="capybara">
@@ -20,12 +20,19 @@
         </label>
         <label class="text-xs uppercase tracking-wide text-slate-500">
             API token
-            <input name="api_token" required type="password" class="w-full mt-1 border rounded px-2 py-1 text-sm">
+            <input name="api_token" type="password" class="w-full mt-1 border rounded px-2 py-1 text-sm">
+        </label>
+        <label class="text-xs uppercase tracking-wide text-slate-500">
+            Plugin .wasm (opcional)
+            <input name="plugin_path" class="w-full mt-1 border rounded px-2 py-1 text-sm" placeholder="/plugins/custom.wasm">
         </label>
         <button type="submit" class="bg-amber-500 hover:bg-amber-600 text-white text-sm font-semibold px-3 py-2 rounded">
             Salvar
         </button>
     </form>
+    <p class="text-xs text-slate-500 mt-2">
+        Sem plugin path → UNIT3D direto. Com path → módulo WASM carregado a cada busca (ABI v1 do <code>brarr-plugin-host</code>).
+    </p>
 </section>
 
 {% include "partials/trackers_list.html" %}

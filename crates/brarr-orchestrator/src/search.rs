@@ -2,15 +2,28 @@
 //! each release through the rules engine, persist the run, and return
 //! the structured outcome.
 //!
-//! Conceptually identical to `brarr_cli::search::run_search`, but the
-//! tracker list comes from SQLite (not TOML), and every step writes
-//! through to the database so the admin UI can replay history.
+//! Fan-out goes through the [`brarr_core::TrackerProvider`] trait, so
+//! direct UNIT3D HTTP clients and WASM-loaded plugins live in the same
+//! pipeline. The provider for each tracker row is built lazily inside
+//! the per-tracker future:
+//!
+//! - `plugin_path == None`     → [`brarr_tracker_unit3d::Unit3dClient`]
+//! - `plugin_path == Some(p)`  → [`brarr_plugin_host::WasmTrackerProvider`]
+//!
+//! A single `wasmtime::Engine` lives in [`AppState`] and is reused for
+//! every plugin instantiation — cranelift initialization is the
+//! expensive part; per-`Module` compilation is cheap.
 
-use brarr_core::{Release, TmdbId, TrackerSource};
+use std::path::Path;
+use std::sync::Arc;
+
+use brarr_core::{Release, TmdbId, TrackerProvider, TrackerSource};
+use brarr_plugin_host::{PluginConfig, WasmTrackerProvider};
 use brarr_tracker_unit3d::Unit3dClient;
 use futures::future::join_all;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
+use wasmtime::Engine as WasmEngine;
 
 use crate::db::{
     decisions,
@@ -43,8 +56,8 @@ pub struct SearchRunOutcome {
 ///
 /// Surfaces [`AppError::Database`] if the search row cannot be created
 /// or a decision row cannot be persisted. Tracker-level errors (HTTP
-/// timeout, decode failure, etc.) are **not** fatal — they collect in
-/// `SearchRunOutcome::failures`.
+/// timeout, decode failure, plugin trap, etc.) are **not** fatal —
+/// they collect in [`SearchRunOutcome::failures`].
 pub async fn run_tmdb_search(state: &AppState, tmdb: TmdbId) -> Result<SearchRunOutcome, AppError> {
     let pool = state.pool();
     let engine = state.engine();
@@ -75,7 +88,7 @@ pub async fn run_tmdb_search(state: &AppState, tmdb: TmdbId) -> Result<SearchRun
         });
     }
 
-    let per_tracker = fan_out(&trackers, tmdb).await;
+    let per_tracker = fan_out(state.wasm_engine(), &trackers, tmdb).await;
 
     let mut decisions_out = Vec::new();
     let mut failures = Vec::new();
@@ -140,22 +153,53 @@ pub async fn run_tmdb_search(state: &AppState, tmdb: TmdbId) -> Result<SearchRun
 }
 
 async fn fan_out(
+    wasm_engine: &WasmEngine,
     trackers: &[TrackerRow],
     tmdb: TmdbId,
 ) -> Vec<(TrackerRow, Result<Vec<Release>, String>)> {
-    let futures = trackers.iter().cloned().map(|tr| async move {
-        let source = match TrackerSource::new(tr.name.clone(), tr.base_url.clone()) {
-            Ok(s) => s,
-            Err(e) => return (tr, Err(format!("invalid tracker source: {e}"))),
-        };
-        let client = match Unit3dClient::new(source, &tr.api_token) {
-            Ok(c) => c,
-            Err(e) => return (tr, Err(e.to_string())),
-        };
-        let result = client.search_by_tmdb(tmdb).await.map_err(|e| e.to_string());
-        (tr, result)
+    let wasm_engine = wasm_engine.clone();
+    let futures = trackers.iter().cloned().map(|tr| {
+        let wasm_engine = wasm_engine.clone();
+        async move {
+            let provider = match build_provider(&wasm_engine, &tr) {
+                Ok(p) => p,
+                Err(e) => return (tr, Err(e)),
+            };
+            let result = provider
+                .search_by_tmdb(tmdb)
+                .await
+                .map_err(|e| e.to_string());
+            (tr, result)
+        }
     });
     join_all(futures).await
+}
+
+/// Build a `TrackerProvider` for `tr`. UNIT3D rows return a
+/// [`Unit3dClient`] wrapper; rows with `plugin_path` return a
+/// [`WasmTrackerProvider`] compiled against `wasm_engine`.
+fn build_provider(
+    wasm_engine: &WasmEngine,
+    tr: &TrackerRow,
+) -> Result<Arc<dyn TrackerProvider>, String> {
+    let source = TrackerSource::new(tr.name.clone(), tr.base_url.clone())
+        .map_err(|e| format!("invalid tracker source: {e}"))?;
+
+    if let Some(path) = tr.plugin_path.as_deref() {
+        let bytes =
+            read_plugin_bytes(path).map_err(|e| format!("read plugin {}: {e}", path.display()))?;
+        let provider =
+            WasmTrackerProvider::load_with_engine(wasm_engine, &bytes, PluginConfig::new(source))
+                .map_err(|e| format!("load plugin {}: {e}", path.display()))?;
+        Ok(Arc::new(provider))
+    } else {
+        let client = Unit3dClient::new(source, &tr.api_token).map_err(|e| e.to_string())?;
+        Ok(Arc::new(client))
+    }
+}
+
+fn read_plugin_bytes(path: &Path) -> std::io::Result<Vec<u8>> {
+    std::fs::read(path)
 }
 
 fn build_insert(
@@ -185,25 +229,12 @@ fn build_insert(
     }
 }
 
-/// Stand-alone helper that mirrors [`fan_out`] for tests that want to
-/// exercise the persistence path without spinning up real trackers.
-/// Not public outside the crate.
-#[cfg(test)]
-mod test_helpers {
-    use crate::AppState;
-    use crate::db::Pool;
-    use brarr_decision_service::Engine;
-
-    pub fn state_with(pool: Pool, engine: Engine) -> AppState {
-        AppState::new(pool, engine)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-    use super::{run_tmdb_search, test_helpers};
+    use super::run_tmdb_search;
+    use crate::AppState;
     use crate::db::open_memory;
     use brarr_core::TmdbId;
     use brarr_decision_service::Engine;
@@ -211,7 +242,7 @@ mod tests {
     #[tokio::test]
     async fn search_with_no_trackers_returns_empty_outcome() {
         let pool = open_memory().await.unwrap();
-        let state = test_helpers::state_with(pool, Engine::baseline());
+        let state = AppState::new(pool, Engine::baseline());
         let outcome = run_tmdb_search(&state, TmdbId::new(603).unwrap())
             .await
             .unwrap();
