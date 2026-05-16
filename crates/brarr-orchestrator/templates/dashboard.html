@@ -5,8 +5,8 @@
 
 <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
     <div class="bg-white rounded-lg shadow p-4">
-        <p class="text-xs uppercase tracking-wide text-slate-500">Trackers configurados</p>
-        <p class="text-3xl font-bold">{{ tracker_count }}</p>
+        <p class="text-xs uppercase tracking-wide text-slate-500">Providers configurados</p>
+        <p class="text-3xl font-bold">{{ provider_count }}</p>
     </div>
     <div class="bg-white rounded-lg shadow p-4">
         <p class="text-xs uppercase tracking-wide text-slate-500">Buscas recentes</p>
@@ -68,7 +68,7 @@
             <thead class="bg-slate-100 text-left">
                 <tr>
                     <th class="px-3 py-2">Score</th>
-                    <th class="px-3 py-2">Tracker</th>
+                    <th class="px-3 py-2">Provider</th>
                     <th class="px-3 py-2">Release</th>
                     <th class="px-3 py-2">Resolução</th>
                     <th class="px-3 py-2">Tamanho</th>
@@ -80,7 +80,7 @@
             {% for d in recent_decisions %}
                 <tr class="border-t">
                     <td class="px-3 py-2 font-bold">{{ d.score }}</td>
-                    <td class="px-3 py-2">{{ d.tracker_name }}</td>
+                    <td class="px-3 py-2">{{ d.provider_name }}</td>
                     <td class="px-3 py-2">{{ d.release_name }}</td>
                     <td class="px-3 py-2">{{ d.resolution }}</td>
                     <td class="px-3 py-2 font-mono text-xs">{{ d.size_human }}</td>

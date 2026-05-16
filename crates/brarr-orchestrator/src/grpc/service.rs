@@ -11,11 +11,11 @@ use tonic::{Request, Response, Status, transport::Server};
 use tracing::info;
 
 use super::proto::{
-    ListTrackersReply, ListTrackersRequest, RecentSearchesReply, RecentSearchesRequest,
-    ReleaseOutcome, SearchReply, SearchRequest, SearchSummary, TrackerSummary,
+    ListProvidersReply, ListProvidersRequest, ProviderSummary, RecentSearchesReply,
+    RecentSearchesRequest, ReleaseOutcome, SearchReply, SearchRequest, SearchSummary,
     brarr_server::{Brarr, BrarrServer},
 };
-use crate::db::{decisions, searches, trackers};
+use crate::db::{decisions, providers, searches};
 use crate::search::{SearchKeys, run_search};
 use crate::{AppError, AppState};
 
@@ -47,7 +47,7 @@ impl Brarr for BrarrService {
             .decisions
             .into_iter()
             .map(|d| ReleaseOutcome {
-                tracker_name: d.tracker_name,
+                provider_name: d.provider_name,
                 release_name: d.release_name,
                 release_id_remote: d.release_id_remote,
                 score: d.score,
@@ -68,24 +68,24 @@ impl Brarr for BrarrService {
         }))
     }
 
-    async fn list_trackers(
+    async fn list_providers(
         &self,
-        _request: Request<ListTrackersRequest>,
-    ) -> Result<Response<ListTrackersReply>, Status> {
-        let rows = trackers::list_all(self.state.pool())
+        _request: Request<ListProvidersRequest>,
+    ) -> Result<Response<ListProvidersReply>, Status> {
+        let rows = providers::list_all(self.state.pool())
             .await
             .map_err(Status::from)?;
-        let trackers = rows
+        let providers = rows
             .into_iter()
-            .map(|t| TrackerSummary {
-                id: t.id.to_string(),
-                name: t.name,
-                base_url: t.base_url.to_string(),
-                kind: t.kind,
-                created_at_unix: t.created_at.unix_timestamp(),
+            .map(|p| ProviderSummary {
+                id: p.id.to_string(),
+                name: p.name,
+                base_url: p.base_url.to_string(),
+                kind: p.kind,
+                created_at_unix: p.created_at.unix_timestamp(),
             })
             .collect();
-        Ok(Response::new(ListTrackersReply { trackers }))
+        Ok(Response::new(ListProvidersReply { providers }))
     }
 
     async fn recent_searches(

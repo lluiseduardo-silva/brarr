@@ -1,18 +1,27 @@
 {% extends "base.html" %}
-{% block title %}Trackers — brarr{% endblock %}
+{% block title %}Providers — brarr{% endblock %}
 {% block content %}
-<h1 class="text-2xl font-bold mb-4">Trackers</h1>
+<h1 class="text-2xl font-bold mb-4">Providers</h1>
 
 <section class="bg-white rounded-lg shadow p-4 mb-6">
-    <h2 class="text-lg font-semibold mb-2">Adicionar tracker</h2>
-    <form hx-post="/trackers"
-          hx-target="#trackers-list"
+    <h2 class="text-lg font-semibold mb-2">Adicionar provider</h2>
+    <form hx-post="/providers"
+          hx-target="#providers-list"
           hx-swap="outerHTML"
           hx-on::after-request="this.reset()"
-          class="grid grid-cols-1 md:grid-cols-5 gap-3 items-end">
+          class="grid grid-cols-1 md:grid-cols-6 gap-3 items-end">
         <label class="text-xs uppercase tracking-wide text-slate-500">
             Nome
             <input name="name" required class="w-full mt-1 border rounded px-2 py-1 text-sm" placeholder="capybara">
+        </label>
+        <label class="text-xs uppercase tracking-wide text-slate-500">
+            Tipo
+            <select name="kind" class="w-full mt-1 border rounded px-2 py-1 text-sm bg-white">
+                <option value="unit3d">UNIT3D (tracker direto)</option>
+                <option value="newznab">Newznab (Usenet indexer)</option>
+                <option value="torznab">Torznab (Jackett/Prowlarr/gateway)</option>
+                <option value="plugin">WASM plugin</option>
+            </select>
         </label>
         <label class="text-xs uppercase tracking-wide text-slate-500">
             Base URL
@@ -23,7 +32,7 @@
             <input name="api_token" type="password" class="w-full mt-1 border rounded px-2 py-1 text-sm">
         </label>
         <label class="text-xs uppercase tracking-wide text-slate-500">
-            Plugin .wasm (opcional)
+            Plugin .wasm (se tipo=plugin)
             <input name="plugin_path" class="w-full mt-1 border rounded px-2 py-1 text-sm" placeholder="/plugins/custom.wasm">
         </label>
         <button type="submit" class="bg-amber-500 hover:bg-amber-600 text-white text-sm font-semibold px-3 py-2 rounded">
@@ -31,10 +40,13 @@
         </button>
     </form>
     <p class="text-xs text-slate-500 mt-2">
-        Sem plugin path → UNIT3D direto. Com path → módulo WASM carregado a cada busca (ABI v1 do <code>brarr-plugin-host</code>).
+        <strong>UNIT3D</strong>: tracker direto (capybara, locadora). API token bearer.<br>
+        <strong>Newznab</strong>: indexer Usenet (NZBGeek, DrunkenSlug). API token = apikey.<br>
+        <strong>Torznab</strong>: gateway torrent (Jackett, Prowlarr) que fala protocolo Newznab. API token = apikey.<br>
+        <strong>Plugin</strong>: módulo WASM carregado por busca (ABI v1 do <code>brarr-plugin-host</code>).
     </p>
 </section>
 
-{% include "partials/trackers_list.html" %}
+{% include "partials/providers_list.html" %}
 
 {% endblock %}

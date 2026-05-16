@@ -6,14 +6,15 @@ package brarr.v1;
 //
 // Mirrors the search flow already exposed by `brarr-cli`: caller supplies an
 // external media ID (TMDb for now), server fans out to every configured
-// UNIT3D tracker, persists the run, applies the decision engine, and returns
-// the ranked release list.
+// provider (UNIT3D tracker, Newznab/Torznab indexer, or WASM plugin),
+// persists the run, applies the decision engine, and returns the ranked
+// release list.
 service Brarr {
-  // Search every configured tracker for releases matching the request.
+  // Search every configured provider for releases matching the request.
   rpc Search(SearchRequest) returns (SearchReply);
 
-  // List all trackers configured in the orchestrator's database.
-  rpc ListTrackers(ListTrackersRequest) returns (ListTrackersReply);
+  // List all providers configured in the orchestrator's database.
+  rpc ListProviders(ListProvidersRequest) returns (ListProvidersReply);
 
   // Returns the most recent persisted searches, newest first.
   rpc RecentSearches(RecentSearchesRequest) returns (RecentSearchesReply);
@@ -32,7 +33,7 @@ message SearchReply {
 }
 
 message ReleaseOutcome {
-  string tracker_name = 1;
+  string provider_name = 1;
   string release_name = 2;
   uint64 release_id_remote = 3;
   uint32 score = 4;
@@ -46,16 +47,16 @@ message ReleaseOutcome {
   string kind = 12;       // e.g. "WEB-DL", "BluRay-REMUX", "unknown"
 }
 
-message ListTrackersRequest {}
-message ListTrackersReply {
-  repeated TrackerSummary trackers = 1;
+message ListProvidersRequest {}
+message ListProvidersReply {
+  repeated ProviderSummary providers = 1;
 }
 
-message TrackerSummary {
+message ProviderSummary {
   string id = 1; // UUID
   string name = 2;
   string base_url = 3;
-  string kind = 4; // "unit3d" today
+  string kind = 4; // "unit3d" | "newznab" | "torznab" | "plugin"
   int64 created_at_unix = 5;
 }
 

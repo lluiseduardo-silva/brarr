@@ -16,14 +16,14 @@ pub struct DecisionRow {
     pub id: Uuid,
     /// FK → `searches.id`.
     pub search_id: Uuid,
-    /// FK → `trackers.id` (or `None` if the tracker has since been deleted).
-    pub tracker_id: Option<Uuid>,
-    /// Tracker name snapshot (denormalized so the UI doesn't `JOIN` and
-    /// historical rows survive tracker deletions).
-    pub tracker_name: String,
+    /// FK → `providers.id` (or `None` if the provider has since been deleted).
+    pub provider_id: Option<Uuid>,
+    /// Provider name snapshot (denormalized so the UI doesn't `JOIN` and
+    /// historical rows survive provider deletions).
+    pub provider_name: String,
     /// Release title.
     pub release_name: String,
-    /// Tracker-side numeric id (so the UI can deep-link).
+    /// Provider-side numeric id (so the UI can deep-link).
     pub release_id_remote: u64,
     /// Score assigned by the rules engine.
     pub score: u32,
@@ -52,13 +52,13 @@ pub struct DecisionRow {
 pub struct DecisionInsert {
     /// FK → `searches.id`.
     pub search_id: Uuid,
-    /// FK → `trackers.id`.
-    pub tracker_id: Option<Uuid>,
-    /// Tracker name snapshot.
-    pub tracker_name: String,
+    /// FK → `providers.id`.
+    pub provider_id: Option<Uuid>,
+    /// Provider name snapshot.
+    pub provider_name: String,
     /// Release title.
     pub release_name: String,
-    /// Tracker-side numeric id.
+    /// Provider-side numeric id.
     pub release_id_remote: u64,
     /// Engine score.
     pub score: u32,
@@ -96,15 +96,15 @@ pub async fn insert(pool: &Pool, ins: DecisionInsert) -> Result<DecisionRow, App
 
     sqlx::query(
         "INSERT INTO decisions ( \
-            id, search_id, tracker_id, tracker_name, release_name, release_id_remote, \
+            id, search_id, provider_id, provider_name, release_name, release_id_remote, \
             score, rejected, tags_json, matched_json, seeders, leechers, size_bytes, \
             resolution, kind, decided_at \
          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(id.to_string())
     .bind(ins.search_id.to_string())
-    .bind(ins.tracker_id.map(|t| t.to_string()))
-    .bind(&ins.tracker_name)
+    .bind(ins.provider_id.map(|t| t.to_string()))
+    .bind(&ins.provider_name)
     .bind(&ins.release_name)
     .bind(i64_from_u64(ins.release_id_remote))
     .bind(i64::from(ins.score))
@@ -123,8 +123,8 @@ pub async fn insert(pool: &Pool, ins: DecisionInsert) -> Result<DecisionRow, App
     Ok(DecisionRow {
         id,
         search_id: ins.search_id,
-        tracker_id: ins.tracker_id,
-        tracker_name: ins.tracker_name,
+        provider_id: ins.provider_id,
+        provider_name: ins.provider_name,
         release_name: ins.release_name,
         release_id_remote: ins.release_id_remote,
         score: ins.score,
@@ -147,7 +147,7 @@ pub async fn insert(pool: &Pool, ins: DecisionInsert) -> Result<DecisionRow, App
 /// Surfaces a [`sqlx::Error`] on SQL failure.
 pub async fn list_for_search(pool: &Pool, search_id: Uuid) -> Result<Vec<DecisionRow>, AppError> {
     let rows = sqlx::query(
-        "SELECT id, search_id, tracker_id, tracker_name, release_name, release_id_remote, \
+        "SELECT id, search_id, provider_id, provider_name, release_name, release_id_remote, \
                 score, rejected, tags_json, matched_json, seeders, leechers, size_bytes, \
                 resolution, kind, decided_at \
          FROM decisions WHERE search_id = ? ORDER BY score DESC, seeders DESC",
@@ -170,7 +170,7 @@ pub async fn recent(pool: &Pool, limit: u32) -> Result<Vec<DecisionRow>, AppErro
         n => n,
     };
     let rows = sqlx::query(
-        "SELECT id, search_id, tracker_id, tracker_name, release_name, release_id_remote, \
+        "SELECT id, search_id, provider_id, provider_name, release_name, release_id_remote, \
                 score, rejected, tags_json, matched_json, seeders, leechers, size_bytes, \
                 resolution, kind, decided_at \
          FROM decisions ORDER BY decided_at DESC LIMIT ?",
@@ -188,11 +188,11 @@ fn row_to_decision(row: &SqliteRow) -> Result<DecisionRow, AppError> {
     let search_id_str: String = row.try_get("search_id")?;
     let search_id = Uuid::parse_str(&search_id_str)
         .map_err(|e| AppError::InvalidInput(format!("invalid uuid in search_id: {e}")))?;
-    let tracker_id_opt: Option<String> = row.try_get("tracker_id")?;
-    let tracker_id = match tracker_id_opt {
+    let provider_id_opt: Option<String> = row.try_get("provider_id")?;
+    let provider_id = match provider_id_opt {
         Some(s) => Some(
             Uuid::parse_str(&s)
-                .map_err(|e| AppError::InvalidInput(format!("invalid uuid in tracker_id: {e}")))?,
+                .map_err(|e| AppError::InvalidInput(format!("invalid uuid in provider_id: {e}")))?,
         ),
         None => None,
     };
@@ -212,8 +212,8 @@ fn row_to_decision(row: &SqliteRow) -> Result<DecisionRow, AppError> {
     Ok(DecisionRow {
         id,
         search_id,
-        tracker_id,
-        tracker_name: row.try_get("tracker_name")?,
+        provider_id,
+        provider_name: row.try_get("provider_name")?,
         release_name: row.try_get("release_name")?,
         release_id_remote,
         score: u32::try_from(score_i64).unwrap_or(0),
@@ -292,8 +292,8 @@ mod tests {
     fn sample_insert(search_id: Uuid, score: u32) -> DecisionInsert {
         DecisionInsert {
             search_id,
-            tracker_id: None,
-            tracker_name: "capybara".into(),
+            provider_id: None,
+            provider_name: "capybara".into(),
             release_name: "The Matrix 1999 1080p BluRay x264".into(),
             release_id_remote: 12345,
             score,

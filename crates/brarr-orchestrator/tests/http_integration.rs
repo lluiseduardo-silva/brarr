@@ -62,33 +62,33 @@ async fn dashboard_renders_with_zero_state() {
     assert_eq!(resp.status(), 200);
     let body = resp.text().await.unwrap();
     assert!(body.contains("Dashboard"));
-    assert!(body.contains("Trackers configurados"));
+    assert!(body.contains("Providers configurados"));
     assert!(body.contains("Ainda não há buscas"));
 }
 
 #[tokio::test]
-async fn trackers_index_renders_empty_state() {
+async fn providers_index_renders_empty_state() {
     let (addr, _state) = spawn().await;
     let client = reqwest::Client::new();
     let resp = client
-        .get(format!("http://{addr}/trackers"))
+        .get(format!("http://{addr}/providers"))
         .send()
         .await
         .expect("send");
     assert_eq!(resp.status(), 200);
     let body = resp.text().await.unwrap();
-    assert!(body.contains("Adicionar tracker"));
-    assert!(body.contains("Nenhum tracker configurado"));
+    assert!(body.contains("Adicionar provider"));
+    assert!(body.contains("Nenhum provider configurado"));
 }
 
 #[tokio::test]
-async fn create_then_delete_tracker_roundtrip() {
+async fn create_then_delete_provider_roundtrip() {
     let (addr, _state) = spawn().await;
     let client = reqwest::Client::new();
 
-    // POST /trackers form
+    // POST /providers form
     let resp = client
-        .post(format!("http://{addr}/trackers"))
+        .post(format!("http://{addr}/providers"))
         .form(&[
             ("name", "capybara"),
             ("base_url", "https://capybarabr.com/"),
@@ -100,28 +100,28 @@ async fn create_then_delete_tracker_roundtrip() {
         .expect("send");
     assert_eq!(resp.status(), 200);
     let body = resp.text().await.unwrap();
-    // Partial returned should contain the newly added tracker row.
+    // Partial returned should contain the newly added provider row.
     assert!(body.contains("capybara"));
     assert!(body.contains("https://capybarabr.com/"));
 
-    // GET /trackers should now show it.
+    // GET /providers should now show it.
     let resp = client
-        .get(format!("http://{addr}/trackers"))
+        .get(format!("http://{addr}/providers"))
         .send()
         .await
         .expect("send");
     let body = resp.text().await.unwrap();
     assert!(body.contains("capybara"));
 
-    // Extract tracker id from the row's id attribute `tracker-<uuid>`.
-    let marker = "id=\"tracker-";
-    let pos = body.find(marker).expect("tracker row marker");
+    // Extract provider id from the row's id attribute `provider-<uuid>`.
+    let marker = "id=\"provider-";
+    let pos = body.find(marker).expect("provider row marker");
     let rest = &body[pos + marker.len()..];
     let end = rest.find('"').expect("closing quote");
     let id = &rest[..end];
 
     let resp = client
-        .delete(format!("http://{addr}/trackers/{id}"))
+        .delete(format!("http://{addr}/providers/{id}"))
         .send()
         .await
         .expect("send");
@@ -129,20 +129,20 @@ async fn create_then_delete_tracker_roundtrip() {
 
     // After delete, list should be empty again.
     let resp = client
-        .get(format!("http://{addr}/trackers"))
+        .get(format!("http://{addr}/providers"))
         .send()
         .await
         .expect("send");
     let body = resp.text().await.unwrap();
-    assert!(body.contains("Nenhum tracker configurado"));
+    assert!(body.contains("Nenhum provider configurado"));
 }
 
 #[tokio::test]
-async fn invalid_tracker_id_returns_400() {
+async fn invalid_provider_id_returns_400() {
     let (addr, _state) = spawn().await;
     let client = reqwest::Client::new();
     let resp = client
-        .delete(format!("http://{addr}/trackers/not-a-uuid"))
+        .delete(format!("http://{addr}/providers/not-a-uuid"))
         .send()
         .await
         .expect("send");
@@ -150,12 +150,12 @@ async fn invalid_tracker_id_returns_400() {
 }
 
 #[tokio::test]
-async fn delete_unknown_tracker_returns_404() {
+async fn delete_unknown_provider_returns_404() {
     let (addr, _state) = spawn().await;
     let client = reqwest::Client::new();
     let resp = client
         .delete(format!(
-            "http://{addr}/trackers/00000000-0000-4000-8000-000000000000"
+            "http://{addr}/providers/00000000-0000-4000-8000-000000000000"
         ))
         .send()
         .await
@@ -203,7 +203,7 @@ async fn invalid_base_url_in_form_returns_400() {
     let (addr, _state) = spawn().await;
     let client = reqwest::Client::new();
     let resp = client
-        .post(format!("http://{addr}/trackers"))
+        .post(format!("http://{addr}/providers"))
         .form(&[
             ("name", "bad"),
             ("base_url", "not a url"),

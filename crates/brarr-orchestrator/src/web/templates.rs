@@ -9,7 +9,7 @@ use askama::Template;
 #[template(path = "dashboard.html")]
 pub struct DashboardTemplate {
     /// Aggregated stat for the header cards.
-    pub tracker_count: usize,
+    pub provider_count: usize,
     /// Aggregated stat for the header cards.
     pub search_count: usize,
     /// Most recent searches.
@@ -36,8 +36,8 @@ pub struct RecentSearchView {
 pub struct DecisionView {
     /// Stringified UUID.
     pub id: String,
-    /// Snapshot tracker name.
-    pub tracker_name: String,
+    /// Snapshot provider name.
+    pub provider_name: String,
     /// Release title.
     pub release_name: String,
     /// Engine score.
@@ -56,35 +56,35 @@ pub struct DecisionView {
     pub size_human: String,
 }
 
-/// Trackers index view at `/trackers`.
+/// Providers index view at `/providers`.
 #[derive(Debug, Template)]
-#[template(path = "trackers.html")]
-pub struct TrackersTemplate {
-    /// All configured trackers.
-    pub trackers: Vec<TrackerView>,
+#[template(path = "providers.html")]
+pub struct ProvidersTemplate {
+    /// All configured providers.
+    pub providers: Vec<ProviderView>,
 }
 
-/// Single tracker row.
+/// Single provider row.
 #[derive(Debug)]
-pub struct TrackerView {
+pub struct ProviderView {
     /// Stringified UUID.
     pub id: String,
-    /// Tracker name.
+    /// Provider name.
     pub name: String,
-    /// Tracker base URL.
+    /// Provider base URL.
     pub base_url: String,
-    /// Tracker family (`unit3d` etc.).
+    /// Provider family (`unit3d`, `newznab`, `torznab`, `plugin`).
     pub kind: String,
     /// Creation timestamp (ISO-8601).
     pub created_at: String,
 }
 
-/// Partial template used by HTMX after `POST /trackers`.
+/// Partial template used by HTMX after `POST /providers`.
 #[derive(Debug, Template)]
-#[template(path = "partials/trackers_list.html")]
-pub struct TrackersListPartial {
-    /// All configured trackers.
-    pub trackers: Vec<TrackerView>,
+#[template(path = "partials/providers_list.html")]
+pub struct ProvidersListPartial {
+    /// All configured providers.
+    pub providers: Vec<ProviderView>,
 }
 
 /// Releases (decisions) history view at `/releases`.
@@ -115,7 +115,7 @@ pub struct SearchDetailTemplate {
     pub submitted_at: String,
     /// All decision rows for this search (kept + rejected).
     pub decisions: Vec<DecisionView>,
-    /// Per-tracker failure messages (transient — not persisted).
+    /// Per-provider failure messages (transient — not persisted).
     pub failures: Vec<(String, String)>,
 }
 

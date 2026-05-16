@@ -82,9 +82,9 @@ async fn search_runs_through_plugin_tracker() {
 
     let pool = db::open_memory().await.expect("db");
     let url = Url::parse("https://plugin.example/").expect("url");
-    db::trackers::insert(
+    db::providers::insert(
         &pool,
-        db::trackers::NewTracker {
+        db::providers::NewProvider {
             name: "plugin-tracker",
             base_url: &url,
             api_token: "",
@@ -93,7 +93,7 @@ async fn search_runs_through_plugin_tracker() {
         },
     )
     .await
-    .expect("insert tracker row");
+    .expect("insert provider row");
 
     let state = AppState::new(pool, Engine::baseline());
     let outcome = search::run_tmdb_search(&state, brarr_core::TmdbId::new(603).unwrap())
@@ -107,7 +107,7 @@ async fn search_runs_through_plugin_tracker() {
     );
     assert_eq!(outcome.decisions.len(), 1, "should persist one release");
     let d = &outcome.decisions[0];
-    assert_eq!(d.tracker_name, "plugin-tracker");
+    assert_eq!(d.provider_name, "plugin-tracker");
     assert_eq!(d.release_name, "plug");
     assert_eq!(d.size_bytes, 2048);
     assert_eq!(d.resolution, "1080p");
@@ -124,9 +124,9 @@ async fn missing_plugin_file_collected_as_failure_not_aborted() {
     let pool = db::open_memory().await.expect("db");
     let url = Url::parse("https://plugin.example/").expect("url");
     let bogus_path = std::path::PathBuf::from("/nonexistent/path/to/plugin.wasm");
-    db::trackers::insert(
+    db::providers::insert(
         &pool,
-        db::trackers::NewTracker {
+        db::providers::NewProvider {
             name: "bogus",
             base_url: &url,
             api_token: "",

@@ -1,9 +1,14 @@
-//! Tracker rows in SQLite.
+//! Provider rows in SQLite.
 //!
-//! The orchestrator owns the canonical tracker list at runtime — the
-//! admin UI writes through this module. `brarr-cli` keeps its TOML-based
-//! flow unchanged for now; a future phase can teach the CLI to read from
-//! the orchestrator via gRPC.
+//! The orchestrator owns the canonical provider list at runtime — the
+//! admin UI writes through this module. A "provider" is any source of
+//! release data: a UNIT3D torrent tracker, a Newznab Usenet indexer, a
+//! Torznab gateway (Jackett/Prowlarr), or a WASM plugin. The previous
+//! revision of this schema called the table `trackers`; the
+//! `20260516120000_rename_to_providers.sql` migration renames it
+//! in-place. `brarr-cli` keeps its TOML-based flow unchanged for now; a
+//! future phase can teach the CLI to read from the orchestrator via
+//! gRPC.
 
 use std::path::PathBuf;
 
@@ -14,29 +19,30 @@ use uuid::Uuid;
 
 use crate::{AppError, db::Pool};
 
-/// A configured tracker.
+/// A configured provider.
 #[derive(Debug, Clone)]
-pub struct TrackerRow {
+pub struct ProviderRow {
     /// Stable UUID v4 used in URLs and gRPC payloads.
     pub id: Uuid,
-    /// Human-friendly tracker name (e.g. `capybarabr`). Must be unique.
+    /// Human-friendly provider name (e.g. `capybarabr`). Must be unique.
     pub name: String,
-    /// Base URL of the tracker.
+    /// Base URL of the provider.
     pub base_url: Url,
     /// API token. Stored as plaintext for now; encryption-at-rest is a
     /// future hardening (the DB itself sits on local disk owned by the
     /// service user, not exposed externally).
     pub api_token: String,
-    /// Tracker family. Today either `unit3d` or `plugin`.
+    /// Provider family: `unit3d`, `newznab`, `torznab`, or `plugin`.
     pub kind: String,
     /// Filesystem path to a `.wasm`/`.wat` plugin module. `None` means
-    /// the tracker is served by the built-in UNIT3D HTTP client.
+    /// the provider is served by one of the built-in HTTP clients
+    /// (selected by `kind`).
     pub plugin_path: Option<PathBuf>,
     /// Row creation timestamp.
     pub created_at: OffsetDateTime,
 }
 
-impl TrackerRow {
+impl ProviderRow {
     /// `true` when this row drives a WASM plugin (`plugin_path` set).
     #[must_use]
     pub fn is_plugin(&self) -> bool {
@@ -44,31 +50,31 @@ impl TrackerRow {
     }
 }
 
-/// Bundle of values used to create a new tracker row.
+/// Bundle of values used to create a new provider row.
 #[derive(Debug, Clone)]
-pub struct NewTracker<'a> {
+pub struct NewProvider<'a> {
     /// Display name (must be unique).
     pub name: &'a str,
-    /// Tracker base URL.
+    /// Provider base URL.
     pub base_url: &'a Url,
-    /// API token (UNIT3D bearer); free-form for plugins.
+    /// API token (bearer for UNIT3D, apikey for Newznab/Torznab; free-form for plugins).
     pub api_token: &'a str,
-    /// `"unit3d"` or `"plugin"`.
+    /// `"unit3d"`, `"newznab"`, `"torznab"`, or `"plugin"`.
     pub kind: &'a str,
     /// Optional plugin filesystem path.
     pub plugin_path: Option<&'a std::path::Path>,
 }
 
-/// Insert a new tracker, returning the persisted row (with id + timestamp).
+/// Insert a new provider, returning the persisted row (with id + timestamp).
 ///
 /// # Errors
 ///
 /// Returns [`AppError::Database`] on `UNIQUE` violations of `name`, or
 /// any other SQL error.
-pub async fn insert(pool: &Pool, new: NewTracker<'_>) -> Result<TrackerRow, AppError> {
+pub async fn insert(pool: &Pool, new: NewProvider<'_>) -> Result<ProviderRow, AppError> {
     if new.name.trim().is_empty() {
         return Err(AppError::InvalidInput(
-            "tracker name cannot be empty".into(),
+            "provider name cannot be empty".into(),
         ));
     }
     let id = Uuid::new_v4();
@@ -78,7 +84,7 @@ pub async fn insert(pool: &Pool, new: NewTracker<'_>) -> Result<TrackerRow, AppE
     let created_unix = now.unix_timestamp();
     let plugin_path_str = new.plugin_path.map(|p| p.to_string_lossy().into_owned());
     sqlx::query(
-        "INSERT INTO trackers (id, name, base_url, api_token, kind, plugin_path, created_at) \
+        "INSERT INTO providers (id, name, base_url, api_token, kind, plugin_path, created_at) \
          VALUES (?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&id_str)
@@ -91,7 +97,7 @@ pub async fn insert(pool: &Pool, new: NewTracker<'_>) -> Result<TrackerRow, AppE
     .execute(pool)
     .await?;
 
-    Ok(TrackerRow {
+    Ok(ProviderRow {
         id,
         name: new.name.to_string(),
         base_url: new.base_url.clone(),
@@ -102,66 +108,66 @@ pub async fn insert(pool: &Pool, new: NewTracker<'_>) -> Result<TrackerRow, AppE
     })
 }
 
-/// List all trackers, ordered by `name` ascending.
+/// List all providers, ordered by `name` ascending.
 ///
 /// # Errors
 ///
 /// Returns [`AppError::Database`] on SQL failure.
-pub async fn list_all(pool: &Pool) -> Result<Vec<TrackerRow>, AppError> {
+pub async fn list_all(pool: &Pool) -> Result<Vec<ProviderRow>, AppError> {
     let rows = sqlx::query(
         "SELECT id, name, base_url, api_token, kind, plugin_path, created_at \
-         FROM trackers ORDER BY name ASC",
+         FROM providers ORDER BY name ASC",
     )
     .fetch_all(pool)
     .await?;
-    rows.iter().map(row_to_tracker).collect()
+    rows.iter().map(row_to_provider).collect()
 }
 
-/// Fetch a tracker by UUID.
+/// Fetch a provider by UUID.
 ///
 /// # Errors
 ///
 /// Returns [`AppError::NotFound`] if no row matches.
-pub async fn get_by_id(pool: &Pool, id: Uuid) -> Result<TrackerRow, AppError> {
+pub async fn get_by_id(pool: &Pool, id: Uuid) -> Result<ProviderRow, AppError> {
     let row_opt = sqlx::query(
         "SELECT id, name, base_url, api_token, kind, plugin_path, created_at \
-         FROM trackers WHERE id = ?",
+         FROM providers WHERE id = ?",
     )
     .bind(id.to_string())
     .fetch_optional(pool)
     .await?;
     match row_opt {
-        Some(row) => row_to_tracker(&row),
-        None => Err(AppError::NotFound(format!("tracker {id}"))),
+        Some(row) => row_to_provider(&row),
+        None => Err(AppError::NotFound(format!("provider {id}"))),
     }
 }
 
-/// Delete a tracker by UUID. Returns `true` if a row was removed,
+/// Delete a provider by UUID. Returns `true` if a row was removed,
 /// `false` if no row matched.
 ///
 /// # Errors
 ///
 /// Returns [`AppError::Database`] on SQL failure.
 pub async fn delete_by_id(pool: &Pool, id: Uuid) -> Result<bool, AppError> {
-    let res = sqlx::query("DELETE FROM trackers WHERE id = ?")
+    let res = sqlx::query("DELETE FROM providers WHERE id = ?")
         .bind(id.to_string())
         .execute(pool)
         .await?;
     Ok(res.rows_affected() > 0)
 }
 
-fn row_to_tracker(row: &SqliteRow) -> Result<TrackerRow, AppError> {
+fn row_to_provider(row: &SqliteRow) -> Result<ProviderRow, AppError> {
     let id_str: String = row.try_get("id")?;
     let id = Uuid::parse_str(&id_str)
-        .map_err(|e| AppError::InvalidInput(format!("invalid uuid in trackers.id: {e}")))?;
+        .map_err(|e| AppError::InvalidInput(format!("invalid uuid in providers.id: {e}")))?;
     let base_url_str: String = row.try_get("base_url")?;
     let base_url = Url::parse(&base_url_str)
-        .map_err(|e| AppError::InvalidInput(format!("invalid url in trackers.base_url: {e}")))?;
+        .map_err(|e| AppError::InvalidInput(format!("invalid url in providers.base_url: {e}")))?;
     let created_unix: i64 = row.try_get("created_at")?;
     let created_at = OffsetDateTime::from_unix_timestamp(created_unix)
         .map_err(|e| AppError::InvalidInput(format!("invalid timestamp: {e}")))?;
     let plugin_path_str: Option<String> = row.try_get("plugin_path")?;
-    Ok(TrackerRow {
+    Ok(ProviderRow {
         id,
         name: row.try_get("name")?,
         base_url,
@@ -179,13 +185,13 @@ mod tests {
     use super::*;
     use crate::db::open_memory;
 
-    fn nt<'a>(
+    fn np<'a>(
         name: &'a str,
         base_url: &'a Url,
         api_token: &'a str,
         kind: &'a str,
-    ) -> NewTracker<'a> {
-        NewTracker {
+    ) -> NewProvider<'a> {
+        NewProvider {
             name,
             base_url,
             api_token,
@@ -198,7 +204,7 @@ mod tests {
     async fn insert_and_list_roundtrips() {
         let pool = open_memory().await.unwrap();
         let url = Url::parse("https://capybarabr.com/").unwrap();
-        let row = insert(&pool, nt("capybara", &url, "tok", "unit3d"))
+        let row = insert(&pool, np("capybara", &url, "tok", "unit3d"))
             .await
             .unwrap();
         assert_eq!(row.name, "capybara");
@@ -216,10 +222,10 @@ mod tests {
     async fn duplicate_name_violates_unique() {
         let pool = open_memory().await.unwrap();
         let url = Url::parse("https://x.com/").unwrap();
-        insert(&pool, nt("dupe", &url, "t1", "unit3d"))
+        insert(&pool, np("dupe", &url, "t1", "unit3d"))
             .await
             .unwrap();
-        let err = insert(&pool, nt("dupe", &url, "t2", "unit3d"))
+        let err = insert(&pool, np("dupe", &url, "t2", "unit3d"))
             .await
             .unwrap_err();
         assert!(matches!(err, AppError::Database(_)));
@@ -229,7 +235,7 @@ mod tests {
     async fn empty_name_rejected() {
         let pool = open_memory().await.unwrap();
         let url = Url::parse("https://x.com/").unwrap();
-        let err = insert(&pool, nt("  ", &url, "t", "unit3d"))
+        let err = insert(&pool, np("  ", &url, "t", "unit3d"))
             .await
             .unwrap_err();
         assert!(matches!(err, AppError::InvalidInput(_)));
@@ -239,7 +245,7 @@ mod tests {
     async fn delete_returns_true_only_when_row_existed() {
         let pool = open_memory().await.unwrap();
         let url = Url::parse("https://x.com/").unwrap();
-        let row = insert(&pool, nt("t", &url, "tok", "unit3d")).await.unwrap();
+        let row = insert(&pool, np("t", &url, "tok", "unit3d")).await.unwrap();
         assert!(delete_by_id(&pool, row.id).await.unwrap());
         assert!(!delete_by_id(&pool, row.id).await.unwrap());
         assert!(list_all(&pool).await.unwrap().is_empty());
@@ -252,7 +258,7 @@ mod tests {
         let p = std::path::Path::new("/tmp/test.wasm");
         let row = insert(
             &pool,
-            NewTracker {
+            NewProvider {
                 name: "scrap-plugin",
                 base_url: &url,
                 api_token: "",

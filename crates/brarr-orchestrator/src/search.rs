@@ -1,17 +1,18 @@
-//! Search orchestration: fan out to every persisted tracker, evaluate
+//! Search orchestration: fan out to every persisted provider, evaluate
 //! each release through the rules engine, persist the run, and return
 //! the structured outcome.
 //!
 //! Fan-out goes through the [`brarr_core::TrackerProvider`] trait, so
 //! direct UNIT3D HTTP clients, Newznab indexers, and WASM-loaded plugins
-//! live in the same pipeline. The provider for each tracker row is built
-//! lazily inside the per-tracker future based on the row's `kind` and
+//! live in the same pipeline. The client for each provider row is built
+//! lazily inside the per-provider future based on the row's `kind` and
 //! `plugin_path`:
 //!
-//! | `kind`        | `plugin_path` | Provider                                    |
+//! | `kind`        | `plugin_path` | Client                                      |
 //! |---------------|---------------|---------------------------------------------|
 //! | `"unit3d"`    | `None`        | [`brarr_tracker_unit3d::Unit3dClient`]      |
 //! | `"newznab"`   | `None`        | [`brarr_tracker_newznab::NewznabClient`]    |
+//! | `"torznab"`   | `None`        | [`brarr_tracker_newznab::NewznabClient`]    |
 //! | any           | `Some(path)`  | [`brarr_plugin_host::WasmTrackerProvider`]  |
 //!
 //! A single `wasmtime::Engine` lives in [`AppState`] and is reused for
@@ -33,8 +34,8 @@ use wasmtime::Engine as WasmEngine;
 use crate::db::{
     decisions,
     decisions::DecisionInsert,
+    providers::{self, ProviderRow},
     searches::{self, SearchRequestJson, SearchRow},
-    trackers::{self, TrackerRow},
 };
 use crate::{AppError, AppState};
 
@@ -125,12 +126,12 @@ pub async fn run_search(state: &AppState, keys: SearchKeys) -> Result<SearchRunO
         "search created"
     );
 
-    let trackers = trackers::list_all(pool).await?;
-    if trackers.is_empty() {
+    let providers = providers::list_all(pool).await?;
+    if providers.is_empty() {
         warn!(
             target: "brarr_orchestrator::search",
             search_id = %search.id,
-            "no trackers configured"
+            "no providers configured"
         );
         return Ok(SearchRunOutcome {
             search,
@@ -139,25 +140,25 @@ pub async fn run_search(state: &AppState, keys: SearchKeys) -> Result<SearchRunO
         });
     }
 
-    let per_tracker = fan_out(state.wasm_engine(), state.wasm_ticker(), &trackers, &keys).await;
+    let per_provider = fan_out(state.wasm_engine(), state.wasm_ticker(), &providers, &keys).await;
 
     let mut decisions_out = Vec::new();
     let mut failures = Vec::new();
 
-    for (tr, result) in per_tracker {
+    for (pr, result) in per_provider {
         match result {
             Ok(releases) => {
                 debug!(
                     target: "brarr_orchestrator::search",
-                    tracker = %tr.name,
+                    provider = %pr.name,
                     count = releases.len(),
-                    "tracker returned releases"
+                    "provider returned releases"
                 );
                 for release in releases {
                     let outcome = engine.evaluate(&release);
                     // Persist every release — including rejected ones —
                     // so the UI can show what was filtered out.
-                    let ins = build_insert(&search.id, &tr, &release, &outcome);
+                    let ins = build_insert(&search.id, &pr, &release, &outcome);
                     let row = decisions::insert(pool, ins).await?;
                     if !outcome.rejected {
                         decisions_out.push(row);
@@ -167,11 +168,11 @@ pub async fn run_search(state: &AppState, keys: SearchKeys) -> Result<SearchRunO
             Err(e) => {
                 warn!(
                     target: "brarr_orchestrator::search",
-                    tracker = %tr.name,
+                    provider = %pr.name,
                     error = %e,
-                    "tracker failed"
+                    "provider failed"
                 );
-                failures.push((tr.name.clone(), e));
+                failures.push((pr.name.clone(), e));
             }
         }
     }
@@ -206,38 +207,39 @@ pub async fn run_search(state: &AppState, keys: SearchKeys) -> Result<SearchRunO
 async fn fan_out(
     wasm_engine: &WasmEngine,
     ticker: &WasmEpochTicker,
-    trackers: &[TrackerRow],
+    providers: &[ProviderRow],
     keys: &SearchKeys,
-) -> Vec<(TrackerRow, Result<Vec<Release>, String>)> {
+) -> Vec<(ProviderRow, Result<Vec<Release>, String>)> {
     let wasm_engine = wasm_engine.clone();
-    let futures = trackers.iter().cloned().map(|tr| {
+    let futures = providers.iter().cloned().map(|pr| {
         let wasm_engine = wasm_engine.clone();
         let keys = keys.clone();
         async move {
-            let provider = match build_provider(&wasm_engine, ticker, &tr).await {
+            let client = match build_provider(&wasm_engine, ticker, &pr).await {
                 Ok(p) => p,
-                Err(e) => return (tr, Err(e)),
+                Err(e) => return (pr, Err(e)),
             };
-            let result = dispatch_search(&tr, provider.as_ref(), &keys)
+            let result = dispatch_search(&pr, client.as_ref(), &keys)
                 .await
                 .map_err(|e| e.to_string());
-            (tr, result)
+            (pr, result)
         }
     });
     join_all(futures).await
 }
 
-/// Per-tracker axis picker. Newznab rows prefer IMDb; everything else
-/// prefers TMDb. Falls back to the other axis when the preferred one
-/// is missing from `keys`. Returns `Ok(vec![])` when no usable axis
-/// is available (so the tracker shows up with zero hits instead of an
+/// Per-provider axis picker. Newznab/Torznab rows prefer IMDb; everything
+/// else prefers TMDb. Falls back to the other axis when the preferred
+/// one is missing from `keys`. Returns `Ok(vec![])` when no usable axis
+/// is available (so the provider shows up with zero hits instead of an
 /// error).
 async fn dispatch_search(
-    tr: &TrackerRow,
+    pr: &ProviderRow,
     provider: &dyn TrackerProvider,
     keys: &SearchKeys,
 ) -> Result<Vec<Release>, brarr_core::ProviderError> {
-    let prefer_imdb = tr.kind.eq_ignore_ascii_case("newznab");
+    let prefer_imdb =
+        pr.kind.eq_ignore_ascii_case("newznab") || pr.kind.eq_ignore_ascii_case("torznab");
     if prefer_imdb && let Some(imdb) = keys.imdb {
         return provider.search_by_imdb(imdb).await;
     }
@@ -254,22 +256,23 @@ async fn dispatch_search(
     Ok(Vec::new())
 }
 
-/// Build a `TrackerProvider` for `tr`. Dispatch matrix:
+/// Build a `TrackerProvider` for `pr`. Dispatch matrix:
 ///
-/// | `kind`        | `plugin_path` | Provider                              |
+/// | `kind`        | `plugin_path` | Client                                |
 /// |---------------|---------------|---------------------------------------|
 /// | `unit3d`      | `None`        | [`Unit3dClient`]                      |
-/// | `newznab`     | `None`        | [`NewznabClient`]                     |
+/// | `newznab`     | `None`        | [`NewznabClient`] (Usenet shape)      |
+/// | `torznab`     | `None`        | [`NewznabClient`] (torrent shape)     |
 /// | any           | `Some(path)`  | [`WasmTrackerProvider`]               |
 async fn build_provider(
     wasm_engine: &WasmEngine,
     ticker: &WasmEpochTicker,
-    tr: &TrackerRow,
+    pr: &ProviderRow,
 ) -> Result<Arc<dyn TrackerProvider>, String> {
-    let source = TrackerSource::new(tr.name.clone(), tr.base_url.clone())
-        .map_err(|e| format!("invalid tracker source: {e}"))?;
+    let source = TrackerSource::new(pr.name.clone(), pr.base_url.clone())
+        .map_err(|e| format!("invalid provider source: {e}"))?;
 
-    if let Some(path) = tr.plugin_path.as_deref() {
+    if let Some(path) = pr.plugin_path.as_deref() {
         let bytes =
             read_plugin_bytes(path).map_err(|e| format!("read plugin {}: {e}", path.display()))?;
         let provider = WasmTrackerProvider::load_with_engine(
@@ -283,13 +286,16 @@ async fn build_provider(
         return Ok(Arc::new(provider));
     }
 
-    // Default to UNIT3D for unknown kinds — matches pre-Newznab
-    // behaviour and gives a useful error if the token is wrong.
-    if tr.kind.eq_ignore_ascii_case("newznab") {
-        let client = NewznabClient::new(source, &tr.api_token).map_err(|e| e.to_string())?;
+    // Newznab and Torznab share the same XML wire format; the same
+    // client handles both. The distinction is captured by `kind` for
+    // future divergence (e.g. download URL shape, category defaults).
+    if pr.kind.eq_ignore_ascii_case("newznab") || pr.kind.eq_ignore_ascii_case("torznab") {
+        let client = NewznabClient::new(source, &pr.api_token).map_err(|e| e.to_string())?;
         Ok(Arc::new(client))
     } else {
-        let client = Unit3dClient::new(source, &tr.api_token).map_err(|e| e.to_string())?;
+        // Default to UNIT3D for unknown kinds — gives a useful error
+        // if the token is wrong instead of silently swallowing.
+        let client = Unit3dClient::new(source, &pr.api_token).map_err(|e| e.to_string())?;
         Ok(Arc::new(client))
     }
 }
@@ -300,17 +306,17 @@ fn read_plugin_bytes(path: &Path) -> std::io::Result<Vec<u8>> {
 
 fn build_insert(
     search_id: &Uuid,
-    tracker: &TrackerRow,
+    provider: &ProviderRow,
     release: &Release,
     outcome: &brarr_decision_service::DecisionOutcome,
 ) -> DecisionInsert {
-    // Best-effort parse of the tracker-side release id. Falls back to 0
+    // Best-effort parse of the provider-side release id. Falls back to 0
     // if the source kept the id as a non-numeric string.
     let release_id_remote = release.tracker_release_id.parse::<u64>().unwrap_or(0);
     DecisionInsert {
         search_id: *search_id,
-        tracker_id: Some(tracker.id),
-        tracker_name: tracker.name.clone(),
+        provider_id: Some(provider.id),
+        provider_name: provider.name.clone(),
         release_name: release.title.clone(),
         release_id_remote,
         score: outcome.score.get(),
@@ -336,7 +342,7 @@ mod tests {
     use brarr_decision_service::Engine;
 
     #[tokio::test]
-    async fn search_with_no_trackers_returns_empty_outcome() {
+    async fn search_with_no_providers_returns_empty_outcome() {
         let pool = open_memory().await.unwrap();
         let state = AppState::new(pool, Engine::baseline());
         let outcome = run_tmdb_search(&state, TmdbId::new(603).unwrap())

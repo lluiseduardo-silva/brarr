@@ -2,9 +2,9 @@
 //!
 //! Layout:
 //! - `GET  /`                    → dashboard
-//! - `GET  /trackers`            → tracker list
-//! - `POST /trackers`            → add tracker (HTMX form → partial)
-//! - `DELETE /trackers/{id}`     → remove tracker (HTMX → empty body)
+//! - `GET  /providers`           → provider list
+//! - `POST /providers`           → add provider (HTMX form → partial)
+//! - `DELETE /providers/{id}`    → remove provider (HTMX → empty body)
 //! - `GET  /releases`            → decisions history
 //! - `GET  /searches/{id}`       → search detail (kept + rejected)
 //! - `POST /searches`            → kick off a `TMDb` search (HTMX → redirect)
@@ -34,12 +34,12 @@ use tracing::info;
 use uuid::Uuid;
 
 use crate::auth::{AuthConfig, SESSION_COOKIE};
-use crate::db::{decisions, searches, trackers};
+use crate::db::{decisions, providers, searches};
 use crate::search::run_tmdb_search;
 use crate::web::render::html;
 use crate::web::templates::{
-    DashboardTemplate, DecisionView, LoginTemplate, RecentSearchView, ReleasesTemplate,
-    SearchDetailTemplate, TrackerView, TrackersListPartial, TrackersTemplate,
+    DashboardTemplate, DecisionView, LoginTemplate, ProviderView, ProvidersListPartial,
+    ProvidersTemplate, RecentSearchView, ReleasesTemplate, SearchDetailTemplate,
 };
 use crate::{AppError, AppState};
 use brarr_core::TmdbId;
@@ -51,8 +51,8 @@ pub fn router(state: AppState, static_dir: &std::path::Path) -> Router {
     // Routes that require auth — wrapped by the middleware below.
     let protected = Router::new()
         .route("/", get(dashboard))
-        .route("/trackers", get(trackers_index).post(trackers_create))
-        .route("/trackers/{id}", delete(trackers_delete))
+        .route("/providers", get(providers_index).post(providers_create))
+        .route("/providers/{id}", delete(providers_delete))
         .route("/releases", get(releases_index))
         .route("/searches", post(searches_create))
         .route("/searches/{id}", get(search_detail))
@@ -173,7 +173,7 @@ async fn healthz() -> &'static str {
 
 async fn dashboard(State(state): State<AppState>) -> Result<Response, AppError> {
     let pool = state.pool();
-    let tracker_rows = trackers::list_all(pool).await?;
+    let provider_rows = providers::list_all(pool).await?;
     let recent_search_rows = searches::recent(pool, 10).await?;
     let recent_decision_rows = decisions::recent(pool, 10).await?;
 
@@ -194,7 +194,7 @@ async fn dashboard(State(state): State<AppState>) -> Result<Response, AppError> 
         .collect();
 
     let tmpl = DashboardTemplate {
-        tracker_count: tracker_rows.len(),
+        provider_count: provider_rows.len(),
         search_count: searches::recent(pool, 200).await?.len(),
         recent_searches,
         recent_decisions,
@@ -202,29 +202,29 @@ async fn dashboard(State(state): State<AppState>) -> Result<Response, AppError> 
     html(&tmpl)
 }
 
-async fn trackers_index(State(state): State<AppState>) -> Result<Response, AppError> {
-    let rows = trackers::list_all(state.pool()).await?;
-    let trackers = rows.into_iter().map(tracker_view).collect();
-    html(&TrackersTemplate { trackers })
+async fn providers_index(State(state): State<AppState>) -> Result<Response, AppError> {
+    let rows = providers::list_all(state.pool()).await?;
+    let providers = rows.into_iter().map(provider_view).collect();
+    html(&ProvidersTemplate { providers })
 }
 
 #[derive(Debug, Deserialize)]
-struct CreateTrackerForm {
+struct CreateProviderForm {
     name: String,
     base_url: String,
     api_token: String,
     #[serde(default)]
     kind: Option<String>,
     /// Optional filesystem path to a `.wasm`/`.wat` plugin module.
-    /// When supplied, this tracker is served by the WASM plugin host
-    /// instead of the built-in UNIT3D client.
+    /// When supplied, this provider is served by the WASM plugin host
+    /// instead of the built-in HTTP clients.
     #[serde(default)]
     plugin_path: Option<String>,
 }
 
-async fn trackers_create(
+async fn providers_create(
     State(state): State<AppState>,
-    Form(form): Form<CreateTrackerForm>,
+    Form(form): Form<CreateProviderForm>,
 ) -> Result<Response, AppError> {
     let url = url::Url::parse(form.base_url.trim())
         .map_err(|e| AppError::InvalidInput(format!("invalid base_url: {e}")))?;
@@ -246,9 +246,9 @@ async fn trackers_create(
                 "unit3d"
             }
         });
-    trackers::insert(
+    providers::insert(
         state.pool(),
-        trackers::NewTracker {
+        providers::NewProvider {
             name: form.name.trim(),
             base_url: &url,
             api_token: form.api_token.trim(),
@@ -258,20 +258,20 @@ async fn trackers_create(
     )
     .await?;
 
-    let rows = trackers::list_all(state.pool()).await?;
-    let trackers = rows.into_iter().map(tracker_view).collect();
-    html(&TrackersListPartial { trackers })
+    let rows = providers::list_all(state.pool()).await?;
+    let providers = rows.into_iter().map(provider_view).collect();
+    html(&ProvidersListPartial { providers })
 }
 
-async fn trackers_delete(
+async fn providers_delete(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Response, AppError> {
     let uuid = Uuid::parse_str(&id)
-        .map_err(|e| AppError::InvalidInput(format!("invalid tracker id: {e}")))?;
-    let removed = trackers::delete_by_id(state.pool(), uuid).await?;
+        .map_err(|e| AppError::InvalidInput(format!("invalid provider id: {e}")))?;
+    let removed = providers::delete_by_id(state.pool(), uuid).await?;
     if !removed {
-        return Err(AppError::NotFound(format!("tracker {uuid}")));
+        return Err(AppError::NotFound(format!("provider {uuid}")));
     }
     // HTMX expects the targeted element to be replaced; returning an
     // empty 200 lets `hx-target=closest tr` + `hx-swap=outerHTML` wipe
@@ -332,20 +332,20 @@ async fn search_detail(
     html(&tmpl)
 }
 
-fn tracker_view(t: crate::db::trackers::TrackerRow) -> TrackerView {
-    TrackerView {
-        id: t.id.to_string(),
-        name: t.name,
-        base_url: t.base_url.to_string(),
-        kind: t.kind,
-        created_at: format_ts(t.created_at),
+fn provider_view(p: crate::db::providers::ProviderRow) -> ProviderView {
+    ProviderView {
+        id: p.id.to_string(),
+        name: p.name,
+        base_url: p.base_url.to_string(),
+        kind: p.kind,
+        created_at: format_ts(p.created_at),
     }
 }
 
 fn decision_view(d: crate::db::decisions::DecisionRow) -> DecisionView {
     DecisionView {
         id: d.id.to_string(),
-        tracker_name: d.tracker_name,
+        provider_name: d.provider_name,
         release_name: d.release_name,
         score: d.score,
         rejected: d.rejected,

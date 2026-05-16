@@ -105,7 +105,7 @@ async fn tvsearch_returns_empty_feed() {
 }
 
 #[tokio::test]
-async fn movie_with_no_trackers_returns_empty_feed() {
+async fn movie_with_no_providers_returns_empty_feed() {
     let addr = spawn(AuthConfig::Disabled).await;
     let resp = client()
         .get(format!("http://{addr}/torznab/api?t=movie&tmdbid=603"))

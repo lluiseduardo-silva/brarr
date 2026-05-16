@@ -1,0 +1,36 @@
+<section id="providers-list" class="bg-white rounded-lg shadow overflow-x-auto">
+    {% if providers.is_empty() %}
+    <p class="p-4 text-slate-500 italic">Nenhum provider configurado ainda.</p>
+    {% else %}
+    <table class="w-full text-sm">
+        <thead class="bg-slate-100 text-left">
+            <tr>
+                <th class="px-3 py-2">Nome</th>
+                <th class="px-3 py-2">Base URL</th>
+                <th class="px-3 py-2">Tipo</th>
+                <th class="px-3 py-2">Criado em</th>
+                <th class="px-3 py-2"></th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for p in providers %}
+            <tr class="border-t" id="provider-{{ p.id }}">
+                <td class="px-3 py-2 font-medium">{{ p.name }}</td>
+                <td class="px-3 py-2"><a href="{{ p.base_url }}" class="text-blue-600 hover:underline" target="_blank" rel="noopener">{{ p.base_url }}</a></td>
+                <td class="px-3 py-2 text-xs uppercase tracking-wide">{{ p.kind }}</td>
+                <td class="px-3 py-2 font-mono text-xs">{{ p.created_at }}</td>
+                <td class="px-3 py-2 text-right">
+                    <button hx-delete="/providers/{{ p.id }}"
+                            hx-target="#provider-{{ p.id }}"
+                            hx-swap="outerHTML"
+                            hx-confirm="Remover este provider?"
+                            class="text-red-600 hover:underline text-xs">
+                        remover
+                    </button>
+                </td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+</section>

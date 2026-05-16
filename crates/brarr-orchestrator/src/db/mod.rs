@@ -8,8 +8,8 @@
 //! `STRICT` table schema.
 
 pub mod decisions;
+pub mod providers;
 pub mod searches;
-pub mod trackers;
 
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{ConnectOptions, SqlitePool};

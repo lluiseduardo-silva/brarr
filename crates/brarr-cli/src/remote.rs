@@ -117,8 +117,8 @@ pub async fn run_remote_search(
 /// formatter handles that gracefully.
 fn remote_to_scored(o: &ReleaseOutcome) -> Option<ScoredRelease> {
     let tracker = TrackerSource::new(
-        o.tracker_name.clone(),
-        Url::parse(&format!("https://{}.example/", sanitize(&o.tracker_name))).ok()?,
+        o.provider_name.clone(),
+        Url::parse(&format!("https://{}.example/", sanitize(&o.provider_name))).ok()?,
     )
     .ok()?;
     let kind = parse_kind(&o.kind);
@@ -172,7 +172,7 @@ fn parse_resolution(s: &str) -> Resolution {
     }
 }
 
-/// Coerce a tracker name into something that survives `Url::parse` in
+/// Coerce a provider name into something that survives `Url::parse` in
 /// the synthetic placeholder URL we feed `TrackerSource::new`. Real
 /// tracker URLs aren't relayed by the gRPC response, so we just need
 /// *something* legal here.
@@ -191,7 +191,7 @@ mod tests {
     #[test]
     fn remote_to_scored_maps_canonical_fields() {
         let o = ReleaseOutcome {
-            tracker_name: "capybara".into(),
+            provider_name: "capybara".into(),
             release_name: "Matrix 1080p".into(),
             release_id_remote: 42,
             score: 120,
@@ -216,7 +216,7 @@ mod tests {
     #[test]
     fn unknown_kind_resolution_fall_through_to_other() {
         let o = ReleaseOutcome {
-            tracker_name: "x".into(),
+            provider_name: "x".into(),
             release_name: "t".into(),
             release_id_remote: 1,
             score: 0,

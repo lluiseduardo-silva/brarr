@@ -10,7 +10,7 @@
 
 {% if !failures.is_empty() %}
 <section class="bg-amber-50 border border-amber-200 rounded-lg p-4 mb-6">
-    <h2 class="font-semibold text-amber-900 mb-2">Trackers que falharam</h2>
+    <h2 class="font-semibold text-amber-900 mb-2">Providers que falharam</h2>
     <ul class="list-disc list-inside text-sm text-amber-900">
         {% for f in failures %}
         <li><span class="font-mono">{{ f.0 }}</span>: {{ f.1 }}</li>
@@ -27,7 +27,7 @@
         <thead class="bg-slate-100 text-left">
             <tr>
                 <th class="px-3 py-2">Score</th>
-                <th class="px-3 py-2">Tracker</th>
+                <th class="px-3 py-2">Provider</th>
                 <th class="px-3 py-2">Release</th>
                 <th class="px-3 py-2">Tipo</th>
                 <th class="px-3 py-2">Resolução</th>
@@ -41,7 +41,7 @@
         {% for d in decisions %}
             <tr class="border-t {% if d.rejected %}bg-red-50{% endif %}">
                 <td class="px-3 py-2 font-bold">{{ d.score }}</td>
-                <td class="px-3 py-2">{{ d.tracker_name }}</td>
+                <td class="px-3 py-2">{{ d.provider_name }}</td>
                 <td class="px-3 py-2">{{ d.release_name }}</td>
                 <td class="px-3 py-2">{{ d.kind }}</td>
                 <td class="px-3 py-2">{{ d.resolution }}</td>

@@ -70,7 +70,7 @@ async fn protected_route_redirects_when_cookie_wrong() {
     let addr = spawn_with_auth(AuthConfig::from_optional(Some(TOKEN))).await;
     let client = no_redirect_client();
     let resp = client
-        .get(format!("http://{addr}/trackers"))
+        .get(format!("http://{addr}/providers"))
         .header("cookie", "brarr_session=wrong-value")
         .send()
         .await
@@ -166,7 +166,7 @@ async fn disabled_mode_lets_anything_through() {
     let addr = spawn_with_auth(AuthConfig::Disabled).await;
     let client = no_redirect_client();
     let resp = client
-        .get(format!("http://{addr}/trackers"))
+        .get(format!("http://{addr}/providers"))
         .send()
         .await
         .expect("send");

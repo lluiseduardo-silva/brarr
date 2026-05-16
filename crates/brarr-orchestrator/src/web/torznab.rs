@@ -259,7 +259,7 @@ fn parse_imdb(raw: Option<&str>) -> Result<Option<ImdbId>, AppError> {
 /// but the feed itself remains spec-compliant.
 fn decision_to_release(row: &crate::db::decisions::DecisionRow) -> Option<Release> {
     let tracker = brarr_core::TrackerSource::new(
-        row.tracker_name.clone(),
+        row.provider_name.clone(),
         url::Url::parse("https://placeholder.invalid/").ok()?,
     )
     .ok()?;
