@@ -6,7 +6,7 @@
 
 use std::net::SocketAddr;
 
-use brarr_core::TmdbId;
+use brarr_core::{ImdbId, TmdbId};
 use tonic::{Request, Response, Status, transport::Server};
 use tracing::info;
 
@@ -16,7 +16,7 @@ use super::proto::{
     brarr_server::{Brarr, BrarrServer},
 };
 use crate::db::{decisions, searches, trackers};
-use crate::search::run_tmdb_search;
+use crate::search::{SearchKeys, run_search};
 use crate::{AppError, AppState};
 
 /// Tonic service struct.
@@ -40,12 +40,8 @@ impl Brarr for BrarrService {
         request: Request<SearchRequest>,
     ) -> Result<Response<SearchReply>, Status> {
         let req = request.into_inner();
-        let tmdb = TmdbId::new(req.tmdb_id).map_err(|e| {
-            Status::invalid_argument(format!("invalid tmdb_id {}: {e}", req.tmdb_id))
-        })?;
-        let outcome = run_tmdb_search(&self.state, tmdb)
-            .await
-            .map_err(Status::from)?;
+        let keys = build_search_keys(&req)?;
+        let outcome = run_search(&self.state, keys).await.map_err(Status::from)?;
 
         let outcomes = outcome
             .decisions
@@ -143,6 +139,43 @@ pub async fn serve(state: AppState, addr: SocketAddr) -> Result<(), AppError> {
         .await
         .map_err(|e| AppError::Io(std::io::Error::other(e)))?;
     Ok(())
+}
+
+/// Translate the protobuf `SearchRequest` into the typed [`SearchKeys`]
+/// used by [`run_search`]. Accepts a TMDb id (any non-zero `u32`), an
+/// IMDb id (numeric, optionally with leading `tt`), or both. Returns
+/// `Status::invalid_argument` when neither id is usable so the caller
+/// gets a clear error instead of an empty result.
+fn build_search_keys(req: &SearchRequest) -> Result<SearchKeys, Status> {
+    let tmdb = if req.tmdb_id == 0 {
+        None
+    } else {
+        Some(TmdbId::new(req.tmdb_id).map_err(|e| {
+            Status::invalid_argument(format!("invalid tmdb_id {}: {e}", req.tmdb_id))
+        })?)
+    };
+
+    let imdb = if req.imdb_id.trim().is_empty() {
+        None
+    } else {
+        let raw = req.imdb_id.trim().trim_start_matches("tt");
+        let n: u32 = raw.parse().map_err(|_| {
+            Status::invalid_argument(format!(
+                "invalid imdb_id {:?}: expected numeric tt-id",
+                req.imdb_id
+            ))
+        })?;
+        Some(ImdbId::new(n).map_err(|e| {
+            Status::invalid_argument(format!("invalid imdb_id {}: {e}", req.imdb_id))
+        })?)
+    };
+
+    if tmdb.is_none() && imdb.is_none() {
+        return Err(Status::invalid_argument(
+            "SearchRequest must set tmdb_id or imdb_id",
+        ));
+    }
+    Ok(SearchKeys { tmdb, imdb })
 }
 
 /// Bearer-token interceptor used by [`serve`]. Exposed for tests so

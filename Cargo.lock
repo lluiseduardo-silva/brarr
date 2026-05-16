@@ -373,6 +373,7 @@ name = "brarr-core"
 version = "0.1.0"
 dependencies = [
  "thiserror 2.0.18",
+ "tokio",
  "url",
 ]
 
@@ -405,6 +406,7 @@ dependencies = [
  "brarr-core",
  "brarr-decision-service",
  "brarr-plugin-host",
+ "brarr-tracker-newznab",
  "brarr-tracker-unit3d",
  "futures",
  "prost",
@@ -446,6 +448,21 @@ dependencies = [
  "url",
  "wasmtime",
  "wat",
+ "wiremock",
+]
+
+[[package]]
+name = "brarr-tracker-newznab"
+version = "0.1.0"
+dependencies = [
+ "brarr-core",
+ "quick-xml",
+ "reqwest",
+ "serde",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "url",
  "wiremock",
 ]
 
@@ -2345,6 +2362,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "quick-xml"
+version = "0.40.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2474bd2e5029e7ccb6abb2ba48cf2383a333851dedf495901544281590c7da7f"
+dependencies = [
+ "memchr",
 ]
 
 [[package]]

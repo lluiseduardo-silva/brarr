@@ -21,6 +21,7 @@ axum = { version = "0.8.9", default-features = false, features = ["macros", "htt
 brarr-core = { version = "0.1.0", path = "../brarr-core" }
 brarr-decision-service = { version = "0.1.0", path = "../brarr-decision-service" }
 brarr-plugin-host = { version = "0.1.0", path = "../brarr-plugin-host" }
+brarr-tracker-newznab = { version = "0.1.0", path = "../brarr-tracker-newznab" }
 brarr-tracker-unit3d = { version = "0.1.0", path = "../brarr-tracker-unit3d" }
 futures = "0.3.32"
 prost = "0.14.3"

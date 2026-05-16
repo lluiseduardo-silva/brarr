@@ -121,14 +121,39 @@ fn dispatch_search(config: &Config, args: &SearchArgs) -> Result<()> {
 }
 
 fn dispatch_remote(args: &RemoteArgs) -> Result<()> {
-    let tmdb = TmdbId::new(args.tmdb)
-        .with_context(|| format!("TMDB id {} is invalid (must be > 0)", args.tmdb))?;
+    let tmdb = match args.tmdb {
+        Some(n) => {
+            Some(TmdbId::new(n).with_context(|| format!("TMDB id {n} is invalid (must be > 0)"))?)
+        }
+        None => None,
+    };
+    let imdb = match args.imdb.as_deref() {
+        Some(raw) => {
+            let stripped = raw.trim().trim_start_matches("tt");
+            let n: u32 = stripped
+                .parse()
+                .with_context(|| format!("invalid IMDB id {raw:?}: expected numeric tt-id"))?;
+            Some(
+                brarr_core::ImdbId::new(n)
+                    .with_context(|| format!("IMDB id {raw} is invalid (must be > 0)"))?,
+            )
+        }
+        None => None,
+    };
+    if tmdb.is_none() && imdb.is_none() {
+        anyhow::bail!("at least one of --tmdb or --imdb must be set");
+    }
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .context("building tokio runtime")?;
     let outcome = runtime
-        .block_on(run_remote_search(&args.addr, args.token.as_deref(), tmdb))
+        .block_on(run_remote_search(
+            &args.addr,
+            args.token.as_deref(),
+            tmdb,
+            imdb,
+        ))
         .with_context(|| format!("remote search against {}", args.addr))?;
 
     let rendered = match args.format {

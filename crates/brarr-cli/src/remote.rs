@@ -25,7 +25,7 @@ pub mod proto {
 use std::time::Duration;
 
 use brarr_core::{
-    DecisionScore, ExternalIds, Release, ReleaseKind, ReleaseUrls, Resolution, TmdbId,
+    DecisionScore, ExternalIds, ImdbId, Release, ReleaseKind, ReleaseUrls, Resolution, TmdbId,
     TrackerSource,
 };
 use brarr_decision_service::DecisionOutcome;
@@ -56,7 +56,8 @@ pub enum RemoteError {
 /// Run a remote TMDb search against the orchestrator at `addr`.
 ///
 /// `addr` is the bare host:port (e.g. `127.0.0.1:50051`); the function
-/// prepends `http://` because tonic requires a scheme.
+/// prepends `http://` because tonic requires a scheme. Pass exactly
+/// one of `tmdb`/`imdb` (or both — the orchestrator decides per-tracker).
 ///
 /// # Errors
 ///
@@ -64,7 +65,8 @@ pub enum RemoteError {
 pub async fn run_remote_search(
     addr: &str,
     token: Option<&str>,
-    tmdb: TmdbId,
+    tmdb: Option<TmdbId>,
+    imdb: Option<ImdbId>,
 ) -> Result<SearchOutcome, RemoteError> {
     let uri = if addr.starts_with("http://") || addr.starts_with("https://") {
         addr.to_string()
@@ -75,12 +77,18 @@ pub async fn run_remote_search(
         .connect_timeout(Duration::from_secs(5))
         .timeout(Duration::from_secs(60));
     let channel: Channel = endpoint.connect().await?;
-    info!(target: "brarr_cli::remote", %uri, tmdb = tmdb.get(), "dispatching remote search");
+    info!(
+        target: "brarr_cli::remote",
+        %uri,
+        tmdb = ?tmdb.map(TmdbId::get),
+        imdb = ?imdb.map(ImdbId::get),
+        "dispatching remote search"
+    );
 
     let mut client = BrarrClient::new(channel);
     let mut request = tonic::Request::new(SearchRequest {
-        tmdb_id: tmdb.get(),
-        imdb_id: String::new(),
+        tmdb_id: tmdb.map(TmdbId::get).unwrap_or(0),
+        imdb_id: imdb.map(|i| format!("{:07}", i.get())).unwrap_or_default(),
     });
     if let Some(t) = token {
         let v = MetadataValue::try_from(format!("Bearer {t}"))

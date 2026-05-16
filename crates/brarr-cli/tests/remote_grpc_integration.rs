@@ -45,9 +45,14 @@ async fn spawn_grpc(auth: AuthConfig) -> SocketAddr {
 #[tokio::test]
 async fn remote_search_against_empty_orchestrator_returns_zero_releases() {
     let addr = spawn_grpc(AuthConfig::Disabled).await;
-    let outcome = run_remote_search(&addr.to_string(), None, TmdbId::new(603).unwrap())
-        .await
-        .expect("remote search");
+    let outcome = run_remote_search(
+        &addr.to_string(),
+        None,
+        Some(TmdbId::new(603).unwrap()),
+        None,
+    )
+    .await
+    .expect("remote search");
     assert!(outcome.scored.is_empty());
     assert!(outcome.failures.is_empty());
 }
@@ -55,16 +60,21 @@ async fn remote_search_against_empty_orchestrator_returns_zero_releases() {
 #[tokio::test]
 async fn remote_search_with_correct_bearer_succeeds() {
     let addr = spawn_grpc(AuthConfig::from_optional(Some("s3cret"))).await;
-    let outcome = run_remote_search(&addr.to_string(), Some("s3cret"), TmdbId::new(1).unwrap())
-        .await
-        .expect("remote search");
+    let outcome = run_remote_search(
+        &addr.to_string(),
+        Some("s3cret"),
+        Some(TmdbId::new(1).unwrap()),
+        None,
+    )
+    .await
+    .expect("remote search");
     assert!(outcome.scored.is_empty());
 }
 
 #[tokio::test]
 async fn remote_search_without_token_when_auth_enabled_is_unauthenticated() {
     let addr = spawn_grpc(AuthConfig::from_optional(Some("s3cret"))).await;
-    let err = run_remote_search(&addr.to_string(), None, TmdbId::new(1).unwrap())
+    let err = run_remote_search(&addr.to_string(), None, Some(TmdbId::new(1).unwrap()), None)
         .await
         .unwrap_err();
     let RemoteError::Rpc(status) = err else {
@@ -79,7 +89,8 @@ async fn remote_search_with_wrong_token_rejected() {
     let err = run_remote_search(
         &addr.to_string(),
         Some("not-the-token"),
-        TmdbId::new(1).unwrap(),
+        Some(TmdbId::new(1).unwrap()),
+        None,
     )
     .await
     .unwrap_err();
@@ -92,7 +103,7 @@ async fn remote_search_with_wrong_token_rejected() {
 #[tokio::test]
 async fn remote_search_against_bad_address_yields_endpoint_error() {
     // Unbound port; connect must fail fast.
-    let err = run_remote_search("127.0.0.1:1", None, TmdbId::new(1).unwrap())
+    let err = run_remote_search("127.0.0.1:1", None, Some(TmdbId::new(1).unwrap()), None)
         .await
         .unwrap_err();
     // The exact variant depends on whether tonic surfaces it as

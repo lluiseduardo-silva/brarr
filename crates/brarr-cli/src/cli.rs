@@ -56,12 +56,18 @@ pub struct SearchArgs {
     pub format: OutputFormat,
 }
 
-/// Argumentos do subcomando `remote`.
+/// Argumentos do subcomando `remote`. Pelo menos um de `--tmdb` ou
+/// `--imdb` deve ser informado.
 #[derive(Debug, Args)]
 pub struct RemoteArgs {
     /// ID `TMDB` do filme/série.
-    #[arg(long)]
-    pub tmdb: u32,
+    #[arg(long, conflicts_with = "imdb", required_unless_present = "imdb")]
+    pub tmdb: Option<u32>,
+
+    /// ID `IMDB` do filme (numérico, com ou sem prefixo `tt`). Newznab
+    /// só aceita `IMDB` em `movie-search`.
+    #[arg(long, conflicts_with = "tmdb", required_unless_present = "tmdb")]
+    pub imdb: Option<String>,
 
     /// Endereço do orchestrator (default `127.0.0.1:50051`). Aceita
     /// `host:port` ou URL completa com `http://`/`https://`.
@@ -130,10 +136,34 @@ mod tests {
         let Command::Remote(args) = cli.command else {
             panic!("expected Remote subcommand");
         };
-        assert_eq!(args.tmdb, 603);
+        assert_eq!(args.tmdb, Some(603));
+        assert!(args.imdb.is_none());
         assert_eq!(args.addr, "127.0.0.1:50051");
         assert!(args.token.is_none());
         assert_eq!(args.limit, 10);
+    }
+
+    #[test]
+    fn parses_remote_with_imdb_id() {
+        let cli =
+            Cli::try_parse_from(["brarr", "remote", "--imdb", "tt9999001"]).expect("valid args");
+        let Command::Remote(args) = cli.command else {
+            panic!("expected Remote");
+        };
+        assert!(args.tmdb.is_none());
+        assert_eq!(args.imdb.as_deref(), Some("tt9999001"));
+    }
+
+    #[test]
+    fn remote_requires_at_least_one_id() {
+        let r = Cli::try_parse_from(["brarr", "remote", "--addr", "127.0.0.1:1"]);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn remote_rejects_both_ids_set() {
+        let r = Cli::try_parse_from(["brarr", "remote", "--tmdb", "1", "--imdb", "tt9999001"]);
+        assert!(r.is_err());
     }
 
     #[test]

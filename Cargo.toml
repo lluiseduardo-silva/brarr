@@ -4,6 +4,7 @@ members = [
     "crates/brarr-mediainfo",
     "crates/brarr-core",
     "crates/brarr-tracker-unit3d",
+    "crates/brarr-tracker-newznab",
     "crates/brarr-cli",
     "crates/brarr-orchestrator",
     "crates/brarr-decision-service",

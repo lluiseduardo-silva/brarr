@@ -3,12 +3,16 @@
 //! the structured outcome.
 //!
 //! Fan-out goes through the [`brarr_core::TrackerProvider`] trait, so
-//! direct UNIT3D HTTP clients and WASM-loaded plugins live in the same
-//! pipeline. The provider for each tracker row is built lazily inside
-//! the per-tracker future:
+//! direct UNIT3D HTTP clients, Newznab indexers, and WASM-loaded plugins
+//! live in the same pipeline. The provider for each tracker row is built
+//! lazily inside the per-tracker future based on the row's `kind` and
+//! `plugin_path`:
 //!
-//! - `plugin_path == None`     → [`brarr_tracker_unit3d::Unit3dClient`]
-//! - `plugin_path == Some(p)`  → [`brarr_plugin_host::WasmTrackerProvider`]
+//! | `kind`        | `plugin_path` | Provider                                    |
+//! |---------------|---------------|---------------------------------------------|
+//! | `"unit3d"`    | `None`        | [`brarr_tracker_unit3d::Unit3dClient`]      |
+//! | `"newznab"`   | `None`        | [`brarr_tracker_newznab::NewznabClient`]    |
+//! | any           | `Some(path)`  | [`brarr_plugin_host::WasmTrackerProvider`]  |
 //!
 //! A single `wasmtime::Engine` lives in [`AppState`] and is reused for
 //! every plugin instantiation — cranelift initialization is the
@@ -17,8 +21,9 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use brarr_core::{Release, TmdbId, TrackerProvider, TrackerSource};
+use brarr_core::{ImdbId, Release, TmdbId, TrackerProvider, TrackerSource};
 use brarr_plugin_host::{PluginConfig, WasmEpochTicker, WasmTrackerProvider};
+use brarr_tracker_newznab::NewznabClient;
 use brarr_tracker_unit3d::Unit3dClient;
 use futures::future::join_all;
 use tracing::{debug, info, warn};
@@ -33,6 +38,37 @@ use crate::db::{
 };
 use crate::{AppError, AppState};
 
+/// Set of external media ids a search can carry. At least one field
+/// should be `Some(_)` — fully-empty keys produce zero results.
+#[derive(Debug, Clone, Default)]
+pub struct SearchKeys {
+    /// TMDb id (movies / TV). Honored by UNIT3D and most plugins.
+    pub tmdb: Option<TmdbId>,
+    /// IMDb id (numeric tt-id without prefix). Honored by Newznab
+    /// movie-search.
+    pub imdb: Option<ImdbId>,
+}
+
+impl SearchKeys {
+    /// Convenience: build keys with only `tmdb` set.
+    #[must_use]
+    pub fn from_tmdb(tmdb: TmdbId) -> Self {
+        Self {
+            tmdb: Some(tmdb),
+            imdb: None,
+        }
+    }
+
+    /// Convenience: build keys with only `imdb` set.
+    #[must_use]
+    pub fn from_imdb(imdb: ImdbId) -> Self {
+        Self {
+            tmdb: None,
+            imdb: Some(imdb),
+        }
+    }
+}
+
 /// Aggregate outcome of one search run.
 #[derive(Debug, Clone)]
 pub struct SearchRunOutcome {
@@ -46,11 +82,25 @@ pub struct SearchRunOutcome {
     pub failures: Vec<(String, String)>,
 }
 
-/// Execute a TMDb search across every configured tracker, persist
-/// results, and return the outcome.
+/// Backwards-compatible wrapper around [`run_search`] that only carries
+/// a TMDb id. Existing callers (gRPC `Search`, the HTMX form) stay
+/// untouched; new callers should prefer [`run_search`] with a full
+/// [`SearchKeys`] bundle.
 ///
-/// This is the one entry point shared between the HTTP route and the
-/// gRPC service so both paths land in identical DB state.
+/// # Errors
+///
+/// See [`run_search`].
+pub async fn run_tmdb_search(state: &AppState, tmdb: TmdbId) -> Result<SearchRunOutcome, AppError> {
+    run_search(state, SearchKeys::from_tmdb(tmdb)).await
+}
+
+/// Execute a search across every configured tracker, persist results,
+/// and return the outcome.
+///
+/// The provider dispatch picks the right search axis per-tracker:
+/// - UNIT3D + plugin rows prefer `tmdb`, fall back to `imdb`.
+/// - Newznab rows prefer `imdb`, fall back to `tmdb` (best-effort —
+///   most Newznab servers don't accept TMDb on movie-search).
 ///
 /// # Errors
 ///
@@ -58,19 +108,20 @@ pub struct SearchRunOutcome {
 /// or a decision row cannot be persisted. Tracker-level errors (HTTP
 /// timeout, decode failure, plugin trap, etc.) are **not** fatal —
 /// they collect in [`SearchRunOutcome::failures`].
-pub async fn run_tmdb_search(state: &AppState, tmdb: TmdbId) -> Result<SearchRunOutcome, AppError> {
+pub async fn run_search(state: &AppState, keys: SearchKeys) -> Result<SearchRunOutcome, AppError> {
     let pool = state.pool();
     let engine = state.engine();
 
     let request = SearchRequestJson {
-        tmdb_id: Some(tmdb.get()),
-        imdb_id: None,
+        tmdb_id: keys.tmdb.map(TmdbId::get),
+        imdb_id: keys.imdb.map(|i| i.get().to_string()),
     };
     let search = searches::create(pool, request).await?;
     info!(
         target: "brarr_orchestrator::search",
         search_id = %search.id,
-        tmdb = tmdb.get(),
+        tmdb = ?keys.tmdb.map(TmdbId::get),
+        imdb = ?keys.imdb.map(ImdbId::get),
         "search created"
     );
 
@@ -88,7 +139,7 @@ pub async fn run_tmdb_search(state: &AppState, tmdb: TmdbId) -> Result<SearchRun
         });
     }
 
-    let per_tracker = fan_out(state.wasm_engine(), state.wasm_ticker(), &trackers, tmdb).await;
+    let per_tracker = fan_out(state.wasm_engine(), state.wasm_ticker(), &trackers, &keys).await;
 
     let mut decisions_out = Vec::new();
     let mut failures = Vec::new();
@@ -156,22 +207,18 @@ async fn fan_out(
     wasm_engine: &WasmEngine,
     ticker: &WasmEpochTicker,
     trackers: &[TrackerRow],
-    tmdb: TmdbId,
+    keys: &SearchKeys,
 ) -> Vec<(TrackerRow, Result<Vec<Release>, String>)> {
     let wasm_engine = wasm_engine.clone();
-    // The ticker is borrowed through `state.wasm_ticker()` for the
-    // lifetime of the search; we capture it by raw pointer through
-    // the engine and a closure scope. Simpler: just pass &WasmEngine +
-    // call `build_provider` per-tracker which takes refs.
     let futures = trackers.iter().cloned().map(|tr| {
         let wasm_engine = wasm_engine.clone();
+        let keys = keys.clone();
         async move {
             let provider = match build_provider(&wasm_engine, ticker, &tr).await {
                 Ok(p) => p,
                 Err(e) => return (tr, Err(e)),
             };
-            let result = provider
-                .search_by_tmdb(tmdb)
+            let result = dispatch_search(&tr, provider.as_ref(), &keys)
                 .await
                 .map_err(|e| e.to_string());
             (tr, result)
@@ -180,10 +227,40 @@ async fn fan_out(
     join_all(futures).await
 }
 
-/// Build a `TrackerProvider` for `tr`. UNIT3D rows return a
-/// [`Unit3dClient`] wrapper; rows with `plugin_path` return a
-/// [`WasmTrackerProvider`] compiled against `wasm_engine` (with the
-/// shared `ticker` enforcing the per-call epoch deadline).
+/// Per-tracker axis picker. Newznab rows prefer IMDb; everything else
+/// prefers TMDb. Falls back to the other axis when the preferred one
+/// is missing from `keys`. Returns `Ok(vec![])` when no usable axis
+/// is available (so the tracker shows up with zero hits instead of an
+/// error).
+async fn dispatch_search(
+    tr: &TrackerRow,
+    provider: &dyn TrackerProvider,
+    keys: &SearchKeys,
+) -> Result<Vec<Release>, brarr_core::ProviderError> {
+    let prefer_imdb = tr.kind.eq_ignore_ascii_case("newznab");
+    if prefer_imdb && let Some(imdb) = keys.imdb {
+        return provider.search_by_imdb(imdb).await;
+    }
+    if !prefer_imdb && let Some(tmdb) = keys.tmdb {
+        return provider.search_by_tmdb(tmdb).await;
+    }
+    // Fallback axis when the preferred one wasn't supplied.
+    if let Some(tmdb) = keys.tmdb {
+        return provider.search_by_tmdb(tmdb).await;
+    }
+    if let Some(imdb) = keys.imdb {
+        return provider.search_by_imdb(imdb).await;
+    }
+    Ok(Vec::new())
+}
+
+/// Build a `TrackerProvider` for `tr`. Dispatch matrix:
+///
+/// | `kind`        | `plugin_path` | Provider                              |
+/// |---------------|---------------|---------------------------------------|
+/// | `unit3d`      | `None`        | [`Unit3dClient`]                      |
+/// | `newznab`     | `None`        | [`NewznabClient`]                     |
+/// | any           | `Some(path)`  | [`WasmTrackerProvider`]               |
 async fn build_provider(
     wasm_engine: &WasmEngine,
     ticker: &WasmEpochTicker,
@@ -203,7 +280,14 @@ async fn build_provider(
         )
         .await
         .map_err(|e| format!("load plugin {}: {e}", path.display()))?;
-        Ok(Arc::new(provider))
+        return Ok(Arc::new(provider));
+    }
+
+    // Default to UNIT3D for unknown kinds — matches pre-Newznab
+    // behaviour and gives a useful error if the token is wrong.
+    if tr.kind.eq_ignore_ascii_case("newznab") {
+        let client = NewznabClient::new(source, &tr.api_token).map_err(|e| e.to_string())?;
+        Ok(Arc::new(client))
     } else {
         let client = Unit3dClient::new(source, &tr.api_token).map_err(|e| e.to_string())?;
         Ok(Arc::new(client))

@@ -13,3 +13,6 @@ url = "2.5.8"
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+tokio = { version = "1.52.3", default-features = false, features = ["macros", "rt"] }
