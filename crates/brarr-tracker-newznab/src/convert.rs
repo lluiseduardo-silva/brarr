@@ -186,15 +186,22 @@ fn lang_hints_from_title(title: &str) -> Vec<Language> {
         push_unique(&mut out, Language::PtPt);
     }
 
-    // Ambiguous bare-Portuguese marker — only added when no region
-    // marker already classified the release.
-    if !out.iter().any(Language::is_portuguese) && padded.contains(" portuguese ") {
+    // Ambiguous bare-Portuguese markers — only added when no region
+    // marker already classified the release. ` por ` is the 3-letter
+    // ISO-639-2 / scene-tag code for Portuguese and appears in
+    // multi-audio release names like
+    // `Movie.1999.Eng.Fre.Ger.Ita.Por.Spa.2160p.BluRay-CREW`. It can't
+    // distinguish BR vs PT on its own, so we drop the ambiguous variant.
+    if !out.iter().any(Language::is_portuguese)
+        && (padded.contains(" portuguese ") || padded.contains(" por "))
+    {
         push_unique(&mut out, Language::Pt);
     }
 
     // English markers. ` en ` is intentionally narrow — matching just
     // "en" as a substring would false-positive on every release name
-    // (`encoded`, `seven`, etc.).
+    // (`encoded`, `seven`, etc.). The 3-letter ` eng ` scene-tag code
+    // is fine because the token boundaries make it unambiguous.
     if padded.contains(" english ") || padded.contains(" eng ") || padded.contains(" en ") {
         push_unique(&mut out, Language::En);
     }
@@ -441,6 +448,34 @@ mod tests {
         );
         assert!(e.subtitle_languages.contains(&Language::En));
         assert!(e.subtitle_languages.contains(&Language::Pt));
+    }
+
+    #[test]
+    fn title_hint_detects_scene_3letter_por_code() {
+        // Scene release names list audio tracks as 3-letter codes
+        // separated by dots:
+        // `Movie.1999.Eng.Fre.Ger.Ita.Por.Spa.2160p.BluRay-CREW`.
+        // The indexer may publish only `language=English` in the
+        // attrs, so brarr has to mine the title for the `Por` token
+        // to register PT presence at all.
+        let hints = lang_hints_from_title(
+            "The.Matrix.1999.Eng.Fre.Ger.Ita.Por.Spa.Cze.Hun.Pol.Rus.Tha.Tur.Jpn.2160p.BluRay.Remux.DV.HDR.HEVC.Atmos-SGF",
+        );
+        assert!(
+            hints.contains(&Language::Pt),
+            "expected Pt from `Por` token, got {hints:?}",
+        );
+        // ` Eng ` token must also light up English.
+        assert!(hints.contains(&Language::En));
+    }
+
+    #[test]
+    fn title_hint_does_not_false_positive_por_inside_porto() {
+        // Plain "Porto" / "Portland" / etc. must not trip the ` por `
+        // matcher — only a standalone `Por` token surrounded by
+        // separators counts.
+        assert!(!lang_hints_from_title("Porto.2024.1080p.WEB-DL").contains(&Language::Pt));
+        assert!(!lang_hints_from_title("Portland.2024.1080p.WEB-DL").contains(&Language::Pt));
     }
 
     #[test]
