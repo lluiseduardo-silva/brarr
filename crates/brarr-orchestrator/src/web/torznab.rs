@@ -222,6 +222,7 @@ fn parse_u32_param(raw: Option<&String>, field: &str) -> Result<Option<u32>, App
 async fn handle_api(
     State(state): State<AppState>,
     Query(q): Query<ApiQuery>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Response, AppError> {
     let t =
         q.t.as_deref()
@@ -230,27 +231,35 @@ async fn handle_api(
             .ok_or_else(|| AppError::InvalidInput("missing ?t= parameter".to_string()))?
             .to_ascii_lowercase();
 
+    // Derive the public base URL ("scheme://host") from the request so
+    // every URL the feed emits is absolute. Sonarr/Radarr's RSS parser
+    // silently drops `<item>`s whose `<enclosure url>` is relative —
+    // appearing in their UI as "no results found" even when the feed
+    // body has plenty of items.
+    let base_url = derive_base_url(&headers);
+
     match t.as_str() {
         "caps" => Ok(xml_response(StatusCode::OK, render_caps()?)),
-        "movie" => handle_movie(&state, &q).await,
+        "movie" => handle_movie(&state, &q, &base_url).await,
         "search" => {
-            // Free-text axis isn't implemented, but Sonarr/Radarr block
-            // saving an indexer whose `t=search` returns zero items.
-            // Emit one sentinel placeholder so the test probe passes;
-            // the sentinel carries a 1999 pubDate so RSS sync never
-            // grabs it, and its proxy URL resolves to a 404.
             debug!(
                 target: "brarr_orchestrator::torznab",
                 "t=search probe — returning sentinel placeholder"
             );
-            Ok(xml_response(StatusCode::OK, render_placeholder_feed()?))
+            Ok(xml_response(
+                StatusCode::OK,
+                render_placeholder_feed(&base_url)?,
+            ))
         }
         "tvsearch" | "tv-search" => {
             debug!(
                 target: "brarr_orchestrator::torznab",
                 "t=tvsearch — no TV axis yet, returning sentinel placeholder"
             );
-            Ok(xml_response(StatusCode::OK, render_placeholder_feed()?))
+            Ok(xml_response(
+                StatusCode::OK,
+                render_placeholder_feed(&base_url)?,
+            ))
         }
         other => {
             warn!(
@@ -268,7 +277,11 @@ async fn handle_api(
     }
 }
 
-async fn handle_movie(state: &AppState, q: &ApiQuery) -> Result<Response, AppError> {
+async fn handle_movie(
+    state: &AppState,
+    q: &ApiQuery,
+    base_url: &str,
+) -> Result<Response, AppError> {
     let imdb = parse_imdb(q.imdbid.as_deref())?;
     let tmdb_raw = parse_u32_param(q.tmdbid.as_ref(), "tmdbid")?;
     let tmdb = tmdb_raw
@@ -280,13 +293,16 @@ async fn handle_movie(state: &AppState, q: &ApiQuery) -> Result<Response, AppErr
         // Radarr's "Test Indexer" calls `t=movie` with only `cat=` and
         // `extended=1` (no actual id) and refuses to save the indexer
         // when the response is empty. Emit a sentinel placeholder so
-        // the probe passes; the sentinel carries a 1999 pubDate so RSS
-        // sync ignores it, and its proxy URL resolves to a 404.
+        // the probe passes; the sentinel carries a ~30-day-old pubDate
+        // so RSS sync ignores it, and its proxy URL resolves to a 404.
         debug!(
             target: "brarr_orchestrator::torznab",
             "t=movie with no tmdbid/imdbid — returning sentinel placeholder"
         );
-        return Ok(xml_response(StatusCode::OK, render_placeholder_feed()?));
+        return Ok(xml_response(
+            StatusCode::OK,
+            render_placeholder_feed(base_url)?,
+        ));
     }
 
     let outcome = run_search(state, SearchKeys { tmdb, imdb }).await?;
@@ -299,7 +315,41 @@ async fn handle_movie(state: &AppState, q: &ApiQuery) -> Result<Response, AppErr
         .filter_map(decision_to_release)
         .collect();
 
-    Ok(xml_response(StatusCode::OK, render_feed(&releases)?))
+    Ok(xml_response(
+        StatusCode::OK,
+        render_feed(&releases, base_url)?,
+    ))
+}
+
+/// Derive the public-facing base URL ("scheme://host") from the
+/// incoming request headers. Used to rewrite every URL emitted in the
+/// Torznab feed into an absolute form, so RSS parsers like Sonarr /
+/// Radarr — which silently drop items with relative URLs — see real
+/// links.
+///
+/// Order of precedence:
+///   1. `BRARR_PUBLIC_URL` env var (if the operator set an explicit
+///      external URL; useful behind a reverse proxy with a different
+///      hostname than what the listener sees).
+///   2. `X-Forwarded-Proto` + `X-Forwarded-Host` headers (standard
+///      reverse-proxy hint).
+///   3. `Host` header on the incoming request.
+///   4. Fallback to `http://127.0.0.1:3000` — never reached in normal
+///      operation but keeps the function total.
+fn derive_base_url(headers: &axum::http::HeaderMap) -> String {
+    if let Ok(env_url) = std::env::var("BRARR_PUBLIC_URL") {
+        return env_url.trim_end_matches('/').to_string();
+    }
+    let scheme = headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("http");
+    let host = headers
+        .get("x-forwarded-host")
+        .or_else(|| headers.get(axum::http::header::HOST))
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("127.0.0.1:3000");
+    format!("{scheme}://{host}")
 }
 
 fn parse_imdb(raw: Option<&str>) -> Result<Option<ImdbId>, AppError> {
@@ -443,9 +493,10 @@ fn render_caps() -> Result<Vec<u8>, AppError> {
     Ok(writer.into_inner().into_inner())
 }
 
-/// Render an RSS feed with zero items. Used for probes and unsupported
-/// axes.
-fn render_feed_inner(items: &[Release]) -> Result<Vec<u8>, AppError> {
+/// Render the RSS feed body. `base_url` is the absolute `scheme://host`
+/// prefix used to expand the per-item proxy download URL into a fully
+/// qualified link.
+fn render_feed_inner(items: &[Release], base_url: &str) -> Result<Vec<u8>, AppError> {
     let mut writer = Writer::new(Cursor::new(Vec::with_capacity(2048)));
     writer
         .write_event(Event::Decl(BytesDecl::new("1.0", Some("UTF-8"), None)))
@@ -473,7 +524,7 @@ fn render_feed_inner(items: &[Release]) -> Result<Vec<u8>, AppError> {
             cw.create_element("language")
                 .write_text_content(BytesText::new("pt-BR"))?;
             for item in items {
-                write_item(cw, item)?;
+                write_item(cw, item, base_url)?;
             }
             Ok(())
         })
@@ -492,7 +543,7 @@ fn render_empty_feed() -> Result<Vec<u8>, AppError> {
     // dangling in the binary. Production paths emit the placeholder
     // feed instead (Sonarr/Radarr can't add an indexer that returns
     // 0 items on its test probe).
-    render_feed_inner(&[])
+    render_feed_inner(&[], "http://127.0.0.1:3000")
 }
 
 /// Build an RSS feed with a single sentinel item so Sonarr / Radarr's
@@ -513,7 +564,8 @@ fn render_empty_feed() -> Result<Vec<u8>, AppError> {
 ///   Search instantly recognizes its synthetic nature.
 /// - Size is 1 byte and the enclosure URL resolves to a 404 through
 ///   the download proxy, so an accidental grab fails fast and clearly.
-fn render_placeholder_feed() -> Result<Vec<u8>, AppError> {
+fn render_placeholder_feed(base_url: &str) -> Result<Vec<u8>, AppError> {
+    let sentinel_url = format!("{base_url}/torznab/download/00000000-0000-0000-0000-000000000000");
     let mut writer = Writer::new(Cursor::new(Vec::with_capacity(1024)));
     writer
         .write_event(Event::Decl(BytesDecl::new("1.0", Some("UTF-8"), None)))
@@ -560,9 +612,7 @@ fn render_placeholder_feed() -> Result<Vec<u8>, AppError> {
                 iw.create_element("pubDate")
                     .write_text_content(BytesText::new(&pub_date))?;
                 iw.create_element("link")
-                    .write_text_content(BytesText::new(
-                        "/torznab/download/00000000-0000-0000-0000-000000000000",
-                    ))?;
+                    .write_text_content(BytesText::new(&sentinel_url))?;
                 // Emit the most common Movies subcategory as the
                 // primary `<category>` so probes that compare only
                 // this element pass. Repeat it through the attr block
@@ -571,10 +621,7 @@ fn render_placeholder_feed() -> Result<Vec<u8>, AppError> {
                     .write_text_content(BytesText::new("2040"))?;
                 iw.create_element("enclosure")
                     .with_attributes([
-                        (
-                            "url",
-                            "/torznab/download/00000000-0000-0000-0000-000000000000",
-                        ),
+                        ("url", sentinel_url.as_str()),
                         ("length", "1"),
                         ("type", "application/x-bittorrent"),
                     ])
@@ -602,11 +649,15 @@ fn render_placeholder_feed() -> Result<Vec<u8>, AppError> {
     Ok(writer.into_inner().into_inner())
 }
 
-fn render_feed(items: &[Release]) -> Result<Vec<u8>, AppError> {
-    render_feed_inner(items)
+fn render_feed(items: &[Release], base_url: &str) -> Result<Vec<u8>, AppError> {
+    render_feed_inner(items, base_url)
 }
 
-fn write_item<W: std::io::Write>(w: &mut Writer<W>, r: &Release) -> std::io::Result<()> {
+fn write_item<W: std::io::Write>(
+    w: &mut Writer<W>,
+    r: &Release,
+    base_url: &str,
+) -> std::io::Result<()> {
     let categories = categories_for(r);
     let primary_cat = categories.first().copied().unwrap_or(2000);
     // Always emit a brarr-side proxy URL — never the raw upstream link.
@@ -618,10 +669,14 @@ fn write_item<W: std::io::Write>(w: &mut Writer<W>, r: &Release) -> std::io::Res
     //      logging) without changing the wire shape.
     // `r.tracker_release_id` was populated by `decision_to_release`
     // with the brarr decision UUID, so we can route the proxy by that.
-    // The path is relative — Sonarr / Radarr resolve it against the
-    // configured indexer base URL, which already carries the apikey
-    // in their own config.
-    let download_url = format!("/torznab/download/{}", r.tracker_release_id);
+    // `base_url` is `scheme://host` derived from the incoming request
+    // headers — required because Sonarr/Radarr silently drop items
+    // with a relative `<enclosure url>` (their RSS parser refuses to
+    // resolve it even against the configured indexer URL).
+    let download_url = format!(
+        "{base_url}/torznab/download/{id}",
+        id = r.tracker_release_id
+    );
     let details_url = r
         .urls
         .details
