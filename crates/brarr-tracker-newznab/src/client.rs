@@ -6,7 +6,7 @@ use brarr_core::{
     ImdbId, ProviderError, ProviderFuture, Release, TmdbId, TrackerProvider, TrackerSource,
 };
 use reqwest::Client;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 use url::Url;
 
 use crate::convert::item_to_release;
@@ -14,6 +14,45 @@ use crate::dto::parse_feed;
 use crate::error::ClientError;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Newznab category ids for the "movies" tree. Comma-separated so it
+/// passes through `query_pairs_mut` as a single `cat=` value the way
+/// Sonarr/Radarr send it. Covers the SD/HD/UHD/BluRay subcats brarr's
+/// outbound Torznab endpoint advertises.
+const MOVIE_CATEGORIES: &str = "2000,2010,2020,2030,2040,2045,2050,2060";
+
+/// Maximum number of body characters emitted in the WARN-level
+/// diagnostic log when an indexer returns zero items. Truncated to
+/// avoid spamming logs when an indexer responds with a huge HTML
+/// error page.
+const BODY_PREVIEW_BYTES: usize = 600;
+
+/// Replace `apikey=...` in a URL's query string with `apikey=REDACTED`
+/// so it's safe to log at INFO. Other params are preserved verbatim.
+fn redact_apikey(url: &Url) -> String {
+    let Some(q) = url.query() else {
+        return url.to_string();
+    };
+    let pairs: Vec<String> = q
+        .split('&')
+        .map(|kv| {
+            if let Some(rest) = kv.strip_prefix("apikey=") {
+                // Keep first 4 chars of the apikey so the operator can
+                // visually tell which key was used without leaking it.
+                let prefix: String = rest.chars().take(4).collect();
+                format!("apikey={prefix}…REDACTED")
+            } else {
+                kv.to_string()
+            }
+        })
+        .collect();
+    let mut out = url.to_string();
+    if let Some(pos) = out.find('?') {
+        out.truncate(pos + 1);
+        out.push_str(&pairs.join("&"));
+    }
+    out
+}
 
 /// HTTP client for a single Newznab indexer.
 ///
@@ -65,15 +104,27 @@ impl NewznabClient {
         &self.tracker
     }
 
-    /// `GET /api?t=movie&imdbid=<id>&apikey=<key>`. NZBGeek and other
-    /// Newznab servers want the IMDb id with the leading `tt` stripped;
-    /// this function does that.
+    /// `GET /api?t=movie&imdbid=<id>&cat=<movie-cats>&apikey=<key>`.
+    /// NZBGeek and other Newznab servers want the IMDb id with the
+    /// leading `tt` stripped, zero-padded to 7 digits.
+    ///
+    /// The `cat=` parameter narrows the search to the movie category
+    /// tree (`2000-2060` per the Newznab category spec). Some indexers
+    /// — NZBGeek among them — return zero items for an unfiltered
+    /// `t=movie` query, so we always supply this filter. Callers that
+    /// need anime/audio/etc. should add their own dedicated wrappers.
     ///
     /// # Errors
     ///
     /// See [`ClientError`].
     pub async fn search_movie_by_imdb(&self, imdb: ImdbId) -> Result<Vec<Release>, ClientError> {
-        let url = self.build_url("movie", &[("imdbid", &format!("{:07}", imdb.get()))])?;
+        let url = self.build_url(
+            "movie",
+            &[
+                ("imdbid", &format!("{:07}", imdb.get())),
+                ("cat", MOVIE_CATEGORIES),
+            ],
+        )?;
         self.fetch_and_parse(url).await
     }
 
@@ -85,7 +136,13 @@ impl NewznabClient {
     ///
     /// See [`ClientError`].
     pub async fn search_movie_by_tmdb(&self, tmdb: TmdbId) -> Result<Vec<Release>, ClientError> {
-        let url = self.build_url("movie", &[("tmdbid", &tmdb.get().to_string())])?;
+        let url = self.build_url(
+            "movie",
+            &[
+                ("tmdbid", &tmdb.get().to_string()),
+                ("cat", MOVIE_CATEGORIES),
+            ],
+        )?;
         self.fetch_and_parse(url).await
     }
 
@@ -103,10 +160,11 @@ impl NewznabClient {
     }
 
     async fn fetch_and_parse(&self, url: Url) -> Result<Vec<Release>, ClientError> {
-        debug!(
+        let redacted = redact_apikey(&url);
+        info!(
             target: "brarr_tracker_newznab",
             tracker = %self.tracker.name,
-            url = %url,
+            url = %redacted,
             "newznab request"
         );
         let resp = self.http.get(url).send().await?.error_for_status()?;
@@ -116,8 +174,28 @@ impl NewznabClient {
             target: "brarr_tracker_newznab",
             tracker = %self.tracker.name,
             items = feed.items.len(),
+            body_bytes = body.len(),
             "newznab response"
         );
+        if feed.items.is_empty() {
+            // Most "no hits" cases are legit (provider really doesn't
+            // have the title), but a zero-items response is also what
+            // you get for: wrong apikey, missing category param, wrong
+            // host, exceeded daily quota, and a few other operator
+            // errors. Log a body preview so the operator can tell
+            // these apart without enabling DEBUG.
+            let preview: String = body
+                .chars()
+                .take(BODY_PREVIEW_BYTES)
+                .collect::<String>()
+                .replace('\n', " ");
+            warn!(
+                target: "brarr_tracker_newznab",
+                tracker = %self.tracker.name,
+                preview = %preview,
+                "newznab returned zero items — body preview follows for diagnosis"
+            );
+        }
         let mut releases = Vec::with_capacity(feed.items.len());
         for item in &feed.items {
             match item_to_release(item, self.tracker.clone()) {
