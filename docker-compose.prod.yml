@@ -1,0 +1,40 @@
+# Production-ish compose file. Targets a single-node deployment where
+# the orchestrator binds to local volumes for its sqlite database and
+# its plugin directory.
+#
+# Usage:
+#   echo "BRARR_AUTH_TOKEN=$(openssl rand -hex 32)" > .env.prod
+#   docker compose -f docker-compose.prod.yml --env-file .env.prod up -d
+#
+# Stop:
+#   docker compose -f docker-compose.prod.yml down
+#
+# The image is built from the repo's `Dockerfile`. For a release pull
+# from a registry, change `build:` to `image: brarr:<tag>`.
+
+services:
+  orchestrator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: brarr:latest
+    restart: unless-stopped
+    environment:
+      # Required in production. The compose `--env-file` injects this.
+      BRARR_AUTH_TOKEN: ${BRARR_AUTH_TOKEN:?BRARR_AUTH_TOKEN must be set; generate one with `openssl rand -hex 32`}
+      RUST_LOG: ${RUST_LOG:-info}
+    ports:
+      - "127.0.0.1:3000:3000"
+      - "127.0.0.1:50051:50051"
+    volumes:
+      - brarr-data:/data
+      - ./plugins:/plugins:ro
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "http://127.0.0.1:3000/healthz"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  brarr-data:

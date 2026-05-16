@@ -20,6 +20,11 @@ target/
 config.local.toml
 /config.toml
 
+# Orchestrator local DB never goes into the image
+brarr.db
+brarr.db-shm
+brarr.db-wal
+
 # Documentação que não precisa ir pro build context
 docs/
 *.md

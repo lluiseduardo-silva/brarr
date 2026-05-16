@@ -35,6 +35,21 @@ Env vars: `BRARR_DB_PATH` (default `./brarr.db`), `BRARR_HTTP_ADDR`, `BRARR_GRPC
 
 When `BRARR_AUTH_TOKEN` is set, the UI requires a login at `/login` (sets a `brarr_session` HttpOnly cookie) and gRPC calls must present `authorization: Bearer <token>` metadata. When unset, the orchestrator logs a `warn!` once at startup and lets every request through (dev mode).
 
+### Production deploy (Docker)
+
+```bash
+docker build -t brarr:latest .
+docker run --rm \
+  -p 127.0.0.1:3000:3000 -p 127.0.0.1:50051:50051 \
+  -v brarr-data:/data -v "$PWD/plugins:/plugins:ro" \
+  -e BRARR_AUTH_TOKEN="$(openssl rand -hex 32)" \
+  brarr:latest
+```
+
+Or via compose: `docker compose -f docker-compose.prod.yml --env-file .env.prod up -d` (after writing `BRARR_AUTH_TOKEN=...` into `.env.prod`).
+
+Image layout: multi-stage `rust:1.95-slim-bookworm` builder → `debian:bookworm-slim` runtime, non-root user (`uid 10001`), `/data` volume for sqlite + `/plugins` for `.wasm` modules, `tini` as PID 1, `wget`-based HEALTHCHECK against `/healthz`.
+
 ## Toolchain notes
 
 - **Deployment target**: Linux (Docker). Windows local dev is supported but not the primary path.
