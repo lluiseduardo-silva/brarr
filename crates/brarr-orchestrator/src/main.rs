@@ -12,6 +12,7 @@
 //! | `BRARR_HTTP_ADDR`              | `127.0.0.1:3000`             | bind address for the admin UI        |
 //! | `BRARR_GRPC_ADDR`              | `127.0.0.1:50051`            | bind address for the gRPC service    |
 //! | `BRARR_STATIC_DIR`             | `crates/brarr-orchestrator/static` | static asset directory         |
+//! | `BRARR_AUTH_TOKEN`             | _(unset, auth disabled)_     | shared admin token for UI + gRPC     |
 //! | `RUST_LOG`                     | `info`                       | tracing-subscriber env filter        |
 
 #![allow(clippy::print_stdout, reason = "user-facing startup banner is fine")]
@@ -21,7 +22,8 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use brarr_decision_service::Engine;
-use brarr_orchestrator::{AppState, db, grpc, web};
+use brarr_orchestrator::{AppState, AuthConfig, db, grpc, web};
+use tracing::warn;
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -43,12 +45,27 @@ async fn main() -> Result<()> {
     let pool = db::open(&db_path)
         .await
         .with_context(|| format!("opening database at {db_path}"))?;
-    let state = AppState::new(pool, Engine::baseline());
+    let auth = AuthConfig::from_optional(std::env::var("BRARR_AUTH_TOKEN").ok().as_deref());
+    if !auth.is_enabled() {
+        warn!(
+            target: "brarr_orchestrator",
+            "BRARR_AUTH_TOKEN is unset — admin UI and gRPC are unauthenticated. Set it for production deployments."
+        );
+    }
+    let state = AppState::with_auth(pool, Engine::baseline(), auth.clone());
 
     println!("brarr-orchestrator");
     println!("  http  → http://{http_addr}");
     println!("  grpc  → {grpc_addr}");
     println!("  db    → {db_path}");
+    println!(
+        "  auth  → {}",
+        if auth.is_enabled() {
+            "enabled"
+        } else {
+            "DISABLED (dev mode)"
+        }
+    );
     println!("  press Ctrl-C to stop");
 
     let web_state = state.clone();

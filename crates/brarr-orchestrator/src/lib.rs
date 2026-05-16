@@ -50,6 +50,7 @@
     reason = "TMDb/IMDb/SQLite appear too often in user-facing module docs to be worth backticking each time"
 )]
 
+pub mod auth;
 pub mod db;
 pub mod error;
 pub mod grpc;
@@ -57,5 +58,6 @@ pub mod search;
 pub mod state;
 pub mod web;
 
+pub use auth::AuthConfig;
 pub use error::AppError;
 pub use state::AppState;

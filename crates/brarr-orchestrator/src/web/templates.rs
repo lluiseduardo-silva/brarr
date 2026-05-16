@@ -95,6 +95,14 @@ pub struct ReleasesTemplate {
     pub decisions: Vec<DecisionView>,
 }
 
+/// Login form view at `/login`.
+#[derive(Debug, Template)]
+#[template(path = "login.html")]
+pub struct LoginTemplate {
+    /// Optional error banner (wrong token, etc.).
+    pub error_message: Option<String>,
+}
+
 /// Single-search view at `/searches/{id}`.
 #[derive(Debug, Template)]
 #[template(path = "search_detail.html")]

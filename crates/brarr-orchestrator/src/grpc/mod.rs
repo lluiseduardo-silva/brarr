@@ -6,4 +6,4 @@
 pub mod proto;
 pub mod service;
 
-pub use service::serve;
+pub use service::{auth_interceptor, serve};

@@ -22,6 +22,7 @@ use std::sync::Arc;
 use brarr_decision_service::Engine;
 use wasmtime::{Config, Engine as WasmEngine};
 
+use crate::auth::AuthConfig;
 use crate::db::Pool;
 
 /// Cheaply cloneable handle to shared orchestrator state.
@@ -34,10 +35,22 @@ struct Inner {
     pool: Pool,
     engine: Engine,
     wasm_engine: WasmEngine,
+    auth: AuthConfig,
 }
 
 impl AppState {
-    /// Build a new state handle.
+    /// Build a new state handle with auth disabled. Convenience for
+    /// tests and dev mode.
+    ///
+    /// # Panics
+    ///
+    /// See [`Self::with_auth`].
+    #[must_use]
+    pub fn new(pool: Pool, engine: Engine) -> Self {
+        Self::with_auth(pool, engine, AuthConfig::Disabled)
+    }
+
+    /// Build a state handle with an explicit [`AuthConfig`].
     ///
     /// The wasm engine is created with `async_support(true)` so plugins
     /// can use the async host imports (`host_fetch`, etc.).
@@ -48,7 +61,7 @@ impl AppState {
     /// unsupported host architectures, which is a configuration error
     /// worth crashing on rather than papering over.
     #[must_use]
-    pub fn new(pool: Pool, engine: Engine) -> Self {
+    pub fn with_auth(pool: Pool, engine: Engine, auth: AuthConfig) -> Self {
         let mut wasm_cfg = Config::new();
         wasm_cfg.async_support(true);
         let wasm_engine =
@@ -58,8 +71,15 @@ impl AppState {
                 pool,
                 engine,
                 wasm_engine,
+                auth,
             }),
         }
+    }
+
+    /// Borrow the auth configuration.
+    #[must_use]
+    pub fn auth(&self) -> &AuthConfig {
+        &self.inner.auth
     }
 
     /// Borrow the connection pool.

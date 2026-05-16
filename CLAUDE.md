@@ -20,17 +20,20 @@ Implemented end-to-end pipeline plus rules engine, orchestrator service, and WAS
 - `brarr-orchestrator` (Phase 6b + cross-crate integration): tonic gRPC server (`Brarr` service: `Search`, `ListTrackers`, `RecentSearches`) + Axum admin web UI (dashboard, trackers CRUD, releases history, search detail) backed by SQLite via `sqlx`. Server-side rendered with Askama templates + HTMX, Tailwind via CDN, no frontend build pipeline. Search fan-out goes through the `brarr_core::TrackerProvider` trait so UNIT3D direct clients and WASM plugin providers share one pipeline. Trackers table has a `plugin_path` column — when set, the row is served by `WasmTrackerProvider`; otherwise by `Unit3dClient`. A single `wasmtime::Engine` lives in `AppState`. Binary `brarr-orchestrator` launches both servers concurrently.
 - `brarr-plugin-host` (Phase 6c): wasmtime-backed sandbox that loads third-party tracker scrapers as core WASM modules. Runs in async mode (`Config::async_support`) so host imports can `.await`. Plugin ABI v1 documented in the crate-level rustdoc (exports: `plugin_alloc/free`, `plugin_abi_version`, `plugin_name`, `plugin_search_by_tmdb`; imports: `env.host_log` and `env.host_fetch`). `host_fetch` is async, capability-gated by `HostCapabilities::fetch` plus an `allowed_hosts` allowlist, with a per-request timeout. `WasmTrackerProvider` implements `TrackerProvider`.
 
-184 tests pass (`cargo test --workspace --all-targets`). `INITIAL_PROMPT.md` remains the authoritative spec — consult before adding crates, dependencies, or making architectural decisions.
+203 tests pass (`cargo test --workspace --all-targets`). `INITIAL_PROMPT.md` remains the authoritative spec — consult before adding crates, dependencies, or making architectural decisions.
 
 ### Running the orchestrator
 
 ```powershell
 $env:Path = "C:\Users\pc\.cargo\bin;$env:Path"
+$env:BRARR_AUTH_TOKEN = "$(openssl rand -hex 32)"  # optional but recommended
 cargo run -p brarr-orchestrator
 # → http://127.0.0.1:3000 (admin UI), gRPC on 127.0.0.1:50051
 ```
 
-Env vars: `BRARR_DB_PATH` (default `./brarr.db`), `BRARR_HTTP_ADDR`, `BRARR_GRPC_ADDR`, `BRARR_STATIC_DIR`.
+Env vars: `BRARR_DB_PATH` (default `./brarr.db`), `BRARR_HTTP_ADDR`, `BRARR_GRPC_ADDR`, `BRARR_STATIC_DIR`, `BRARR_AUTH_TOKEN`.
+
+When `BRARR_AUTH_TOKEN` is set, the UI requires a login at `/login` (sets a `brarr_session` HttpOnly cookie) and gRPC calls must present `authorization: Bearer <token>` metadata. When unset, the orchestrator logs a `warn!` once at startup and lets every request through (dev mode).
 
 ## Toolchain notes
 

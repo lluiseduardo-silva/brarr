@@ -8,15 +8,22 @@
 //! - `GET  /releases`            → decisions history
 //! - `GET  /searches/{id}`       → search detail (kept + rejected)
 //! - `POST /searches`            → kick off a `TMDb` search (HTMX → redirect)
-//! - `GET  /healthz`             → liveness probe
-//! - `GET  /static/*path`        → static assets (htmx, custom CSS)
+//! - `GET  /login` / `POST /login` → admin token login form
+//! - `POST /logout`              → clear session cookie
+//! - `GET  /healthz`             → liveness probe (always unauth)
+//! - `GET  /static/*path`        → static assets (always unauth)
+//!
+//! All routes except `/healthz`, `/login`, and `/static/**` go through
+//! the auth middleware. When [`crate::AuthConfig::Disabled`] is in
+//! effect the middleware no-ops.
 
 use std::net::SocketAddr;
 
 use axum::Router;
-use axum::extract::{Form, Path, State};
+use axum::extract::{Form, Path, Request, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
-use axum::response::{IntoResponse, Response};
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{delete, get, post};
 use serde::Deserialize;
 use time::OffsetDateTime;
@@ -26,29 +33,60 @@ use tower_http::trace::TraceLayer;
 use tracing::info;
 use uuid::Uuid;
 
+use crate::auth::{AuthConfig, SESSION_COOKIE};
 use crate::db::{decisions, searches, trackers};
 use crate::search::run_tmdb_search;
 use crate::web::render::html;
 use crate::web::templates::{
-    DashboardTemplate, DecisionView, RecentSearchView, ReleasesTemplate, SearchDetailTemplate,
-    TrackerView, TrackersListPartial, TrackersTemplate,
+    DashboardTemplate, DecisionView, LoginTemplate, RecentSearchView, ReleasesTemplate,
+    SearchDetailTemplate, TrackerView, TrackersListPartial, TrackersTemplate,
 };
 use crate::{AppError, AppState};
 use brarr_core::TmdbId;
 
 /// Build the Axum router with `state` as shared state.
 pub fn router(state: AppState, static_dir: &std::path::Path) -> Router {
-    Router::new()
+    let auth_layer = middleware::from_fn_with_state(state.clone(), auth_middleware);
+
+    // Routes that require auth — wrapped by the middleware below.
+    let protected = Router::new()
         .route("/", get(dashboard))
-        .route("/healthz", get(healthz))
         .route("/trackers", get(trackers_index).post(trackers_create))
         .route("/trackers/{id}", delete(trackers_delete))
         .route("/releases", get(releases_index))
         .route("/searches", post(searches_create))
         .route("/searches/{id}", get(search_detail))
+        .route("/logout", post(logout))
+        .layer(auth_layer);
+
+    // Open routes — login form, health, static files.
+    Router::new()
+        .merge(protected)
+        .route("/login", get(login_get).post(login_post))
+        .route("/healthz", get(healthz))
         .nest_service("/static", ServeDir::new(static_dir))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
+}
+
+/// Middleware that gates every protected route on the auth cookie.
+/// When `AuthConfig::Disabled` is in effect it always passes through.
+async fn auth_middleware(
+    State(state): State<AppState>,
+    req: Request,
+    next: Next,
+) -> Result<Response, Response> {
+    if !state.auth().is_enabled() {
+        return Ok(next.run(req).await);
+    }
+    let cookie = AuthConfig::cookie_from_headers(req.headers());
+    let ok = cookie
+        .as_deref()
+        .is_some_and(|tok| state.auth().token_matches(tok));
+    if ok {
+        return Ok(next.run(req).await);
+    }
+    Err(Redirect::to("/login").into_response())
 }
 
 /// Bind to `addr` and serve the router until the future is dropped.
@@ -66,6 +104,61 @@ pub async fn serve(
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await.map_err(AppError::Io)?;
     Ok(())
+}
+
+async fn login_get(State(state): State<AppState>) -> Result<Response, AppError> {
+    // Auth disabled → bounce to dashboard so the form doesn't dangle.
+    if !state.auth().is_enabled() {
+        return Ok(Redirect::to("/").into_response());
+    }
+    html(&LoginTemplate {
+        error_message: None,
+    })
+}
+
+#[derive(Debug, Deserialize)]
+struct LoginForm {
+    token: String,
+}
+
+async fn login_post(
+    State(state): State<AppState>,
+    Form(form): Form<LoginForm>,
+) -> Result<Response, AppError> {
+    if !state.auth().is_enabled() {
+        return Ok(Redirect::to("/").into_response());
+    }
+    if !state.auth().token_matches(form.token.trim()) {
+        let mut resp = html(&LoginTemplate {
+            error_message: Some("Token inválido.".to_string()),
+        })?;
+        *resp.status_mut() = StatusCode::UNAUTHORIZED;
+        return Ok(resp);
+    }
+    // Token is opaque; the cookie value IS the token. HttpOnly +
+    // SameSite=Strict prevents JS exfil and CSRF on cross-site nav.
+    // No Secure flag because the orchestrator binds 127.0.0.1 by
+    // default; reverse proxies serving over HTTPS should set it on
+    // their layer.
+    let cookie_value = format!(
+        "{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict",
+        token = form.token.trim()
+    );
+    let mut headers = HeaderMap::new();
+    if let Ok(v) = HeaderValue::from_str(&cookie_value) {
+        headers.insert(header::SET_COOKIE, v);
+    }
+    Ok((StatusCode::SEE_OTHER, headers, Redirect::to("/")).into_response())
+}
+
+async fn logout() -> Response {
+    // Overwrite the cookie with an immediate expiry.
+    let mut headers = HeaderMap::new();
+    let expired = format!("{SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0");
+    if let Ok(v) = HeaderValue::from_str(&expired) {
+        headers.insert(header::SET_COOKIE, v);
+    }
+    (StatusCode::SEE_OTHER, headers, Redirect::to("/login")).into_response()
 }
 
 async fn healthz() -> &'static str {

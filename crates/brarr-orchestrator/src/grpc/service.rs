@@ -123,16 +123,54 @@ impl Brarr for BrarrService {
 
 /// Start the gRPC server on `addr` and serve until shutdown is signalled.
 ///
+/// When [`crate::AuthConfig::Enabled`] is in effect, every RPC must
+/// present a matching `authorization: Bearer <token>` metadata entry;
+/// otherwise the call returns `unauthenticated`.
+///
 /// # Errors
 ///
 /// Surfaces any tonic transport error.
 pub async fn serve(state: AppState, addr: SocketAddr) -> Result<(), AppError> {
     info!(target: "brarr_orchestrator::grpc", %addr, "starting gRPC server");
-    let svc = BrarrServer::new(BrarrService::new(state));
+    let auth_state = state.clone();
+    let svc =
+        BrarrServer::with_interceptor(BrarrService::new(state), move |req: tonic::Request<()>| {
+            auth_interceptor(&auth_state, req)
+        });
     Server::builder()
         .add_service(svc)
         .serve(addr)
         .await
         .map_err(|e| AppError::Io(std::io::Error::other(e)))?;
     Ok(())
+}
+
+/// Bearer-token interceptor used by [`serve`]. Exposed for tests so
+/// they can call it directly without spinning up the transport.
+///
+/// # Errors
+///
+/// Returns [`tonic::Status::unauthenticated`] when auth is enabled but
+/// the request did not present the expected token.
+pub fn auth_interceptor(
+    state: &AppState,
+    req: tonic::Request<()>,
+) -> Result<tonic::Request<()>, tonic::Status> {
+    if !state.auth().is_enabled() {
+        return Ok(req);
+    }
+    let token = req
+        .metadata()
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|raw| {
+            raw.strip_prefix("Bearer ")
+                .or_else(|| raw.strip_prefix("bearer "))
+        });
+    match token {
+        Some(t) if state.auth().token_matches(t.trim()) => Ok(req),
+        _ => Err(tonic::Status::unauthenticated(
+            "missing or invalid bearer token",
+        )),
+    }
 }
