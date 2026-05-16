@@ -161,7 +161,7 @@ async fn fan_out(
     let futures = trackers.iter().cloned().map(|tr| {
         let wasm_engine = wasm_engine.clone();
         async move {
-            let provider = match build_provider(&wasm_engine, &tr) {
+            let provider = match build_provider(&wasm_engine, &tr).await {
                 Ok(p) => p,
                 Err(e) => return (tr, Err(e)),
             };
@@ -178,7 +178,7 @@ async fn fan_out(
 /// Build a `TrackerProvider` for `tr`. UNIT3D rows return a
 /// [`Unit3dClient`] wrapper; rows with `plugin_path` return a
 /// [`WasmTrackerProvider`] compiled against `wasm_engine`.
-fn build_provider(
+async fn build_provider(
     wasm_engine: &WasmEngine,
     tr: &TrackerRow,
 ) -> Result<Arc<dyn TrackerProvider>, String> {
@@ -190,6 +190,7 @@ fn build_provider(
             read_plugin_bytes(path).map_err(|e| format!("read plugin {}: {e}", path.display()))?;
         let provider =
             WasmTrackerProvider::load_with_engine(wasm_engine, &bytes, PluginConfig::new(source))
+                .await
                 .map_err(|e| format!("load plugin {}: {e}", path.display()))?;
         Ok(Arc::new(provider))
     } else {

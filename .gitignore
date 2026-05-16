@@ -6,6 +6,11 @@
 *.log
 *.pid
 
+# Local orchestrator SQLite (created on first run; see BRARR_DB_PATH)
+brarr.db
+brarr.db-shm
+brarr.db-wal
+
 # Local config / segredos (tokens de tracker, etc.)
 .env
 .env.*

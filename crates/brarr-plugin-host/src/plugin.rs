@@ -1,11 +1,19 @@
 //! Plugin loader + [`brarr_core::TrackerProvider`] adapter.
+//!
+//! The host runs wasmtime in **async mode** ([`Config::async_support`])
+//! so host imports like `host_fetch` can `.await` real network I/O
+//! without blocking a runtime worker. Every `TypedFunc` invocation
+//! therefore goes through `call_async`; the per-instance `Store` is
+//! protected by a `tokio::sync::Mutex` (cannot use `std::sync::Mutex`
+//! because the critical section spans `.await` points).
 
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use brarr_core::{ProviderError, ProviderFuture, Release, TmdbId, TrackerProvider, TrackerSource};
+use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
-use wasmtime::{Engine, Instance, Linker, Module, Store, TypedFunc};
+use wasmtime::{Config, Engine, Instance, Linker, Module, Store, TypedFunc};
 
 use crate::dto::{self, PluginRelease};
 use crate::error::{PluginError, PluginResult};
@@ -23,24 +31,44 @@ pub struct PluginConfig {
     pub tracker: TrackerSource,
     /// Capability gating.
     pub capabilities: HostCapabilities,
+    /// Optional pre-built HTTP client. When `None`, the loader builds a
+    /// default `reqwest::Client` per plugin. Sharing one client across
+    /// many plugins keeps the connection pool warm.
+    pub http: Option<Arc<reqwest::Client>>,
 }
 
 impl PluginConfig {
-    /// Build a config with default capabilities (logging enabled).
+    /// Build a config with default capabilities (logging enabled,
+    /// fetch disabled).
     #[must_use]
     pub fn new(tracker: TrackerSource) -> Self {
         Self {
             tracker,
             capabilities: HostCapabilities::default(),
+            http: None,
         }
+    }
+
+    /// Override capabilities.
+    #[must_use]
+    pub fn with_capabilities(mut self, caps: HostCapabilities) -> Self {
+        self.capabilities = caps;
+        self
+    }
+
+    /// Override the HTTP client. Useful in tests (point at wiremock).
+    #[must_use]
+    pub fn with_http(mut self, http: Arc<reqwest::Client>) -> Self {
+        self.http = Some(http);
+        self
     }
 }
 
 /// A loaded plugin, ready to serve as a [`TrackerProvider`].
 ///
-/// `Arc`-wrapped internally so cloning is cheap; the `Store` and
-/// `Instance` live behind a `Mutex` because wasmtime's `Store` is not
-/// `Sync` and a plugin instance is single-threaded by definition.
+/// `Arc`-wrapped internally so cloning is cheap. The `Store` lives
+/// behind a `tokio::sync::Mutex` because plugin calls span `.await`
+/// points (host_fetch is async).
 pub struct WasmTrackerProvider {
     inner: Arc<PluginInner>,
 }
@@ -57,8 +85,6 @@ impl std::fmt::Debug for WasmTrackerProvider {
 struct PluginInner {
     config: PluginConfig,
     plugin_name: String,
-    /// `Store` + bound exports together so the entire plugin call
-    /// happens under one mutex lock.
     runtime: Mutex<PluginRuntime>,
 }
 
@@ -71,6 +97,21 @@ struct PluginRuntime {
 }
 
 impl WasmTrackerProvider {
+    /// Build an [`Engine`] suitable for use with the plugin host. The
+    /// only non-default knob is `async_support(true)`. Callers sharing
+    /// a single engine across many plugins should use this constructor
+    /// (or call it themselves) — engines without async enabled will
+    /// produce trap-like errors at instantiation.
+    ///
+    /// # Errors
+    ///
+    /// Propagates any [`wasmtime::Error`] from `Engine::new`.
+    pub fn async_engine() -> PluginResult<Engine> {
+        let mut config = Config::new();
+        config.async_support(true);
+        Engine::new(&config).map_err(PluginError::from)
+    }
+
     /// Compile + instantiate a plugin from a .wasm file (or .wat — the
     /// wasmtime `wat` feature transparently accepts both).
     ///
@@ -81,9 +122,9 @@ impl WasmTrackerProvider {
     /// [`PluginError::MissingExport`] if any required symbol is absent,
     /// or [`PluginError::UnsupportedAbi`] if the plugin reports a
     /// version this host does not implement.
-    pub fn load_file(path: &Path, config: PluginConfig) -> PluginResult<Self> {
+    pub async fn load_file(path: &Path, config: PluginConfig) -> PluginResult<Self> {
         let bytes = std::fs::read(path)?;
-        Self::load_bytes(&bytes, config)
+        Self::load_bytes(&bytes, config).await
     }
 
     /// Compile + instantiate a plugin from a raw byte slice.
@@ -91,18 +132,19 @@ impl WasmTrackerProvider {
     /// # Errors
     ///
     /// See [`Self::load_file`].
-    pub fn load_bytes(bytes: &[u8], config: PluginConfig) -> PluginResult<Self> {
-        let engine = Engine::default();
-        Self::load_with_engine(&engine, bytes, config)
+    pub async fn load_bytes(bytes: &[u8], config: PluginConfig) -> PluginResult<Self> {
+        let engine = Self::async_engine()?;
+        Self::load_with_engine(&engine, bytes, config).await
     }
 
-    /// Like [`Self::load_bytes`] but with a caller-supplied engine —
-    /// lets tests share one engine across many instantiations.
+    /// Like [`Self::load_bytes`] but with a caller-supplied engine.
+    /// **The engine must have been built with `async_support(true)`** —
+    /// see [`Self::async_engine`].
     ///
     /// # Errors
     ///
     /// See [`Self::load_file`].
-    pub fn load_with_engine(
+    pub async fn load_with_engine(
         engine: &Engine,
         bytes: &[u8],
         config: PluginConfig,
@@ -111,21 +153,27 @@ impl WasmTrackerProvider {
 
         // Probe the name up-front using a temporary host state — we
         // need the name to populate the real host state.
-        let probe_name = probe_plugin_name(engine, &module)?;
+        let probe_name = probe_plugin_name(engine, &module).await?;
         debug!(target: "brarr_plugin_host", plugin = %probe_name, "instantiating plugin");
+
+        let http = config
+            .http
+            .clone()
+            .unwrap_or_else(|| Arc::new(reqwest::Client::new()));
 
         let mut store = Store::new(
             engine,
             HostState {
                 plugin_name: probe_name.clone(),
-                caps: config.capabilities,
+                caps: config.capabilities.clone(),
+                http: Arc::clone(&http),
             },
         );
         let mut linker: Linker<HostState> = Linker::new(engine);
         install_imports(&mut linker)?;
-        let instance = linker.instantiate(&mut store, &module)?;
+        let instance = linker.instantiate_async(&mut store, &module).await?;
 
-        check_abi_version(&mut store, &instance)?;
+        check_abi_version(&mut store, &instance).await?;
 
         let alloc = typed_export::<i32, i32>(&mut store, &instance, "plugin_alloc")?;
         let free = typed_export::<(i32, i32), ()>(&mut store, &instance, "plugin_free")?;
@@ -160,25 +208,24 @@ impl WasmTrackerProvider {
         &self.inner.plugin_name
     }
 
-    fn search_blocking(&self, tmdb: TmdbId) -> PluginResult<Vec<Release>> {
-        let mut guard = self
-            .inner
-            .runtime
-            .lock()
-            .map_err(|_| PluginError::Wasm("plugin runtime mutex poisoned".into()))?;
+    async fn search_inner(&self, tmdb: TmdbId) -> PluginResult<Vec<Release>> {
+        let mut guard = self.inner.runtime.lock().await;
         let runtime = &mut *guard;
 
         // Allocate an 8-byte region in the plugin to receive (ptr, len).
-        let out_handle = runtime.alloc.call(&mut runtime.store, 8)?;
+        let out_handle = runtime.alloc.call_async(&mut runtime.store, 8).await?;
 
         let tmdb_i32 = i32::try_from(tmdb.get())
             .map_err(|_| PluginError::BadOutput(format!("tmdb {} > i32::MAX", tmdb.get())))?;
         let rc = runtime
             .search
-            .call(&mut runtime.store, (tmdb_i32, out_handle))?;
+            .call_async(&mut runtime.store, (tmdb_i32, out_handle))
+            .await?;
         if rc != 0 {
-            // Free the handle even on plugin error.
-            let _ = runtime.free.call(&mut runtime.store, (out_handle, 8));
+            let _ = runtime
+                .free
+                .call_async(&mut runtime.store, (out_handle, 8))
+                .await;
             return Err(PluginError::PluginCode(rc));
         }
 
@@ -191,8 +238,9 @@ impl WasmTrackerProvider {
                 signature: "(memory)",
             })?;
         let data = memory.data(&runtime.store);
+        let out_idx = usize_from(out_handle)?;
         let handle_slice = data
-            .get(usize_from(out_handle)?..usize_from(out_handle)? + 8)
+            .get(out_idx..out_idx + 8)
             .ok_or_else(|| PluginError::BadOutput("out_handle slice OOB".into()))?;
         let ptr_le = [
             handle_slice[0],
@@ -217,8 +265,12 @@ impl WasmTrackerProvider {
         // Free the response region and the handle.
         let _ = runtime
             .free
-            .call(&mut runtime.store, (i32_from(ptr)?, i32_from(len)?));
-        let _ = runtime.free.call(&mut runtime.store, (out_handle, 8));
+            .call_async(&mut runtime.store, (i32_from(ptr)?, i32_from(len)?))
+            .await;
+        let _ = runtime
+            .free
+            .call_async(&mut runtime.store, (out_handle, 8))
+            .await;
 
         let plugin_releases: Vec<PluginRelease> = serde_json::from_slice(&json_bytes)
             .map_err(|e| PluginError::BadOutput(format!("response JSON decode failed: {e}")))?;
@@ -259,20 +311,11 @@ impl TrackerProvider for WasmTrackerProvider {
         &self,
         tmdb: TmdbId,
     ) -> ProviderFuture<'_, Result<Vec<Release>, ProviderError>> {
-        // Wasmtime calls are sync + CPU-bound; wrap in spawn_blocking to
-        // not stall the async runtime.
-        let me = self.clone();
         let plugin_name = self.inner.plugin_name.clone();
         Box::pin(async move {
-            let join = tokio::task::spawn_blocking(move || me.search_blocking(tmdb)).await;
-            match join {
-                Ok(Ok(releases)) => Ok(releases),
-                Ok(Err(e)) => Err(e.into_provider(&plugin_name)),
-                Err(join_err) => Err(ProviderError::new(
-                    plugin_name,
-                    format!("plugin task join error: {join_err}"),
-                )),
-            }
+            self.search_inner(tmdb)
+                .await
+                .map_err(|e| e.into_provider(&plugin_name))
         })
     }
 }
@@ -280,19 +323,20 @@ impl TrackerProvider for WasmTrackerProvider {
 /// Instantiate just enough of the module to read `plugin_name()` so the
 /// host state can carry the correct name before the real instance is
 /// created. The probe uses a throwaway `Store` + `Linker`.
-fn probe_plugin_name(engine: &Engine, module: &Module) -> PluginResult<String> {
+async fn probe_plugin_name(engine: &Engine, module: &Module) -> PluginResult<String> {
     let mut store = Store::new(
         engine,
         HostState {
             plugin_name: "<probe>".into(),
             caps: HostCapabilities::default(),
+            http: Arc::new(reqwest::Client::new()),
         },
     );
     let mut linker: Linker<HostState> = Linker::new(engine);
     install_imports(&mut linker)?;
-    let instance = linker.instantiate(&mut store, module)?;
+    let instance = linker.instantiate_async(&mut store, module).await?;
     let name_fn = typed_export::<(), i64>(&mut store, &instance, "plugin_name")?;
-    let packed = name_fn.call(&mut store, ())?;
+    let packed = name_fn.call_async(&mut store, ()).await?;
     let (ptr, len) = unpack_ptr_len(packed);
     let memory = instance
         .get_memory(&mut store, "memory")
@@ -309,9 +353,9 @@ fn probe_plugin_name(engine: &Engine, module: &Module) -> PluginResult<String> {
     Ok(name.to_owned())
 }
 
-fn check_abi_version(store: &mut Store<HostState>, instance: &Instance) -> PluginResult<()> {
+async fn check_abi_version(store: &mut Store<HostState>, instance: &Instance) -> PluginResult<()> {
     let f = typed_export::<(), i32>(store, instance, "plugin_abi_version")?;
-    let got = f.call(&mut *store, ())?;
+    let got = f.call_async(&mut *store, ()).await?;
     if got == SUPPORTED_ABI_VERSION {
         Ok(())
     } else {

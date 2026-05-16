@@ -26,13 +26,12 @@
 //! Plugins import these from module `env`. Capability gating is per-host
 //! [`PluginConfig`] — the loader can disable any of them.
 //!
-//! | Name                | Signature                          | Purpose                                                                 |
-//! |---------------------|------------------------------------|-------------------------------------------------------------------------|
-//! | `host_log`          | `(param i32 i32 i32)`              | Log at `level` (0=trace .. 4=error), message at `ptr`/`len` in plugin mem.|
+//! | Name                | Signature                                       | Purpose                                                                 |
+//! |---------------------|-------------------------------------------------|-------------------------------------------------------------------------|
+//! | `host_log`          | `(param i32 i32 i32)`                           | Log at `level` (0=trace .. 4=error), message at `ptr`/`len` in plugin mem.|
+//! | `host_fetch`        | `(param i32 i32 i32 i32 i32 i32) (result i32)`  | `(method, url_ptr, url_len, body_ptr, body_len, out_handle)`. Async HTTP request. Returns the HTTP status (`200`..`599`) on success or a negative error code (`-1` transport, `-2` capability disabled, `-3` host not in allowlist). On success the host allocates space via `plugin_alloc` and writes `(ptr, len)` of the response body at `out_handle`. Method enum: `0`=GET, `1`=POST, `2`=PUT, `3`=DELETE. |
 //!
-//! `host_fetch` and `host_kv_*` are reserved for future revisions; this
-//! initial cut keeps the host surface minimal so the contract is easy to
-//! audit and easy to mock.
+//! `host_kv_*` is reserved for future revisions.
 //!
 //! ### Response JSON shape
 //!
@@ -62,4 +61,5 @@ pub mod host;
 pub mod plugin;
 
 pub use error::{PluginError, PluginResult};
-pub use plugin::{PluginConfig, WasmTrackerProvider};
+pub use host::{DEFAULT_FETCH_TIMEOUT, HostCapabilities};
+pub use plugin::{PluginConfig, SUPPORTED_ABI_VERSION, WasmTrackerProvider};

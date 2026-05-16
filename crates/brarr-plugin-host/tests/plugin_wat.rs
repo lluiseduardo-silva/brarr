@@ -104,8 +104,9 @@ fn tracker() -> TrackerSource {
 #[tokio::test]
 async fn loads_wat_plugin_and_invokes_search() {
     let bytes = wat::parse_str(PLUGIN_WAT).expect("compile wat");
-    let provider =
-        WasmTrackerProvider::load_bytes(&bytes, PluginConfig::new(tracker())).expect("load");
+    let provider = WasmTrackerProvider::load_bytes(&bytes, PluginConfig::new(tracker()))
+        .await
+        .expect("load");
     assert_eq!(provider.plugin_name(), "wat-test");
     assert_eq!(provider.name(), "wat-tracker");
 
@@ -137,7 +138,9 @@ async fn missing_required_export_is_diagnosed() {
         )
     "#;
     let bytes = wat::parse_str(bad).expect("compile wat");
-    let err = WasmTrackerProvider::load_bytes(&bytes, PluginConfig::new(tracker())).unwrap_err();
+    let err = WasmTrackerProvider::load_bytes(&bytes, PluginConfig::new(tracker()))
+        .await
+        .unwrap_err();
     match err {
         brarr_plugin_host::PluginError::MissingExport { name, .. } => {
             assert_eq!(name, "plugin_search_by_tmdb");
@@ -161,7 +164,9 @@ async fn wrong_abi_version_rejected() {
         )
     "#;
     let bytes = wat::parse_str(bad).expect("compile wat");
-    let err = WasmTrackerProvider::load_bytes(&bytes, PluginConfig::new(tracker())).unwrap_err();
+    let err = WasmTrackerProvider::load_bytes(&bytes, PluginConfig::new(tracker()))
+        .await
+        .unwrap_err();
     match err {
         brarr_plugin_host::PluginError::UnsupportedAbi { got, supported } => {
             assert_eq!(got, 99);

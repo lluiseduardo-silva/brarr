@@ -12,10 +12,15 @@
 //! the first integration cut; a future revision can add a cache keyed
 //! on tracker id + plugin mtime.
 
+#![allow(
+    clippy::expect_used,
+    reason = "wasmtime engine init failure is a host architecture problem worth crashing on"
+)]
+
 use std::sync::Arc;
 
 use brarr_decision_service::Engine;
-use wasmtime::Engine as WasmEngine;
+use wasmtime::{Config, Engine as WasmEngine};
 
 use crate::db::Pool;
 
@@ -34,19 +39,25 @@ struct Inner {
 impl AppState {
     /// Build a new state handle.
     ///
+    /// The wasm engine is created with `async_support(true)` so plugins
+    /// can use the async host imports (`host_fetch`, etc.).
+    ///
     /// # Panics
     ///
-    /// Panics only if `wasmtime::Engine::default()` fails (cranelift
-    /// initialization). In practice that requires an unsupported host
-    /// architecture and is treated as a configuration error worth
-    /// crashing on rather than papering over.
+    /// Panics if `wasmtime::Engine::new` fails — that only happens on
+    /// unsupported host architectures, which is a configuration error
+    /// worth crashing on rather than papering over.
     #[must_use]
     pub fn new(pool: Pool, engine: Engine) -> Self {
+        let mut wasm_cfg = Config::new();
+        wasm_cfg.async_support(true);
+        let wasm_engine =
+            WasmEngine::new(&wasm_cfg).expect("build async wasmtime engine on supported host");
         Self {
             inner: Arc::new(Inner {
                 pool,
                 engine,
-                wasm_engine: WasmEngine::default(),
+                wasm_engine,
             }),
         }
     }
