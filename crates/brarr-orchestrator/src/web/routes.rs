@@ -58,6 +58,7 @@ pub fn router(state: AppState, static_dir: &std::path::Path) -> Router {
         .route("/providers", get(providers_index).post(providers_create))
         .route("/providers/{id}", delete(providers_delete))
         .route("/providers/{id}/test", post(providers_test))
+        .route("/providers/{id}/probe", get(providers_probe))
         .route("/releases", get(releases_index))
         .route("/searches", post(searches_create))
         .route("/searches/{id}", get(search_detail))
@@ -282,6 +283,91 @@ async fn providers_delete(
     // empty 200 lets `hx-target=closest tr` + `hx-swap=outerHTML` wipe
     // the row without re-rendering the whole list.
     Ok((StatusCode::OK, "").into_response())
+}
+
+/// `GET /providers/{id}/probe?imdb=X&tmdb=Y` — diagnostic dump.
+///
+/// Runs a real search against the upstream provider and returns the
+/// raw response body plus a per-item breakdown of every
+/// `<newznab:attr>` (or UNIT3D JSON field) alongside brarr's parsed
+/// `Release` snapshot. Lets operators audit which fields an indexer
+/// actually exposes versus what the scoring/ranking rules consume.
+///
+/// Returns `application/json`. Pass at least one of `imdb` / `tmdb`;
+/// `imdb` accepts the `tt0123456` form. Only `newznab` / `torznab`
+/// providers are supported today — `unit3d` probes return a stub
+/// pointing the operator at a future enhancement (the JSON envelope
+/// from UNIT3D would be similarly useful but isn't wrapped yet).
+#[derive(Debug, Deserialize)]
+struct ProbeQuery {
+    #[serde(default)]
+    imdb: Option<String>,
+    #[serde(default)]
+    tmdb: Option<String>,
+}
+
+async fn providers_probe(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<ProbeQuery>,
+) -> Result<Response, AppError> {
+    let uuid = Uuid::parse_str(&id)
+        .map_err(|e| AppError::InvalidInput(format!("invalid provider id: {e}")))?;
+    let row = providers::get_by_id(state.pool(), uuid).await?;
+    let source = brarr_core::TrackerSource::new(row.name.clone(), row.base_url.clone())
+        .map_err(|e| AppError::InvalidInput(format!("invalid base_url: {e}")))?;
+
+    let imdb = parse_optional_imdb(q.imdb.as_deref())?;
+    let tmdb = parse_optional_tmdb(q.tmdb.as_deref())?;
+    if imdb.is_none() && tmdb.is_none() {
+        return Err(AppError::InvalidInput(
+            "informe ?imdb= ou ?tmdb=".to_string(),
+        ));
+    }
+
+    let kind = row.kind.to_ascii_lowercase();
+    if kind != "newznab" && kind != "torznab" {
+        let body = serde_json::json!({
+            "provider": { "name": row.name, "kind": row.kind, "base_url": row.base_url.to_string() },
+            "note": "probe inspection only implemented for newznab/torznab providers today. \
+                    Adding UNIT3D + plugin support is a separate enhancement.",
+        });
+        return json_response(StatusCode::OK, &body);
+    }
+
+    let client = brarr_tracker_newznab::NewznabClient::new(source, &row.api_token)
+        .map_err(|e| AppError::InvalidInput(format!("client build failed: {e}")))?;
+
+    let inspect = if let Some(imdb) = imdb {
+        client.inspect_movie_by_imdb(imdb).await
+    } else if let Some(tmdb) = tmdb {
+        client.inspect_movie_by_tmdb(tmdb).await
+    } else {
+        unreachable!("validated above");
+    };
+
+    let inspect = inspect.map_err(|e| AppError::InvalidInput(format!("upstream: {e}")))?;
+    let payload = serde_json::json!({
+        "provider": {
+            "id": row.id.to_string(),
+            "name": row.name,
+            "kind": row.kind,
+            "base_url": row.base_url.to_string(),
+        },
+        "request": { "imdb": q.imdb, "tmdb": q.tmdb },
+        "inspect": inspect,
+    });
+    json_response(StatusCode::OK, &payload)
+}
+
+fn json_response<T: serde::Serialize>(status: StatusCode, body: &T) -> Result<Response, AppError> {
+    let bytes = serde_json::to_vec_pretty(body)?;
+    let mut resp = (status, bytes).into_response();
+    resp.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json; charset=utf-8"),
+    );
+    Ok(resp)
 }
 
 /// `POST /providers/{id}/test` — kick the provider's connectivity probe

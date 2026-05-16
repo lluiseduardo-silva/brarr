@@ -47,5 +47,8 @@ mod convert;
 mod dto;
 mod error;
 
-pub use client::{NewznabClient, PingReport};
+pub use client::{
+    EnrichmentSnapshot, ExternalIdsSnapshot, InspectResult, ItemDebug, NewznabClient, PingReport,
+    ReleaseSnapshot,
+};
 pub use error::ClientError;

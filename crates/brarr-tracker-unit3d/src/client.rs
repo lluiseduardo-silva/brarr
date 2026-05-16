@@ -13,6 +13,12 @@ use crate::retry::{RetryConfig, run_with_retry};
 /// Default timeout para qualquer request feito pelo cliente.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// User-Agent advertised on every outgoing request. Some UNIT3D
+/// deployments behind Cloudflare or similar challenge the reqwest
+/// default UA. A stable, identifiable string also helps tracker
+/// operators reason about brarr traffic in their logs.
+const USER_AGENT: &str = concat!("brarr/", env!("CARGO_PKG_VERSION"));
+
 /// Structured outcome of a connectivity probe. Returned by
 /// [`Unit3dClient::ping`] (and the equivalent method on the Newznab
 /// client) so the UI can render a green/red badge plus a one-line
@@ -73,6 +79,7 @@ impl Unit3dClient {
         );
 
         let http = Client::builder()
+            .user_agent(USER_AGENT)
             .default_headers(headers)
             .timeout(DEFAULT_TIMEOUT)
             .build()

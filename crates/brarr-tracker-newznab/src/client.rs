@@ -15,6 +15,169 @@ use crate::error::ClientError;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// User-Agent advertised on every outgoing request. NZBGeek and a few
+/// other Newznab indexers reject requests carrying reqwest's default
+/// `reqwest/X.Y.Z` UA with `<error code="109" description="Invalid User
+/// Agent"/>`, treating it as an unsanctioned scraper. We send a stable
+/// `brarr/<crate-version>` string so the indexer logs us as a known
+/// client and operators can see traffic by UA in their dashboards.
+const USER_AGENT: &str = concat!("brarr/", env!("CARGO_PKG_VERSION"));
+
+/// Raw + parsed snapshot of a single search call, returned by the
+/// `inspect_*` methods. Surfaced through the orchestrator's
+/// `/providers/{id}/probe` admin route so operators can audit what
+/// `<newznab:attr>` keys an indexer actually exposes and verify which
+/// ones the scoring rules consume.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct InspectResult {
+    /// The full upstream URL that was hit, with `apikey=` redacted.
+    pub request_url: String,
+    /// HTTP status code returned by the upstream.
+    pub http_status: u16,
+    /// Length of the response body in bytes.
+    pub body_bytes: usize,
+    /// Raw response body (XML), verbatim, so the operator can grep for
+    /// fields the parser ignores today.
+    pub raw_body: String,
+    /// Per-`<item>` debug dump. Each entry preserves the full attr map
+    /// (no projection or filtering) so missing scoring inputs are
+    /// obvious.
+    pub items: Vec<ItemDebug>,
+    /// Releases as brarr would feed them to the decision engine,
+    /// projected into a Serialize-friendly shadow. Cross-reference
+    /// against `items` to see what the converter drops or normalizes.
+    pub releases: Vec<ReleaseSnapshot>,
+}
+
+/// Serialize-friendly snapshot of a [`brarr_core::Release`]. Only the
+/// fields that matter for diagnosing scoring/ranking decisions are
+/// included; this is a debug surface, not a wire format.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ReleaseSnapshot {
+    /// Full release title as the indexer reported it.
+    pub title: String,
+    /// Tracker-side opaque release id.
+    pub tracker_release_id: String,
+    /// Total size in bytes.
+    pub size_bytes: u64,
+    /// Seeders / leechers / completed grabs snapshot.
+    pub seeders: u32,
+    /// Leechers count.
+    pub leechers: u32,
+    /// Times the release was completed/snatched.
+    pub snatches: u32,
+    /// Normalized resolution label (`"1080p"`, `"2160p"`, etc.).
+    pub resolution: String,
+    /// Normalized release kind (`"WEB-DL"`, `"BluRay"`, etc.).
+    pub kind: String,
+    /// External media ids surfaced by the indexer.
+    pub external_ids: ExternalIdsSnapshot,
+    /// Enrichment (audio/sub language tags, HDR flag) when present.
+    pub enrichment: Option<EnrichmentSnapshot>,
+    /// `.torrent` / `.nzb` download URL, if exposed.
+    pub download_url: Option<String>,
+    /// Details page URL, if exposed.
+    pub details_url: Option<String>,
+}
+
+/// Per-id external mapping snapshot.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ExternalIdsSnapshot {
+    /// TMDb id.
+    pub tmdb: Option<u32>,
+    /// IMDb id (numeric, no `tt`).
+    pub imdb: Option<u32>,
+    /// TVDB id.
+    pub tvdb: Option<u32>,
+    /// MyAnimeList id.
+    pub mal: Option<u32>,
+}
+
+/// Enrichment snapshot — what brarr would feed the rules engine for
+/// audio/subtitle scoring.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EnrichmentSnapshot {
+    /// Audio track languages (e.g. `"en"`, `"pt-BR"`).
+    pub audio_languages: Vec<String>,
+    /// Subtitle languages.
+    pub subtitle_languages: Vec<String>,
+    /// `true` if the title or container hinted at HDR.
+    pub has_hdr: bool,
+    /// `true` if any subtitle track is flagged forced.
+    pub has_forced_subs: bool,
+}
+
+impl ReleaseSnapshot {
+    fn from_release(r: &Release) -> Self {
+        let resolution = match &r.resolution {
+            brarr_core::Resolution::Sd => "SD".to_string(),
+            brarr_core::Resolution::P720 => "720p".to_string(),
+            brarr_core::Resolution::P1080 => "1080p".to_string(),
+            brarr_core::Resolution::P2160 => "2160p".to_string(),
+            brarr_core::Resolution::Other(s) => s.clone(),
+        };
+        let kind = match &r.kind {
+            brarr_core::ReleaseKind::WebDl => "WEB-DL".to_string(),
+            brarr_core::ReleaseKind::BluRay => "BluRay".to_string(),
+            brarr_core::ReleaseKind::Encode => "Encode".to_string(),
+            brarr_core::ReleaseKind::HdTv => "HDTV".to_string(),
+            brarr_core::ReleaseKind::Dvd => "DVD".to_string(),
+            brarr_core::ReleaseKind::Other(s) => s.clone(),
+        };
+        let enrichment = r.enrichment.as_ref().map(|e| EnrichmentSnapshot {
+            audio_languages: e.audio_languages.iter().map(|l| format!("{l:?}")).collect(),
+            subtitle_languages: e
+                .subtitle_languages
+                .iter()
+                .map(|l| format!("{l:?}"))
+                .collect(),
+            has_hdr: e.has_hdr,
+            has_forced_subs: e.has_forced_subs,
+        });
+        Self {
+            title: r.title.clone(),
+            tracker_release_id: r.tracker_release_id.clone(),
+            size_bytes: r.size_bytes,
+            seeders: r.seeders,
+            leechers: r.leechers,
+            snatches: r.snatches,
+            resolution,
+            kind,
+            external_ids: ExternalIdsSnapshot {
+                tmdb: r.external_ids.tmdb.map(brarr_core::TmdbId::get),
+                imdb: r.external_ids.imdb.map(brarr_core::ImdbId::get),
+                tvdb: r.external_ids.tvdb.map(brarr_core::TvdbId::get),
+                mal: r.external_ids.mal.map(brarr_core::MalId::get),
+            },
+            enrichment,
+            download_url: r.urls.download.as_ref().map(url::Url::to_string),
+            details_url: r.urls.details.as_ref().map(url::Url::to_string),
+        }
+    }
+}
+
+/// Per-item debug projection of a [`crate::dto::RawItem`]. Exposed only
+/// through the inspect path — production search returns
+/// `Vec<Release>` and discards this.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ItemDebug {
+    /// `<title>` text.
+    pub title: String,
+    /// `<guid>` text.
+    pub guid: String,
+    /// `<size>` value (or `length=` from `<enclosure>`).
+    pub size_bytes: u64,
+    /// Download URL (from `<link>` or `<enclosure url=...>`).
+    pub download_url: Option<String>,
+    /// Details/comments URL.
+    pub details_url: Option<String>,
+    /// `<category>` element value.
+    pub category: Option<String>,
+    /// Every `<newznab:attr name=X value=Y/>` entry, grouped by name.
+    /// Repeated attrs (multiple `audio`, multiple `subs`) are preserved.
+    pub attrs: std::collections::HashMap<String, Vec<String>>,
+}
+
 /// Structured outcome of a connectivity probe. Mirrors the Unit3D
 /// `PingReport` shape so the orchestrator can render either one through
 /// the same template without owning the type.
@@ -104,6 +267,7 @@ impl NewznabClient {
             return Err(ClientError::InvalidApiKey);
         }
         let http = Client::builder()
+            .user_agent(USER_AGENT)
             .timeout(DEFAULT_TIMEOUT)
             .build()
             .map_err(ClientError::ClientBuild)?;
@@ -220,6 +384,83 @@ impl NewznabClient {
             ],
         )?;
         self.fetch_and_parse(url).await
+    }
+
+    /// Debug helper: run a movie search by IMDb id and return the raw
+    /// upstream body alongside the parsed [`Release`] list and a
+    /// per-item dump of all `<newznab:attr>` keys/values. Used by the
+    /// admin `/providers/{id}/probe` route so operators can see what
+    /// attributes an indexer actually exposes and audit which ones the
+    /// scoring rules consume.
+    ///
+    /// Bypasses the regular WARN-on-zero-items log — the probe is the
+    /// operator's own diagnostic call.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] on transport failure, HTTP non-2xx, or
+    /// XML parse error.
+    pub async fn inspect_movie_by_imdb(&self, imdb: ImdbId) -> Result<InspectResult, ClientError> {
+        let url = self.build_url(
+            "movie",
+            &[
+                ("imdbid", &format!("{:07}", imdb.get())),
+                ("cat", MOVIE_CATEGORIES),
+            ],
+        )?;
+        self.fetch_raw(url).await
+    }
+
+    /// Debug counterpart to [`Self::search_movie_by_tmdb`].
+    ///
+    /// # Errors
+    ///
+    /// See [`Self::inspect_movie_by_imdb`].
+    pub async fn inspect_movie_by_tmdb(&self, tmdb: TmdbId) -> Result<InspectResult, ClientError> {
+        let url = self.build_url(
+            "movie",
+            &[
+                ("tmdbid", &tmdb.get().to_string()),
+                ("cat", MOVIE_CATEGORIES),
+            ],
+        )?;
+        self.fetch_raw(url).await
+    }
+
+    async fn fetch_raw(&self, url: Url) -> Result<InspectResult, ClientError> {
+        let resp = self
+            .http
+            .get(url.clone())
+            .send()
+            .await?
+            .error_for_status()?;
+        let status = resp.status().as_u16();
+        let body = resp.text().await?;
+        let feed = parse_feed(&body)?;
+        let mut releases = Vec::with_capacity(feed.items.len());
+        let mut items_debug = Vec::with_capacity(feed.items.len());
+        for item in &feed.items {
+            items_debug.push(ItemDebug {
+                title: item.title.clone(),
+                guid: item.guid.clone(),
+                size_bytes: item.size_bytes,
+                download_url: item.download_url.clone(),
+                details_url: item.details_url.clone(),
+                category: item.category.clone(),
+                attrs: item.attrs.clone(),
+            });
+            if let Ok(r) = item_to_release(item, self.tracker.clone()) {
+                releases.push(ReleaseSnapshot::from_release(&r));
+            }
+        }
+        Ok(InspectResult {
+            request_url: redact_apikey(&url),
+            http_status: status,
+            body_bytes: body.len(),
+            raw_body: body,
+            items: items_debug,
+            releases,
+        })
     }
 
     fn build_url(&self, t: &str, extra: &[(&str, &str)]) -> Result<Url, ClientError> {

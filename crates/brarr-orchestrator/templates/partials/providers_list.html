@@ -31,6 +31,13 @@
                             class="text-emerald-700 hover:underline text-xs">
                         testar
                     </button>
+                    <a href="/providers/{{ p.id }}/probe?imdb=tt0133093"
+                       target="_blank"
+                       rel="noopener"
+                       class="text-blue-600 hover:underline text-xs"
+                       title="Roda uma busca real e devolve JSON com o XML cru + Release parsed (Matrix tt0133093 por default)">
+                        inspecionar
+                    </a>
                     <button hx-delete="/providers/{{ p.id }}"
                             hx-target="#provider-{{ p.id }}"
                             hx-swap="outerHTML"
