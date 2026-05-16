@@ -46,6 +46,11 @@ pub struct DecisionView {
     pub rejected: bool,
     /// Comma-joined tags.
     pub tags: String,
+    /// Comma-joined names of rules that fired for this decision. Lets
+    /// the search-detail / releases pages explain "this release got
+    /// 145 because: PT ambíguo + 2160p + HDR" without forcing the
+    /// operator to read the rule engine source.
+    pub matched_rules: String,
     /// Resolution label.
     pub resolution: String,
     /// Kind label.

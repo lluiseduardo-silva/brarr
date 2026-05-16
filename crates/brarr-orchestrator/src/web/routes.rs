@@ -582,6 +582,7 @@ fn provider_view(p: crate::db::providers::ProviderRow) -> ProviderView {
 }
 
 fn decision_view(d: crate::db::decisions::DecisionRow) -> DecisionView {
+    let matched_rules = d.matched_rules.join(", ");
     DecisionView {
         id: d.id.to_string(),
         provider_name: d.provider_name,
@@ -589,6 +590,7 @@ fn decision_view(d: crate::db::decisions::DecisionRow) -> DecisionView {
         score: d.score,
         rejected: d.rejected,
         tags: d.tags.join(", "),
+        matched_rules,
         resolution: d.resolution,
         kind: d.kind,
         seeders: d.seeders,

@@ -34,6 +34,7 @@
                 <th class="px-3 py-2">Tamanho</th>
                 <th class="px-3 py-2">Seeders</th>
                 <th class="px-3 py-2">Tags</th>
+                <th class="px-3 py-2">Regras casadas</th>
                 <th class="px-3 py-2">Status</th>
             </tr>
         </thead>
@@ -48,6 +49,7 @@
                 <td class="px-3 py-2 font-mono text-xs">{{ d.size_human }}</td>
                 <td class="px-3 py-2">{{ d.seeders }}</td>
                 <td class="px-3 py-2 text-xs">{{ d.tags }}</td>
+                <td class="px-3 py-2 text-xs text-slate-700" title="{{ d.matched_rules }}">{{ d.matched_rules }}</td>
                 <td class="px-3 py-2">
                     {% if d.rejected %}
                     <span class="badge bg-red-100 text-red-800">rejeitado</span>
