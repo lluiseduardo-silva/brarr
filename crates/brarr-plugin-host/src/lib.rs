@@ -59,7 +59,12 @@ pub mod dto;
 pub mod error;
 pub mod host;
 pub mod plugin;
+pub mod ticker;
 
 pub use error::{PluginError, PluginResult};
-pub use host::{DEFAULT_FETCH_TIMEOUT, HostCapabilities};
+pub use host::{
+    DEFAULT_CALL_DEADLINE, DEFAULT_FETCH_TIMEOUT, DEFAULT_MAX_MEMORY_PAGES, HostCapabilities,
+    MemoryLimiter,
+};
 pub use plugin::{PluginConfig, SUPPORTED_ABI_VERSION, WasmTrackerProvider};
+pub use ticker::{DEFAULT_TICK_INTERVAL, WasmEpochTicker};

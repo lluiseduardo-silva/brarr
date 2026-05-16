@@ -42,6 +42,16 @@ use crate::PluginError;
 /// Default per-request timeout for `host_fetch`.
 pub const DEFAULT_FETCH_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// Default wall-clock deadline per plugin call before the host traps
+/// the wasm execution. Enforced via wasmtime's epoch interruption
+/// machinery — see [`crate::WasmEpochTicker`].
+pub const DEFAULT_CALL_DEADLINE: Duration = Duration::from_secs(5);
+
+/// Default ceiling on the plugin's linear memory, in **wasm pages**
+/// (64 KiB each). 1024 pages = 64 MiB. Plugins that try to grow past
+/// this fail their `memory.grow` and likely trap.
+pub const DEFAULT_MAX_MEMORY_PAGES: usize = 1024;
+
 /// State threaded through every plugin call.
 pub struct HostState {
     /// Display name of the plugin (logged with every `host_log` call).
@@ -51,6 +61,10 @@ pub struct HostState {
     /// Shared HTTP client used by `host_fetch`. Built once per
     /// `PluginConfig` so connection pooling works across calls.
     pub http: Arc<reqwest::Client>,
+    /// Linear-memory ceiling enforcer plugged into wasmtime's
+    /// [`wasmtime::ResourceLimiter`] hook. Mutated through the trait
+    /// during plugin execution.
+    pub limiter: MemoryLimiter,
 }
 
 /// What the host allows the plugin to do.
@@ -67,6 +81,14 @@ pub struct HostCapabilities {
     pub allowed_hosts: HashSet<String>,
     /// Per-request timeout. Default [`DEFAULT_FETCH_TIMEOUT`].
     pub fetch_timeout: Duration,
+    /// Wall-clock deadline applied to every plugin call. Implemented
+    /// via wasmtime epoch interruption — a misbehaving plugin that
+    /// burns CPU in a tight loop traps once the deadline elapses
+    /// instead of pinning a worker forever.
+    pub call_deadline: Duration,
+    /// Maximum number of wasm memory pages (64 KiB each) the plugin
+    /// can hold. Default [`DEFAULT_MAX_MEMORY_PAGES`] (= 64 MiB).
+    pub max_memory_pages: usize,
 }
 
 impl Default for HostCapabilities {
@@ -76,7 +98,47 @@ impl Default for HostCapabilities {
             fetch: false,
             allowed_hosts: HashSet::new(),
             fetch_timeout: DEFAULT_FETCH_TIMEOUT,
+            call_deadline: DEFAULT_CALL_DEADLINE,
+            max_memory_pages: DEFAULT_MAX_MEMORY_PAGES,
         }
+    }
+}
+
+/// Wasmtime [`ResourceLimiter`] impl that caps each plugin's linear
+/// memory to `max_pages` wasm pages. Implemented as a plain struct
+/// (no `dyn`) so it lives inside `HostState` without heap allocation.
+#[derive(Debug, Clone, Copy)]
+pub struct MemoryLimiter {
+    /// Page ceiling honoured by [`wasmtime::ResourceLimiter::memory_growing`].
+    pub max_pages: usize,
+}
+
+impl MemoryLimiter {
+    /// Convenience: page count → byte count assuming 64 KiB pages.
+    #[must_use]
+    pub const fn max_bytes(self) -> usize {
+        self.max_pages.saturating_mul(64 * 1024)
+    }
+}
+
+impl wasmtime::ResourceLimiter for MemoryLimiter {
+    fn memory_growing(
+        &mut self,
+        _current: usize,
+        desired: usize,
+        _maximum: Option<usize>,
+    ) -> wasmtime::Result<bool> {
+        Ok(desired <= self.max_bytes())
+    }
+
+    fn table_growing(
+        &mut self,
+        _current: usize,
+        _desired: usize,
+        _maximum: Option<usize>,
+    ) -> wasmtime::Result<bool> {
+        // Tables aren't a concern for our ABI; leave them uncapped.
+        Ok(true)
     }
 }
 

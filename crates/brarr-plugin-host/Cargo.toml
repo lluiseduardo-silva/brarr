@@ -14,7 +14,7 @@ reqwest = { version = "0.13.3", default-features = false, features = ["default-t
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 thiserror = "2.0.18"
-tokio = { version = "1.52.3", default-features = false, features = ["macros", "rt", "sync"] }
+tokio = { version = "1.52.3", default-features = false, features = ["macros", "rt", "sync", "time"] }
 tracing = "0.1.44"
 url = "2.5.8"
 wasmtime = { version = "34.0.2", default-features = false, features = ["cranelift", "parallel-compilation", "runtime", "cache", "wat", "async"] }
@@ -23,6 +23,6 @@ wasmtime = { version = "34.0.2", default-features = false, features = ["cranelif
 workspace = true
 
 [dev-dependencies]
-tokio = { version = "1.52.3", default-features = false, features = ["macros", "rt"] }
+tokio = { version = "1.52.3", default-features = false, features = ["macros", "rt", "rt-multi-thread"] }
 wat = "1.249.0"
 wiremock = "0.6.5"

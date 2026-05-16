@@ -18,7 +18,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use brarr_core::{Release, TmdbId, TrackerProvider, TrackerSource};
-use brarr_plugin_host::{PluginConfig, WasmTrackerProvider};
+use brarr_plugin_host::{PluginConfig, WasmEpochTicker, WasmTrackerProvider};
 use brarr_tracker_unit3d::Unit3dClient;
 use futures::future::join_all;
 use tracing::{debug, info, warn};
@@ -88,7 +88,7 @@ pub async fn run_tmdb_search(state: &AppState, tmdb: TmdbId) -> Result<SearchRun
         });
     }
 
-    let per_tracker = fan_out(state.wasm_engine(), &trackers, tmdb).await;
+    let per_tracker = fan_out(state.wasm_engine(), state.wasm_ticker(), &trackers, tmdb).await;
 
     let mut decisions_out = Vec::new();
     let mut failures = Vec::new();
@@ -154,14 +154,19 @@ pub async fn run_tmdb_search(state: &AppState, tmdb: TmdbId) -> Result<SearchRun
 
 async fn fan_out(
     wasm_engine: &WasmEngine,
+    ticker: &WasmEpochTicker,
     trackers: &[TrackerRow],
     tmdb: TmdbId,
 ) -> Vec<(TrackerRow, Result<Vec<Release>, String>)> {
     let wasm_engine = wasm_engine.clone();
+    // The ticker is borrowed through `state.wasm_ticker()` for the
+    // lifetime of the search; we capture it by raw pointer through
+    // the engine and a closure scope. Simpler: just pass &WasmEngine +
+    // call `build_provider` per-tracker which takes refs.
     let futures = trackers.iter().cloned().map(|tr| {
         let wasm_engine = wasm_engine.clone();
         async move {
-            let provider = match build_provider(&wasm_engine, &tr).await {
+            let provider = match build_provider(&wasm_engine, ticker, &tr).await {
                 Ok(p) => p,
                 Err(e) => return (tr, Err(e)),
             };
@@ -177,9 +182,11 @@ async fn fan_out(
 
 /// Build a `TrackerProvider` for `tr`. UNIT3D rows return a
 /// [`Unit3dClient`] wrapper; rows with `plugin_path` return a
-/// [`WasmTrackerProvider`] compiled against `wasm_engine`.
+/// [`WasmTrackerProvider`] compiled against `wasm_engine` (with the
+/// shared `ticker` enforcing the per-call epoch deadline).
 async fn build_provider(
     wasm_engine: &WasmEngine,
+    ticker: &WasmEpochTicker,
     tr: &TrackerRow,
 ) -> Result<Arc<dyn TrackerProvider>, String> {
     let source = TrackerSource::new(tr.name.clone(), tr.base_url.clone())
@@ -188,10 +195,14 @@ async fn build_provider(
     if let Some(path) = tr.plugin_path.as_deref() {
         let bytes =
             read_plugin_bytes(path).map_err(|e| format!("read plugin {}: {e}", path.display()))?;
-        let provider =
-            WasmTrackerProvider::load_with_engine(wasm_engine, &bytes, PluginConfig::new(source))
-                .await
-                .map_err(|e| format!("load plugin {}: {e}", path.display()))?;
+        let provider = WasmTrackerProvider::load_with_engine(
+            wasm_engine,
+            ticker,
+            &bytes,
+            PluginConfig::new(source),
+        )
+        .await
+        .map_err(|e| format!("load plugin {}: {e}", path.display()))?;
         Ok(Arc::new(provider))
     } else {
         let client = Unit3dClient::new(source, &tr.api_token).map_err(|e| e.to_string())?;

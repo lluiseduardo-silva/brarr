@@ -20,6 +20,7 @@
 use std::sync::Arc;
 
 use brarr_decision_service::Engine;
+use brarr_plugin_host::{DEFAULT_TICK_INTERVAL, WasmEpochTicker};
 use wasmtime::{Config, Engine as WasmEngine};
 
 use crate::auth::AuthConfig;
@@ -35,6 +36,10 @@ struct Inner {
     pool: Pool,
     engine: Engine,
     wasm_engine: WasmEngine,
+    /// Background ticker advancing the wasm engine epoch so per-plugin
+    /// deadlines actually fire. Lifetime tied to this `Inner`; the
+    /// task aborts when the last `AppState` clone is dropped.
+    wasm_ticker: WasmEpochTicker,
     auth: AuthConfig,
 }
 
@@ -64,16 +69,27 @@ impl AppState {
     pub fn with_auth(pool: Pool, engine: Engine, auth: AuthConfig) -> Self {
         let mut wasm_cfg = Config::new();
         wasm_cfg.async_support(true);
+        wasm_cfg.epoch_interruption(true);
         let wasm_engine =
             WasmEngine::new(&wasm_cfg).expect("build async wasmtime engine on supported host");
+        let wasm_ticker =
+            WasmEpochTicker::spawn(&Arc::new(wasm_engine.clone()), DEFAULT_TICK_INTERVAL);
         Self {
             inner: Arc::new(Inner {
                 pool,
                 engine,
                 wasm_engine,
+                wasm_ticker,
                 auth,
             }),
         }
+    }
+
+    /// Borrow the shared epoch ticker. Used by [`crate::search`] to
+    /// compute per-plugin deadline ticks.
+    #[must_use]
+    pub fn wasm_ticker(&self) -> &WasmEpochTicker {
+        &self.inner.wasm_ticker
     }
 
     /// Borrow the auth configuration.
