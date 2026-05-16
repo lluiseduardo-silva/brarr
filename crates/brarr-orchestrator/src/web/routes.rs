@@ -35,6 +35,10 @@ use uuid::Uuid;
 
 use crate::auth::{AuthConfig, SESSION_COOKIE};
 use crate::db::{decisions, providers, searches};
+#[allow(
+    unused_imports,
+    reason = "re-exported for downstream tests that still call it"
+)]
 use crate::search::run_tmdb_search;
 use crate::web::render::html;
 use crate::web::templates::{
@@ -285,30 +289,73 @@ async fn releases_index(State(state): State<AppState>) -> Result<Response, AppEr
     html(&ReleasesTemplate { decisions })
 }
 
+/// Multi-id form: at least one of `tmdb_id` / `imdb_id` must be set.
+/// Both fields are typed `Option<String>` so an empty input doesn't
+/// trip serde's `u32` parser and the handler can apply its own
+/// validation with a friendly error.
 #[derive(Debug, Deserialize)]
 struct CreateSearchForm {
-    tmdb_id: u32,
+    #[serde(default)]
+    tmdb_id: Option<String>,
+    #[serde(default)]
+    imdb_id: Option<String>,
 }
 
 async fn searches_create(
     State(state): State<AppState>,
     Form(form): Form<CreateSearchForm>,
 ) -> Result<Response, AppError> {
-    let tmdb = TmdbId::new(form.tmdb_id)
-        .map_err(|e| AppError::InvalidInput(format!("invalid tmdb_id: {e}")))?;
-    let outcome = run_tmdb_search(&state, tmdb).await?;
-    // HTMX picks up `HX-Redirect` and performs a client-side redirect.
+    let tmdb = parse_optional_tmdb(form.tmdb_id.as_deref())?;
+    let imdb = parse_optional_imdb(form.imdb_id.as_deref())?;
+    if tmdb.is_none() && imdb.is_none() {
+        return Err(AppError::InvalidInput(
+            "informe TMDb id ou IMDb id (tt-prefixado ou numérico)".to_string(),
+        ));
+    }
+    let outcome =
+        crate::search::run_search(&state, crate::search::SearchKeys { tmdb, imdb }).await?;
+    // Return 200 (not 3xx) so the browser doesn't auto-follow the
+    // Location header before HTMX can read the response. HTMX picks up
+    // `HX-Redirect` from a 2xx body and performs a client-side
+    // window.location navigation. When the response is a 303, XHR
+    // transparently follows it via Location, the resulting page is then
+    // discarded by `hx-swap="none"`, and the user is left staring at
+    // the dashboard wondering why nothing happened.
     let mut headers = HeaderMap::new();
     let location = format!("/searches/{}", outcome.search.id);
     headers.insert(
         "HX-Redirect",
         HeaderValue::from_str(&location).unwrap_or_else(|_| HeaderValue::from_static("/")),
     );
-    headers.insert(
-        header::LOCATION,
-        HeaderValue::from_str(&location).unwrap_or_else(|_| HeaderValue::from_static("/")),
-    );
-    Ok((StatusCode::SEE_OTHER, headers, "").into_response())
+    Ok((StatusCode::OK, headers, "").into_response())
+}
+
+fn parse_optional_tmdb(raw: Option<&str>) -> Result<Option<TmdbId>, AppError> {
+    let Some(s) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    let n: u32 = s
+        .parse()
+        .map_err(|_| AppError::InvalidInput(format!("tmdb_id deve ser numérico, recebi {s:?}")))?;
+    TmdbId::new(n)
+        .map(Some)
+        .map_err(|e| AppError::InvalidInput(format!("tmdb_id inválido: {e}")))
+}
+
+fn parse_optional_imdb(raw: Option<&str>) -> Result<Option<brarr_core::ImdbId>, AppError> {
+    let Some(s) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    let stripped = s.trim_start_matches("tt").trim_start_matches('0');
+    if stripped.is_empty() {
+        return Ok(None);
+    }
+    let n: u32 = stripped
+        .parse()
+        .map_err(|_| AppError::InvalidInput(format!("imdb_id deve ser numérico, recebi {s:?}")))?;
+    brarr_core::ImdbId::new(n)
+        .map(Some)
+        .map_err(|e| AppError::InvalidInput(format!("imdb_id inválido: {e}")))
 }
 
 async fn search_detail(

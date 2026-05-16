@@ -105,6 +105,13 @@ async fn apikey_middleware(
 /// permissive — most params are optional and not all `t` values use the
 /// same fields. We accept them all and let each handler pick what
 /// applies.
+///
+/// Every numeric field is typed as `Option<String>` rather than
+/// `Option<u32>` so that an empty value (`tmdbid=`) — which Sonarr and
+/// other *arr apps send on connectivity probes — deserializes cleanly
+/// instead of failing the whole request with `invalid digit found in
+/// string`. Each handler does its own parsing and treats empty/garbage
+/// as "axis not provided".
 #[derive(Debug, Default, Deserialize)]
 struct ApiQuery {
     /// `t=` selector. Required; missing → 400.
@@ -118,9 +125,10 @@ struct ApiQuery {
         reason = "consumed by apikey_middleware before reaching here"
     )]
     apikey: Option<String>,
-    /// `tmdbid=<numeric>`. Movie-search axis.
+    /// `tmdbid=<numeric>`. Movie-search axis. Accepted as a string so
+    /// `tmdbid=` (empty) doesn't 400 the request.
     #[serde(default)]
-    tmdbid: Option<u32>,
+    tmdbid: Option<String>,
     /// `imdbid=<numeric>` (Newznab strips the leading `tt`; we accept
     /// both forms).
     #[serde(default)]
@@ -133,9 +141,10 @@ struct ApiQuery {
     )]
     q: Option<String>,
     /// Limit hint from Sonarr (`limit=100`). We honour it by clamping
-    /// the kept-decisions list before rendering.
+    /// the kept-decisions list before rendering. String-typed for the
+    /// same empty-value reason as `tmdbid`.
     #[serde(default)]
-    limit: Option<u32>,
+    limit: Option<String>,
     /// Offset hint from Sonarr. Unused today (paging would re-issue the
     /// whole search anyway).
     #[serde(default)]
@@ -143,7 +152,7 @@ struct ApiQuery {
         dead_code,
         reason = "Sonarr paginates client-side once it has the feed"
     )]
-    offset: Option<u32>,
+    offset: Option<String>,
     /// Category filter from Sonarr (`cat=2000,2040`). Ignored — we
     /// advertise the subset we support and Sonarr filters client-side.
     #[serde(default)]
@@ -152,6 +161,24 @@ struct ApiQuery {
         reason = "Sonarr filters categories client-side after parsing the feed"
     )]
     cat: Option<String>,
+}
+
+/// Parse an optional `Option<String>` query field as a `u32`. Returns
+/// `Ok(None)` for `None`, empty string, or whitespace-only input — this
+/// keeps Sonarr's empty-param probes from failing the whole request.
+/// Returns `Err(AppError::InvalidInput)` only when the value is present
+/// AND non-empty AND not a valid `u32`.
+fn parse_u32_param(raw: Option<&String>, field: &str) -> Result<Option<u32>, AppError> {
+    let Some(s) = raw
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return Ok(None);
+    };
+    s.parse::<u32>()
+        .map(Some)
+        .map_err(|_| AppError::InvalidInput(format!("{field} must be numeric, got {s:?}")))
 }
 
 async fn handle_api(
@@ -203,8 +230,8 @@ async fn handle_api(
 
 async fn handle_movie(state: &AppState, q: &ApiQuery) -> Result<Response, AppError> {
     let imdb = parse_imdb(q.imdbid.as_deref())?;
-    let tmdb = q
-        .tmdbid
+    let tmdb_raw = parse_u32_param(q.tmdbid.as_ref(), "tmdbid")?;
+    let tmdb = tmdb_raw
         .filter(|&v| v > 0)
         .map(TmdbId::new)
         .transpose()
@@ -220,7 +247,8 @@ async fn handle_movie(state: &AppState, q: &ApiQuery) -> Result<Response, AppErr
     }
 
     let outcome = run_search(state, SearchKeys { tmdb, imdb }).await?;
-    let limit = q.limit.map_or(100, |v| v.clamp(1, 1_000)) as usize;
+    let limit_raw = parse_u32_param(q.limit.as_ref(), "limit")?;
+    let limit = limit_raw.map_or(100, |v| v.clamp(1, 1_000)) as usize;
     let releases: Vec<Release> = outcome
         .decisions
         .iter()

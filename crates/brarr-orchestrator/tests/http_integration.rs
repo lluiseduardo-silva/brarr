@@ -164,7 +164,13 @@ async fn delete_unknown_provider_returns_404() {
 }
 
 #[tokio::test]
-async fn search_with_no_trackers_redirects_to_detail() {
+async fn search_with_no_providers_redirects_to_detail() {
+    // Regression: POST /searches must return 200 + HX-Redirect (NOT a
+    // 3xx with Location), otherwise the browser auto-follows the
+    // Location header on the underlying XHR before HTMX can read the
+    // response and trigger a client-side navigation. End result was
+    // users sitting on the dashboard forever wondering why the form
+    // does nothing.
     let (addr, _state) = spawn().await;
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -176,11 +182,13 @@ async fn search_with_no_trackers_redirects_to_detail() {
         .send()
         .await
         .expect("send");
-    assert_eq!(resp.status(), 303);
-    let location = resp.headers().get("location").expect("location header");
-    assert!(location.to_str().unwrap().starts_with("/searches/"));
+    assert_eq!(resp.status(), 200);
     let hx_redirect = resp.headers().get("HX-Redirect").expect("hx-redirect");
     assert!(hx_redirect.to_str().unwrap().starts_with("/searches/"));
+    assert!(
+        resp.headers().get("location").is_none(),
+        "must NOT set Location — keeps the browser from auto-following the redirect"
+    );
 }
 
 #[tokio::test]

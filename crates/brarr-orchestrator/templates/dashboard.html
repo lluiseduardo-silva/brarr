@@ -13,15 +13,25 @@
         <p class="text-3xl font-bold">{{ search_count }}</p>
     </div>
     <div class="bg-white rounded-lg shadow p-4">
-        <form hx-post="/searches" hx-swap="none" class="flex gap-2 items-end">
-            <div class="flex-1">
-                <label class="text-xs uppercase tracking-wide text-slate-500" for="tmdb_id">Nova busca por TMDb</label>
-                <input id="tmdb_id" name="tmdb_id" type="number" min="1" required
-                       class="w-full mt-1 border rounded px-2 py-1 text-sm" placeholder="ex. 603">
+        <form hx-post="/searches" hx-swap="none" class="space-y-2">
+            <div class="grid grid-cols-2 gap-2">
+                <div>
+                    <label class="text-xs uppercase tracking-wide text-slate-500" for="tmdb_id">TMDb</label>
+                    <input id="tmdb_id" name="tmdb_id" type="number" min="1"
+                           class="w-full mt-1 border rounded px-2 py-1 text-sm" placeholder="ex. 603">
+                </div>
+                <div>
+                    <label class="text-xs uppercase tracking-wide text-slate-500" for="imdb_id">IMDb</label>
+                    <input id="imdb_id" name="imdb_id" type="text"
+                           class="w-full mt-1 border rounded px-2 py-1 text-sm" placeholder="ex. tt0133093">
+                </div>
             </div>
-            <button type="submit" class="bg-amber-500 hover:bg-amber-600 text-white text-sm font-semibold px-3 py-1 rounded">
+            <button type="submit" class="w-full bg-amber-500 hover:bg-amber-600 text-white text-sm font-semibold px-3 py-1 rounded">
                 Buscar
             </button>
+            <p class="text-xs text-slate-500">
+                Pelo menos um id. TMDb cobre UNIT3D; IMDb cobre Newznab/Torznab.
+            </p>
         </form>
     </div>
 </div>

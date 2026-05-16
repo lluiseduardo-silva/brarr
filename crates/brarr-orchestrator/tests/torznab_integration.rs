@@ -105,6 +105,38 @@ async fn tvsearch_returns_empty_feed() {
 }
 
 #[tokio::test]
+async fn empty_tmdbid_does_not_400() {
+    // Sonarr probes the indexer with `tmdbid=` (empty) before sending a
+    // real id. Regression test: the query parser must accept that
+    // gracefully and treat it as "axis not provided" instead of erroring
+    // with `invalid digit found in string`.
+    let addr = spawn(AuthConfig::Disabled).await;
+    let resp = client()
+        .get(format!("http://{addr}/torznab/api?t=movie&tmdbid=&imdbid="))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("<rss"));
+}
+
+#[tokio::test]
+async fn garbage_tmdbid_returns_400_with_clear_error() {
+    let addr = spawn(AuthConfig::Disabled).await;
+    let resp = client()
+        .get(format!(
+            "http://{addr}/torznab/api?t=movie&tmdbid=not-a-number"
+        ))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 400);
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("tmdbid"), "body: {body}");
+}
+
+#[tokio::test]
 async fn movie_with_no_providers_returns_empty_feed() {
     let addr = spawn(AuthConfig::Disabled).await;
     let resp = client()
