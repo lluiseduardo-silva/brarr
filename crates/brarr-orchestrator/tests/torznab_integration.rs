@@ -96,9 +96,11 @@ async fn search_probe_returns_placeholder_feed() {
         body.contains("health-check"),
         "placeholder title should make synthetic nature obvious"
     );
+    // The sentinel emits subcategory 2040 (HD) as the primary
+    // `<category>` so probes that filter on it pass.
     assert!(
-        body.contains("1999"),
-        "pubDate must be far in the past so RSS sync ignores it"
+        body.contains("2040"),
+        "placeholder must carry HD subcategory"
     );
 }
 

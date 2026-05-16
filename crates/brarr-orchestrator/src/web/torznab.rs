@@ -496,18 +496,23 @@ fn render_empty_feed() -> Result<Vec<u8>, AppError> {
 }
 
 /// Build an RSS feed with a single sentinel item so Sonarr / Radarr's
-/// "Test Indexer" probe — which counts `>0` items as "indexer works"
-/// — can pass for `?t=search` / `?t=tvsearch` / `?t=movie` without ids.
+/// "Test Indexer" probe — which counts `>0` items **whose categories
+/// intersect the user's configured filter** — can pass for
+/// `?t=search` / `?t=tvsearch` / `?t=movie` without ids.
 ///
-/// The sentinel is intentionally unattractive to any automated grabber:
-/// - Title makes its synthetic nature obvious to a human glancing at
-///   the Manual Search list.
-/// - `pubDate` is set to 1999-01-01, far outside any RSS-sync time
-///   window (Radarr / Sonarr default to the last 12-24h).
-/// - Size is 1 byte.
-/// - `download_url` points at `/torznab/download/{nil-uuid}` which the
-///   proxy resolves to 404, so an accidental grab fails fast and
-///   clearly.
+/// Practical observations:
+/// - The probe filters items by category client-side. Emitting only the
+///   parent `2000` (Movies) is not enough — *arr apps look for at least
+///   one subcategory match (`2030` SD / `2040` HD / `2045` UHD / `2050`
+///   BluRay). The sentinel emits all four plus the parent.
+/// - The probe also drops items whose `pubDate` looks "too old". We
+///   set it to ~30 days in the past: recent enough to survive the
+///   probe's freshness filter, old enough that the RSS-sync lookback
+///   window (default 24h on Sonarr, 12h on Radarr) never picks it up.
+/// - Title is intentionally unappealing: any human glancing at Manual
+///   Search instantly recognizes its synthetic nature.
+/// - Size is 1 byte and the enclosure URL resolves to a 404 through
+///   the download proxy, so an accidental grab fails fast and clearly.
 fn render_placeholder_feed() -> Result<Vec<u8>, AppError> {
     let mut writer = Writer::new(Cursor::new(Vec::with_capacity(1024)));
     writer
@@ -525,6 +530,14 @@ fn render_placeholder_feed() -> Result<Vec<u8>, AppError> {
     writer
         .write_event(Event::Start(rss.borrow()))
         .map_err(xml_err)?;
+
+    // pubDate ~30 days ago. Format follows RFC 822 (`%a, %d %b %Y
+    // %H:%M:%S %z`). We hand-format via `time` since this module
+    // already pulls it transitively, but to avoid taking a new
+    // dependency we hardcode a fixed-window value computed off the
+    // current Unix timestamp and use a precomputed weekday/month
+    // lookup — see `format_rfc822_30_days_ago`.
+    let pub_date = format_rfc822_30_days_ago();
 
     writer
         .create_element("channel")
@@ -544,17 +557,18 @@ fn render_placeholder_feed() -> Result<Vec<u8>, AppError> {
                 iw.create_element("guid")
                     .with_attribute(("isPermaLink", "false"))
                     .write_text_content(BytesText::new("brarr-sentinel"))?;
-                // 1999-01-01 — older than any plausible Sonarr/Radarr
-                // RSS-sync lookback window, so the sentinel never gets
-                // auto-grabbed.
                 iw.create_element("pubDate")
-                    .write_text_content(BytesText::new("Fri, 01 Jan 1999 00:00:00 +0000"))?;
+                    .write_text_content(BytesText::new(&pub_date))?;
                 iw.create_element("link")
                     .write_text_content(BytesText::new(
                         "/torznab/download/00000000-0000-0000-0000-000000000000",
                     ))?;
+                // Emit the most common Movies subcategory as the
+                // primary `<category>` so probes that compare only
+                // this element pass. Repeat it through the attr block
+                // below for clients that filter on `torznab:attr`.
                 iw.create_element("category")
-                    .write_text_content(BytesText::new("2000"))?;
+                    .write_text_content(BytesText::new("2040"))?;
                 iw.create_element("enclosure")
                     .with_attributes([
                         (
@@ -565,7 +579,12 @@ fn render_placeholder_feed() -> Result<Vec<u8>, AppError> {
                         ("type", "application/x-bittorrent"),
                     ])
                     .write_empty()?;
-                attr(iw, "category", "2000")?;
+                // Cover every Movies subcategory brarr advertises in
+                // `t=caps`, so any user-configured combination of cats
+                // intersects.
+                for cat in ["2000", "2030", "2040", "2045", "2050"] {
+                    attr(iw, "category", cat)?;
+                }
                 attr(iw, "size", "1")?;
                 attr(iw, "seeders", "0")?;
                 attr(iw, "peers", "0")?;
@@ -656,6 +675,20 @@ fn write_item<W: std::io::Write>(w: &mut Writer<W>, r: &Release) -> std::io::Res
         Ok(())
     })?;
     Ok(())
+}
+
+/// Format the current time minus 30 days as an RFC 822 date string
+/// (`Mon, 02 Jan 2006 15:04:05 +0000`). Used by the sentinel
+/// placeholder so Sonarr/Radarr's "Test Indexer" probe sees a recent
+/// enough item to count it as a real result, while still falling
+/// outside the default RSS-sync lookback window so it never gets
+/// grabbed.
+fn format_rfc822_30_days_ago() -> String {
+    use time::format_description::well_known::Rfc2822;
+    let then = time::OffsetDateTime::now_utc() - time::Duration::days(30);
+    // Rfc2822 is the IETF rename of RFC 822 — same wire shape.
+    then.format(&Rfc2822)
+        .unwrap_or_else(|_| "Mon, 01 Jan 2024 00:00:00 +0000".to_string())
 }
 
 fn attr<W: std::io::Write>(w: &mut Writer<W>, name: &str, value: &str) -> std::io::Result<()> {
