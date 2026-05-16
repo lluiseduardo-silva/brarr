@@ -52,16 +52,17 @@
 use std::io::Cursor;
 
 use axum::Router;
-use axum::extract::{Query, Request, State};
+use axum::extract::{Path, Query, Request, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::middleware::{self, Next};
-use axum::response::{IntoResponse, Response};
+use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::get;
 use brarr_core::{ImdbId, Release, ReleaseKind, Resolution, TmdbId};
 use quick_xml::Writer;
 use quick_xml::events::{BytesDecl, BytesText, Event};
 use serde::Deserialize;
 use tracing::{debug, warn};
+use uuid::Uuid;
 
 use crate::auth::AuthConfig;
 use crate::search::{SearchKeys, run_search};
@@ -74,7 +75,44 @@ pub fn router(state: AppState) -> Router<AppState> {
     let auth_layer = middleware::from_fn_with_state(state, apikey_middleware);
     Router::new()
         .route("/torznab/api", get(handle_api))
+        .route("/torznab/download/{decision_id}", get(handle_download))
         .layer(auth_layer)
+}
+
+/// `GET /torznab/download/{decision_id}` — proxy route used by the
+/// Torznab feed's `<enclosure url>`. Sonarr / Radarr hit this URL to
+/// grab the actual `.torrent` / `.nzb`; we look the decision up by id,
+/// pull the persisted upstream URL, and `302` to it.
+///
+/// Caveats:
+/// - The persisted URL retains the provider's apikey (Newznab style)
+///   or download token (UNIT3D style). For UNIT3D trackers that gate
+///   download on a `Authorization: Bearer` header rather than a URL
+///   token, this redirect won't carry credentials — server-side fetch
+///   with Bearer injection is a follow-up. The current redirect path
+///   works out of the box for all Newznab / Torznab providers and for
+///   UNIT3D trackers that include the token in the URL.
+/// - Returns `404` when the decision row no longer exists or has no
+///   `download_url` (provider didn't expose one).
+async fn handle_download(
+    State(state): State<AppState>,
+    Path(decision_id): Path<String>,
+) -> Result<Response, AppError> {
+    let uuid = Uuid::parse_str(&decision_id)
+        .map_err(|e| AppError::InvalidInput(format!("invalid decision id: {e}")))?;
+    let row = crate::db::decisions::get_by_id(state.pool(), uuid).await?;
+    let Some(url) = row.download_url else {
+        return Err(AppError::NotFound(format!(
+            "decision {uuid} has no upstream download URL"
+        )));
+    };
+    debug!(
+        target: "brarr_orchestrator::torznab",
+        decision_id = %uuid,
+        provider = %row.provider_name,
+        "redirecting torznab download to upstream"
+    );
+    Ok(Redirect::temporary(&url).into_response())
 }
 
 /// Middleware that gates every `/torznab/*` route on either:
@@ -292,6 +330,8 @@ fn decision_to_release(row: &crate::db::decisions::DecisionRow) -> Option<Releas
     )
     .ok()?;
     let mut r = Release::new(
+        // Use the decision row UUID as the release id — `write_item`
+        // builds the `/torznab/download/{id}` proxy URL off of this.
         row.id.to_string(),
         tracker,
         row.release_name.clone(),
@@ -302,6 +342,13 @@ fn decision_to_release(row: &crate::db::decisions::DecisionRow) -> Option<Releas
     .ok()?;
     r.seeders = row.seeders;
     r.leechers = row.leechers;
+    // Forward the persisted upstream details URL when available so the
+    // feed's `<comments>` element points at the provider's release
+    // page instead of looping back to the proxy.
+    r.urls.details = row
+        .details_url
+        .as_deref()
+        .and_then(|s| url::Url::parse(s).ok());
     Some(r)
 }
 
@@ -444,10 +491,19 @@ fn render_feed(items: &[Release]) -> Result<Vec<u8>, AppError> {
 fn write_item<W: std::io::Write>(w: &mut Writer<W>, r: &Release) -> std::io::Result<()> {
     let categories = categories_for(r);
     let primary_cat = categories.first().copied().unwrap_or(2000);
-    let download_url = r.urls.download.as_ref().map_or_else(
-        || format!("brarr:///download/{}", r.tracker_release_id),
-        url::Url::to_string,
-    );
+    // Always emit a brarr-side proxy URL — never the raw upstream link.
+    // Two reasons:
+    //   1. Keeps the upstream apikey out of the feed body Sonarr / the
+    //      grabber stores in its DB.
+    //   2. Lets brarr add provider-specific download logic later
+    //      (server-side fetch with Bearer auth for UNIT3D, retry,
+    //      logging) without changing the wire shape.
+    // `r.tracker_release_id` was populated by `decision_to_release`
+    // with the brarr decision UUID, so we can route the proxy by that.
+    // The path is relative — Sonarr / Radarr resolve it against the
+    // configured indexer base URL, which already carries the apikey
+    // in their own config.
+    let download_url = format!("/torznab/download/{}", r.tracker_release_id);
     let details_url = r
         .urls
         .details

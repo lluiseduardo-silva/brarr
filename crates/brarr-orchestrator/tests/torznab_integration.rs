@@ -238,6 +238,41 @@ async fn auth_with_bearer_header_also_works() {
 }
 
 #[tokio::test]
+async fn download_proxy_returns_404_for_unknown_decision() {
+    let addr = spawn(AuthConfig::Disabled).await;
+    let bogus = "00000000-0000-4000-8000-000000000000";
+    let resp = client()
+        .get(format!("http://{addr}/torznab/download/{bogus}"))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 404);
+}
+
+#[tokio::test]
+async fn download_proxy_rejects_malformed_decision_id() {
+    let addr = spawn(AuthConfig::Disabled).await;
+    let resp = client()
+        .get(format!("http://{addr}/torznab/download/not-a-uuid"))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 400);
+}
+
+#[tokio::test]
+async fn download_proxy_requires_apikey_when_auth_enabled() {
+    let addr = spawn(AuthConfig::from_optional(Some(TOKEN))).await;
+    let bogus = "00000000-0000-4000-8000-000000000000";
+    let resp = client()
+        .get(format!("http://{addr}/torznab/download/{bogus}"))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 401);
+}
+
+#[tokio::test]
 async fn torznab_routes_do_not_redirect_to_login() {
     // Sanity check: auth-enabled mode redirects UI routes to /login,
     // but the torznab router must NOT — Sonarr would follow the

@@ -328,6 +328,8 @@ fn build_insert(
         size_bytes: release.size_bytes,
         resolution: release.resolution.clone(),
         kind: release.kind.clone(),
+        download_url: release.urls.download.as_ref().map(url::Url::to_string),
+        details_url: release.urls.details.as_ref().map(url::Url::to_string),
     }
 }
 

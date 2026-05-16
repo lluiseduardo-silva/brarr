@@ -43,6 +43,15 @@ pub struct DecisionRow {
     pub resolution: String,
     /// Kind label.
     pub kind: String,
+    /// Upstream `.torrent` / `.nzb` download URL (apikey may be
+    /// embedded). Surfaced through the Torznab outbound feed via the
+    /// `/torznab/download/{decision_id}` proxy so Sonarr / Radarr can
+    /// actually grab the file. `None` when the provider didn't expose
+    /// one.
+    pub download_url: Option<String>,
+    /// Details / comments page URL for the release on the provider.
+    /// Surfaced as `<comments>` in the Torznab feed.
+    pub details_url: Option<String>,
     /// When the engine produced the outcome.
     pub decided_at: OffsetDateTime,
 }
@@ -78,6 +87,10 @@ pub struct DecisionInsert {
     pub resolution: Resolution,
     /// Release kind from `brarr_core`.
     pub kind: ReleaseKind,
+    /// Upstream download URL (verbatim, including apikey if any).
+    pub download_url: Option<String>,
+    /// Upstream details / comments page URL.
+    pub details_url: Option<String>,
 }
 
 /// Insert one decision row, returning the persisted form.
@@ -98,8 +111,8 @@ pub async fn insert(pool: &Pool, ins: DecisionInsert) -> Result<DecisionRow, App
         "INSERT INTO decisions ( \
             id, search_id, provider_id, provider_name, release_name, release_id_remote, \
             score, rejected, tags_json, matched_json, seeders, leechers, size_bytes, \
-            resolution, kind, decided_at \
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            resolution, kind, decided_at, download_url, details_url \
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(id.to_string())
     .bind(ins.search_id.to_string())
@@ -117,6 +130,8 @@ pub async fn insert(pool: &Pool, ins: DecisionInsert) -> Result<DecisionRow, App
     .bind(&resolution)
     .bind(&kind)
     .bind(now.unix_timestamp())
+    .bind(&ins.download_url)
+    .bind(&ins.details_url)
     .execute(pool)
     .await?;
 
@@ -136,6 +151,8 @@ pub async fn insert(pool: &Pool, ins: DecisionInsert) -> Result<DecisionRow, App
         size_bytes: ins.size_bytes,
         resolution,
         kind,
+        download_url: ins.download_url,
+        details_url: ins.details_url,
         decided_at: now,
     })
 }
@@ -149,13 +166,37 @@ pub async fn list_for_search(pool: &Pool, search_id: Uuid) -> Result<Vec<Decisio
     let rows = sqlx::query(
         "SELECT id, search_id, provider_id, provider_name, release_name, release_id_remote, \
                 score, rejected, tags_json, matched_json, seeders, leechers, size_bytes, \
-                resolution, kind, decided_at \
+                resolution, kind, decided_at, download_url, details_url \
          FROM decisions WHERE search_id = ? ORDER BY score DESC, seeders DESC",
     )
     .bind(search_id.to_string())
     .fetch_all(pool)
     .await?;
     rows.iter().map(row_to_decision).collect()
+}
+
+/// Fetch a single decision row by id. Used by the Torznab download
+/// proxy route to resolve `<enclosure url>` proxy hits back to the
+/// persisted upstream URL.
+///
+/// # Errors
+///
+/// Returns [`AppError::NotFound`] when no row matches; surfaces a
+/// [`sqlx::Error`] otherwise.
+pub async fn get_by_id(pool: &Pool, id: Uuid) -> Result<DecisionRow, AppError> {
+    let row_opt = sqlx::query(
+        "SELECT id, search_id, provider_id, provider_name, release_name, release_id_remote, \
+                score, rejected, tags_json, matched_json, seeders, leechers, size_bytes, \
+                resolution, kind, decided_at, download_url, details_url \
+         FROM decisions WHERE id = ?",
+    )
+    .bind(id.to_string())
+    .fetch_optional(pool)
+    .await?;
+    match row_opt {
+        Some(row) => row_to_decision(&row),
+        None => Err(AppError::NotFound(format!("decision {id}"))),
+    }
 }
 
 /// Return the most recent `limit` decision rows across all searches.
@@ -172,7 +213,7 @@ pub async fn recent(pool: &Pool, limit: u32) -> Result<Vec<DecisionRow>, AppErro
     let rows = sqlx::query(
         "SELECT id, search_id, provider_id, provider_name, release_name, release_id_remote, \
                 score, rejected, tags_json, matched_json, seeders, leechers, size_bytes, \
-                resolution, kind, decided_at \
+                resolution, kind, decided_at, download_url, details_url \
          FROM decisions ORDER BY decided_at DESC LIMIT ?",
     )
     .bind(i64::from(limit))
@@ -209,6 +250,8 @@ fn row_to_decision(row: &SqliteRow) -> Result<DecisionRow, AppError> {
     let decided_at = OffsetDateTime::from_unix_timestamp(decided_unix)
         .map_err(|e| AppError::InvalidInput(format!("invalid timestamp: {e}")))?;
 
+    let download_url: Option<String> = row.try_get("download_url").ok().flatten();
+    let details_url: Option<String> = row.try_get("details_url").ok().flatten();
     Ok(DecisionRow {
         id,
         search_id,
@@ -225,6 +268,8 @@ fn row_to_decision(row: &SqliteRow) -> Result<DecisionRow, AppError> {
         size_bytes: u64_from_i64(size_bytes_i64),
         resolution: row.try_get("resolution")?,
         kind: row.try_get("kind")?,
+        download_url,
+        details_url,
         decided_at,
     })
 }
@@ -305,6 +350,8 @@ mod tests {
             size_bytes: 9_608_016_733,
             resolution: Resolution::P1080,
             kind: ReleaseKind::BluRay,
+            download_url: Some("https://capybara/torrents/download/12345".into()),
+            details_url: Some("https://capybara/torrents/12345".into()),
         }
     }
 
@@ -360,5 +407,33 @@ mod tests {
         assert!(row.rejected);
         let list = list_for_search(&pool, search_id).await.unwrap();
         assert!(list[0].rejected);
+    }
+
+    #[tokio::test]
+    async fn download_url_roundtrips() {
+        let pool = open_memory().await.unwrap();
+        let search_id = make_search(&pool).await;
+        let ins = sample_insert(search_id, 100);
+        let row = insert(&pool, ins).await.unwrap();
+        assert_eq!(
+            row.download_url.as_deref(),
+            Some("https://capybara/torrents/download/12345")
+        );
+        let fetched = get_by_id(&pool, row.id).await.unwrap();
+        assert_eq!(
+            fetched.download_url.as_deref(),
+            Some("https://capybara/torrents/download/12345")
+        );
+        assert_eq!(
+            fetched.details_url.as_deref(),
+            Some("https://capybara/torrents/12345")
+        );
+    }
+
+    #[tokio::test]
+    async fn get_by_id_404s_when_missing() {
+        let pool = open_memory().await.unwrap();
+        let err = get_by_id(&pool, Uuid::new_v4()).await.unwrap_err();
+        assert!(matches!(err, AppError::NotFound(_)));
     }
 }
