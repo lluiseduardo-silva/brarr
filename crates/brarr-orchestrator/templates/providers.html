@@ -40,10 +40,13 @@
         </button>
     </form>
     <p class="text-xs text-slate-500 mt-2">
-        <strong>UNIT3D</strong>: tracker direto (capybara, locadora). API token bearer.<br>
-        <strong>Newznab</strong>: indexer Usenet (NZBGeek, DrunkenSlug). API token = apikey.<br>
-        <strong>Torznab</strong>: gateway torrent (Jackett, Prowlarr) que fala protocolo Newznab. API token = apikey.<br>
+        <strong>UNIT3D</strong>: tracker direto (capybara, locadora). API token bearer. Base URL: raiz do site (ex. <code>https://capybarabr.com/</code>).<br>
+        <strong>Newznab</strong>: indexer Usenet (NZBGeek, DrunkenSlug). API token = apikey. Base URL: raiz da API <em>sem</em> <code>/api</code> no final (ex. <code>https://api.nzbgeek.info/</code>).<br>
+        <strong>Torznab</strong>: gateway torrent (Jackett, Prowlarr). API token = apikey. Mesmas regras do Newznab.<br>
         <strong>Plugin</strong>: módulo WASM carregado por busca (ABI v1 do <code>brarr-plugin-host</code>).
+    </p>
+    <p class="text-xs text-slate-400 mt-1">
+        Após salvar, clique em <em>testar</em> na lista pra confirmar URL+apikey.
     </p>
 </section>
 

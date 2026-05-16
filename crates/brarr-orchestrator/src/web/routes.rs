@@ -57,6 +57,7 @@ pub fn router(state: AppState, static_dir: &std::path::Path) -> Router {
         .route("/", get(dashboard))
         .route("/providers", get(providers_index).post(providers_create))
         .route("/providers/{id}", delete(providers_delete))
+        .route("/providers/{id}/test", post(providers_test))
         .route("/releases", get(releases_index))
         .route("/searches", post(searches_create))
         .route("/searches/{id}", get(search_detail))
@@ -281,6 +282,111 @@ async fn providers_delete(
     // empty 200 lets `hx-target=closest tr` + `hx-swap=outerHTML` wipe
     // the row without re-rendering the whole list.
     Ok((StatusCode::OK, "").into_response())
+}
+
+/// `POST /providers/{id}/test` — kick the provider's connectivity probe
+/// and return a short HTML fragment with a status badge. Used by the
+/// "Testar" button on each row in `/providers`. HTMX target is the
+/// `<span class="provider-test-result-{id}">` cell on the row.
+async fn providers_test(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, AppError> {
+    let uuid = Uuid::parse_str(&id)
+        .map_err(|e| AppError::InvalidInput(format!("invalid provider id: {e}")))?;
+    let row = providers::get_by_id(state.pool(), uuid).await?;
+    let source = brarr_core::TrackerSource::new(row.name.clone(), row.base_url.clone())
+        .map_err(|e| AppError::InvalidInput(format!("invalid base_url: {e}")))?;
+
+    let badge = run_provider_ping(&row, source).await;
+    let html_fragment = render_ping_badge(&row.id.to_string(), &badge);
+    let mut resp = (StatusCode::OK, html_fragment).into_response();
+    resp.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    Ok(resp)
+}
+
+/// Outcome of a single provider ping, normalized across provider kinds
+/// so the template doesn't need to switch on which client ran.
+struct PingBadge {
+    ok: bool,
+    label: String,
+    detail: String,
+}
+
+async fn run_provider_ping(
+    row: &crate::db::providers::ProviderRow,
+    source: brarr_core::TrackerSource,
+) -> PingBadge {
+    if row.is_plugin() {
+        return PingBadge {
+            ok: false,
+            label: "n/d".to_string(),
+            detail: "test connectivity not implemented for WASM plugins".to_string(),
+        };
+    }
+    let kind = row.kind.to_ascii_lowercase();
+    if kind == "newznab" || kind == "torznab" {
+        match brarr_tracker_newznab::NewznabClient::new(source, &row.api_token) {
+            Ok(client) => match client.ping().await {
+                Ok(r) => PingBadge {
+                    ok: r.ok,
+                    label: format!("{} · {}ms", r.http_status, r.elapsed_ms),
+                    detail: r.detail,
+                },
+                Err(e) => PingBadge {
+                    ok: false,
+                    label: "erro".to_string(),
+                    detail: format!("transport: {e}"),
+                },
+            },
+            Err(e) => PingBadge {
+                ok: false,
+                label: "config".to_string(),
+                detail: format!("invalid apikey or builder: {e}"),
+            },
+        }
+    } else {
+        // Default to UNIT3D for `unit3d` and any unknown kind.
+        match brarr_tracker_unit3d::Unit3dClient::new(source, &row.api_token) {
+            Ok(client) => match client.ping().await {
+                Ok(r) => PingBadge {
+                    ok: r.ok,
+                    label: format!("{} · {}ms", r.http_status, r.elapsed_ms),
+                    detail: r.detail,
+                },
+                Err(e) => PingBadge {
+                    ok: false,
+                    label: "erro".to_string(),
+                    detail: format!("transport: {e}"),
+                },
+            },
+            Err(e) => PingBadge {
+                ok: false,
+                label: "config".to_string(),
+                detail: format!("invalid token or builder: {e}"),
+            },
+        }
+    }
+}
+
+fn render_ping_badge(provider_id: &str, b: &PingBadge) -> String {
+    let (bg, fg) = if b.ok {
+        ("bg-emerald-100", "text-emerald-800")
+    } else {
+        ("bg-red-100", "text-red-800")
+    };
+    // Inline HTML — small enough that pulling it through Askama would
+    // add more ceremony than value. Detail is escaped to keep raw error
+    // text from breaking the markup. Keeping the same `id` as the
+    // initial cell so HTMX's `hx-target` resolves on every subsequent
+    // click after the first swap.
+    let detail = crate::web::templates::escape(&b.detail);
+    let label = crate::web::templates::escape(&b.label);
+    let pid = crate::web::templates::escape(provider_id);
+    format!(r#"<span id="ping-{pid}" class="badge {bg} {fg}" title="{detail}">{label}</span>"#)
 }
 
 async fn releases_index(State(state): State<AppState>) -> Result<Response, AppError> {

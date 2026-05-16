@@ -15,6 +15,23 @@ use crate::error::ClientError;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Structured outcome of a connectivity probe. Mirrors the Unit3D
+/// `PingReport` shape so the orchestrator can render either one through
+/// the same template without owning the type.
+#[derive(Debug, Clone)]
+pub struct PingReport {
+    /// `true` iff URL is reachable, status was 2xx, body did not look
+    /// like a Newznab `<error>` payload, and a `<caps>` root element
+    /// was detected.
+    pub ok: bool,
+    /// HTTP status. `0` if the request never reached the server.
+    pub http_status: u16,
+    /// Round-trip time in milliseconds.
+    pub elapsed_ms: u32,
+    /// Short human-readable detail.
+    pub detail: String,
+}
+
 /// Newznab category ids for the "movies" tree. Comma-separated so it
 /// passes through `query_pairs_mut` as a single `cat=` value the way
 /// Sonarr/Radarr send it. Covers the SD/HD/UHD/BluRay subcats brarr's
@@ -102,6 +119,65 @@ impl NewznabClient {
     #[must_use]
     pub const fn tracker_source(&self) -> &TrackerSource {
         &self.tracker
+    }
+
+    /// Connectivity probe. Hits `?t=caps&apikey=X`. The Newznab
+    /// capability endpoint requires a valid apikey on most
+    /// implementations, so a 2xx response with a body containing
+    /// `<caps>` (or `<error>`, depending on auth) is enough to tell
+    /// URL + apikey health apart.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] on transport failure.
+    pub async fn ping(&self) -> Result<PingReport, ClientError> {
+        let url = self.build_url("caps", &[])?;
+        let started = std::time::Instant::now();
+        let resp = self.http.get(url).send().await?;
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        let elapsed_ms = u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);
+        if !status.is_success() {
+            return Ok(PingReport {
+                ok: false,
+                http_status: status.as_u16(),
+                elapsed_ms,
+                detail: format!(
+                    "{} — {}",
+                    status,
+                    body.chars()
+                        .take(160)
+                        .collect::<String>()
+                        .replace('\n', " ")
+                ),
+            });
+        }
+        // Newznab error payloads come back with HTTP 200 but body
+        // `<error code="100" description="..."/>`. Detect them.
+        if body.contains("<error") {
+            let snippet: String = body
+                .chars()
+                .take(160)
+                .collect::<String>()
+                .replace('\n', " ");
+            return Ok(PingReport {
+                ok: false,
+                http_status: 200,
+                elapsed_ms,
+                detail: format!("provider returned error payload: {snippet}"),
+            });
+        }
+        let ok = body.contains("<caps");
+        Ok(PingReport {
+            ok,
+            http_status: 200,
+            elapsed_ms,
+            detail: if ok {
+                format!("status 200, caps document OK ({} bytes)", body.len())
+            } else {
+                "status 200 but body did not contain <caps>".to_string()
+            },
+        })
     }
 
     /// `GET /api?t=movie&imdbid=<id>&cat=<movie-cats>&apikey=<key>`.

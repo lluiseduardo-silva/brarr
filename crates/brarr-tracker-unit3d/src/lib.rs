@@ -54,7 +54,7 @@ mod error;
 mod provider_impl;
 mod retry;
 
-pub use client::Unit3dClient;
+pub use client::{PingReport, Unit3dClient};
 pub use convert::ConversionError;
 pub use error::ClientError;
 pub use retry::RetryConfig;

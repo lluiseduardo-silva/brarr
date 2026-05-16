@@ -9,6 +9,7 @@
                 <th class="px-3 py-2">Base URL</th>
                 <th class="px-3 py-2">Tipo</th>
                 <th class="px-3 py-2">Criado em</th>
+                <th class="px-3 py-2">Status</th>
                 <th class="px-3 py-2"></th>
             </tr>
         </thead>
@@ -19,7 +20,17 @@
                 <td class="px-3 py-2"><a href="{{ p.base_url }}" class="text-blue-600 hover:underline" target="_blank" rel="noopener">{{ p.base_url }}</a></td>
                 <td class="px-3 py-2 text-xs uppercase tracking-wide">{{ p.kind }}</td>
                 <td class="px-3 py-2 font-mono text-xs">{{ p.created_at }}</td>
-                <td class="px-3 py-2 text-right">
+                <td class="px-3 py-2">
+                    <span id="ping-{{ p.id }}" class="text-xs text-slate-400 italic">não testado</span>
+                </td>
+                <td class="px-3 py-2 text-right space-x-2">
+                    <button hx-post="/providers/{{ p.id }}/test"
+                            hx-target="#ping-{{ p.id }}"
+                            hx-swap="outerHTML"
+                            hx-indicator="#ping-{{ p.id }}"
+                            class="text-emerald-700 hover:underline text-xs">
+                        testar
+                    </button>
                     <button hx-delete="/providers/{{ p.id }}"
                             hx-target="#provider-{{ p.id }}"
                             hx-swap="outerHTML"

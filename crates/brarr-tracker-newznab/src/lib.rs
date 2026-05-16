@@ -47,5 +47,5 @@ mod convert;
 mod dto;
 mod error;
 
-pub use client::NewznabClient;
+pub use client::{NewznabClient, PingReport};
 pub use error::ClientError;
