@@ -469,6 +469,16 @@ impl NewznabClient {
             let mut qs = url.query_pairs_mut();
             qs.append_pair("t", t);
             qs.append_pair("apikey", &self.apikey);
+            // `extended=1` is the Newznab spec switch that asks the
+            // server to emit the verbose `<newznab:attr>` block —
+            // `language` (often repeated), `audio`, `subs`, `video`,
+            // `framerate`, plus a handful of metadata fields. Without
+            // it most indexers (NZBGeek confirmed) only send
+            // category/size/grabs and brarr has no signal for the
+            // PT-presence scoring rules. Free to send — no rate or
+            // quota cost — so we attach it to every dispatched query.
+            // The `caps` endpoint ignores it.
+            qs.append_pair("extended", "1");
             for (k, v) in extra {
                 qs.append_pair(k, v);
             }

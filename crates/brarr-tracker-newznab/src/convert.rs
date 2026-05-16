@@ -79,10 +79,13 @@ fn pick_urls(item: &RawItem) -> ReleaseUrls {
 
 fn build_enrichment(item: &RawItem) -> ReleaseEnrichment {
     let mut audio = Vec::new();
-    // Single `language` attr is often the primary audio when no `audio`
-    // attrs exist (NZBGeek behaviour). Treat both as additive.
-    if let Some(lang) = item.attr("language") {
-        for piece in split_langs(lang) {
+    // Newznab indexers (with `extended=1`) routinely emit one
+    // `<newznab:attr name="language">` per audio track instead of
+    // packing them into a single comma-joined value. Iterate ALL
+    // entries — `attr()` (singular) would drop everything after the
+    // first. The `audio` attr is treated identically.
+    for raw in item.attrs("language") {
+        for piece in split_langs(raw) {
             push_unique(&mut audio, piece);
         }
     }
@@ -97,7 +100,26 @@ fn build_enrichment(item: &RawItem) -> ReleaseEnrichment {
             push_unique(&mut subs, piece);
         }
     }
-    let has_hdr = item.title.to_ascii_lowercase().contains("hdr");
+    // Title heuristic fallback. Newznab indexers — NZBGeek especially
+    // — frequently omit the `<newznab:attr name="audio|subs|language">`
+    // tags, leaving brarr with an empty enrichment that the rules
+    // engine then treats as "unknown PT presence". Scene groups
+    // routinely encode the language directly in the release name
+    // (`*.PT-BR.*`, `*.PORTBR.*`, `*.Dublado.*`, `*.Multi5.*`), so we
+    // mine the title for those tokens and additively push them into
+    // the audio list. This is intentionally conservative — we only
+    // recognize markers with unambiguous meaning, never speculating
+    // about which languages a generic `MULTi` tag covers.
+    for hint in lang_hints_from_title(&item.title) {
+        push_unique(&mut audio, hint);
+    }
+
+    let lc = item.title.to_ascii_lowercase();
+    let has_hdr = lc.contains("hdr")
+        || lc.contains("dolby.vision")
+        || lc.contains("dolby vision")
+        || lc.contains(".dv.")
+        || lc.contains(" dv ");
 
     ReleaseEnrichment {
         container_format: None,
@@ -107,6 +129,77 @@ fn build_enrichment(item: &RawItem) -> ReleaseEnrichment {
         has_forced_subs: false,
         has_hdr,
     }
+}
+
+/// Mine a release title for language hints scene groups embed in the
+/// name. Returns a deduplicated list of [`Language`] values, additive
+/// to whatever the `<newznab:attr>` block already supplied.
+///
+/// Recognized markers (case-insensitive, separator-agnostic — `.`, `-`,
+/// `_`, and space all normalize to one whitespace before matching):
+/// - PT-BR: `pt br`, `ptbr`, `portbr`, `brazilian portuguese`,
+///   `dublado`, `dual.audio.*portu*` heuristic
+/// - PT-PT: `pt pt`, `ptpt`, `european portuguese`
+/// - PT (ambiguous): bare `portuguese` token when no region marker
+///   resolved above
+/// - EN: `english`, ` eng `, or a standalone `en` token
+///
+/// **Deliberately omitted**: `MULTi[N]?`, `DUAL`, and bare-language
+/// codes like `iTA`/`FRE`/`GER`. Those tell us "this release has
+/// multiple audio tracks" but not which ones — pushing arbitrary
+/// languages would mislead the rules engine. The scoring layer can
+/// treat the absence of a PT marker as ambiguous and rank accordingly.
+fn lang_hints_from_title(title: &str) -> Vec<Language> {
+    let lc = title.to_ascii_lowercase();
+    let norm: String = lc
+        .chars()
+        .map(|c| match c {
+            '.' | '-' | '_' | ',' | '[' | ']' | '(' | ')' => ' ',
+            _ => c,
+        })
+        .collect();
+    // Pad with spaces so " eng " / " en " token matchers don't miss
+    // markers at the start or end of the title.
+    let padded = format!(" {norm} ");
+    let mut out: Vec<Language> = Vec::new();
+
+    let pt_br_markers = [
+        " pt br ",
+        " ptbr ",
+        " portbr ",
+        " brazilian portuguese ",
+        " portuguese brazilian ",
+        " dublado ",
+    ];
+    if pt_br_markers.iter().any(|m| padded.contains(m)) {
+        push_unique(&mut out, Language::PtBr);
+    }
+
+    let pt_pt_markers = [
+        " pt pt ",
+        " ptpt ",
+        " european portuguese ",
+        " portuguese european ",
+        " portuguese portugal ",
+    ];
+    if pt_pt_markers.iter().any(|m| padded.contains(m)) {
+        push_unique(&mut out, Language::PtPt);
+    }
+
+    // Ambiguous bare-Portuguese marker — only added when no region
+    // marker already classified the release.
+    if !out.iter().any(Language::is_portuguese) && padded.contains(" portuguese ") {
+        push_unique(&mut out, Language::Pt);
+    }
+
+    // English markers. ` en ` is intentionally narrow — matching just
+    // "en" as a substring would false-positive on every release name
+    // (`encoded`, `seven`, etc.).
+    if padded.contains(" english ") || padded.contains(" eng ") || padded.contains(" en ") {
+        push_unique(&mut out, Language::En);
+    }
+
+    out
 }
 
 fn push_unique(out: &mut Vec<Language>, lang: Language) {
@@ -217,6 +310,161 @@ mod tests {
             e.subtitle_languages
                 .iter()
                 .any(|l| matches!(l, Language::PtBr | Language::Pt))
+        );
+    }
+
+    #[test]
+    fn title_hint_detects_ptbr_dot_separated() {
+        let hints = lang_hints_from_title("Filme.2024.1080p.WEB-DL.PT-BR-GRUPO");
+        assert!(hints.contains(&Language::PtBr), "hints = {hints:?}");
+    }
+
+    #[test]
+    fn title_hint_detects_dublado_as_ptbr() {
+        let hints = lang_hints_from_title("Algum.Filme.2024.Dublado.1080p.WEB-DL-x264");
+        assert!(hints.contains(&Language::PtBr));
+    }
+
+    #[test]
+    fn title_hint_detects_portbr_tag() {
+        let hints = lang_hints_from_title("Foo.Bar.2024.2160p.UHD.BluRay.PORTBR-CREW");
+        assert!(hints.contains(&Language::PtBr));
+    }
+
+    #[test]
+    fn title_hint_detects_pt_pt_european() {
+        let hints = lang_hints_from_title("Algo.2024.1080p.European.Portuguese-GRP");
+        assert!(hints.contains(&Language::PtPt));
+    }
+
+    #[test]
+    fn title_hint_resolves_to_ambiguous_pt_when_no_region() {
+        let hints = lang_hints_from_title("Some.Movie.2024.Portuguese.1080p");
+        assert!(hints.contains(&Language::Pt));
+        // Must NOT promote to PtBr/PtPt without a region marker.
+        assert!(!hints.contains(&Language::PtBr));
+        assert!(!hints.contains(&Language::PtPt));
+    }
+
+    #[test]
+    fn title_hint_skips_multi_and_dual_intentionally() {
+        // `MULTi4` and `DUAL` are too ambiguous — they tell us there's
+        // more than one audio track, not which languages. The scoring
+        // engine must treat the absence of a PT hint as "unknown PT",
+        // not assume one is present.
+        let multi = lang_hints_from_title(
+            "The.Matrix.1999.2160p.HDR.UHD.BluRay.AV1.DDP5.1.Atmos.Multi4-dAV1nci",
+        );
+        assert!(
+            multi.is_empty(),
+            "multi should yield nothing, got {multi:?}"
+        );
+        let dual = lang_hints_from_title("Movie.2024.1080p.WEB-DL.DUAL.H264-GRP");
+        assert!(dual.is_empty(), "dual should yield nothing, got {dual:?}");
+    }
+
+    #[test]
+    fn title_hint_does_not_false_positive_on_encoded_or_seven() {
+        // The narrow ` en ` matcher must not trip on words that
+        // happen to contain `en` as a substring.
+        let h = lang_hints_from_title("Seven.1995.Encoded.1080p.x265-CREW");
+        assert!(!h.contains(&Language::En), "false-positive En: {h:?}");
+    }
+
+    #[test]
+    fn title_hint_detects_explicit_english_token() {
+        let h = lang_hints_from_title("Movie.2024.English.1080p.WEB-DL");
+        assert!(h.contains(&Language::En));
+    }
+
+    #[test]
+    fn dolby_vision_in_title_sets_has_hdr() {
+        let body = r#"<?xml version="1.0"?>
+<rss xmlns:newznab="http://www.newznab.com/DTD/2010/feeds/attributes/">
+  <channel>
+    <item>
+      <title>Movie.2024.2160p.Dolby.Vision.WEB-DL-CREW</title>
+      <guid>g</guid>
+      <enclosure url="https://api.example/a?id=1" length="1"/>
+    </item>
+  </channel>
+</rss>"#;
+        let feed = parse_feed(body).unwrap();
+        let r = item_to_release(&feed.items[0], tracker()).unwrap();
+        assert!(r.enrichment.as_ref().unwrap().has_hdr);
+    }
+
+    #[test]
+    fn repeated_language_attrs_all_land_in_audio() {
+        // Newznab `extended=1` responses emit one
+        // `<newznab:attr name="language">` per audio track instead of
+        // one comma-joined value. The converter must walk all of them,
+        // not just the first.
+        let body = r#"<?xml version="1.0"?>
+<rss xmlns:newznab="http://www.newznab.com/DTD/2010/feeds/attributes/">
+  <channel>
+    <item>
+      <title>Baby.Driver.[2017].br.remux.multi.avc-d3g</title>
+      <guid>4d2e</guid>
+      <enclosure url="https://api.example/a?id=4d2e" length="33637273000"/>
+      <newznab:attr name="language" value="English"/>
+      <newznab:attr name="language" value="Italian"/>
+      <newznab:attr name="language" value="Portuguese"/>
+      <newznab:attr name="subs" value="English"/>
+      <newznab:attr name="subs" value="Italian"/>
+      <newznab:attr name="subs" value="Portuguese"/>
+    </item>
+  </channel>
+</rss>"#;
+        let feed = parse_feed(body).unwrap();
+        let r = item_to_release(&feed.items[0], tracker()).unwrap();
+        let e = r.enrichment.as_ref().unwrap();
+        assert!(
+            e.audio_languages.contains(&Language::En),
+            "audio = {:?}",
+            e.audio_languages
+        );
+        // "Portuguese" (no region) → Pt (ambiguous). Brarr's rules
+        // engine treats it as PT-present-but-region-unknown.
+        assert!(
+            e.audio_languages.contains(&Language::Pt),
+            "audio = {:?}",
+            e.audio_languages
+        );
+        // Italian falls through to Other — preserved verbatim.
+        assert!(
+            e.audio_languages
+                .iter()
+                .any(|l| matches!(l, Language::Other(s) if s.eq_ignore_ascii_case("Italian"))),
+            "audio = {:?}",
+            e.audio_languages,
+        );
+        assert!(e.subtitle_languages.contains(&Language::En));
+        assert!(e.subtitle_languages.contains(&Language::Pt));
+    }
+
+    #[test]
+    fn ptbr_from_title_fills_in_when_attrs_are_empty() {
+        // Reproduces the NZBGeek-style scenario: indexer ships zero
+        // audio/subs/language attrs, brarr must still surface PT-BR
+        // when the title encodes it.
+        let body = r#"<?xml version="1.0"?>
+<rss xmlns:newznab="http://www.newznab.com/DTD/2010/feeds/attributes/">
+  <channel>
+    <item>
+      <title>Filme.Br.2024.1080p.WEB-DL.PT-BR.H264-GRP</title>
+      <guid>g</guid>
+      <enclosure url="https://api.example/a?id=1" length="1"/>
+    </item>
+  </channel>
+</rss>"#;
+        let feed = parse_feed(body).unwrap();
+        let r = item_to_release(&feed.items[0], tracker()).unwrap();
+        let e = r.enrichment.as_ref().unwrap();
+        assert!(
+            e.audio_languages.contains(&Language::PtBr),
+            "audio = {:?}",
+            e.audio_languages
         );
     }
 
