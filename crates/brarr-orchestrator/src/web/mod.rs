@@ -7,6 +7,7 @@
 pub mod render;
 pub mod routes;
 pub mod templates;
+pub mod torznab;
 
 pub use routes::router;
 pub use routes::serve;

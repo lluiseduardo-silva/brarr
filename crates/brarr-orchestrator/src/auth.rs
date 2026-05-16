@@ -86,6 +86,23 @@ impl AuthConfig {
         Some(rest.trim())
     }
 
+    /// Extract an `apikey=...` value from a URI query string (the format
+    /// Sonarr/Radarr use when calling a Newznab/Torznab indexer). Returns
+    /// the first matching parameter so trailing duplicates don't shadow
+    /// the leading one.
+    #[must_use]
+    pub fn apikey_from_query(query: Option<&str>) -> Option<&str> {
+        let q = query?;
+        for pair in q.split('&') {
+            let mut it = pair.splitn(2, '=');
+            let key = it.next()?;
+            if key.eq_ignore_ascii_case("apikey") {
+                return it.next();
+            }
+        }
+        None
+    }
+
     /// Extract the `brarr_session` cookie value, if present.
     #[must_use]
     pub fn cookie_from_headers(headers: &HeaderMap) -> Option<String> {
@@ -165,6 +182,23 @@ mod tests {
             AuthConfig::cookie_from_headers(&h).as_deref(),
             Some("tok123")
         );
+    }
+
+    #[test]
+    fn apikey_parsing_picks_first_match() {
+        assert_eq!(
+            AuthConfig::apikey_from_query(Some("foo=bar&apikey=abc123&t=caps")),
+            Some("abc123")
+        );
+        assert_eq!(
+            AuthConfig::apikey_from_query(Some("APIKEY=upper")),
+            Some("upper"),
+            "case-insensitive name match"
+        );
+        assert_eq!(AuthConfig::apikey_from_query(Some("apikey=")), Some(""));
+        assert_eq!(AuthConfig::apikey_from_query(Some("t=caps")), None);
+        assert_eq!(AuthConfig::apikey_from_query(None), None);
+        assert_eq!(AuthConfig::apikey_from_query(Some("")), None);
     }
 
     #[test]

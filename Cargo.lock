@@ -411,6 +411,7 @@ dependencies = [
  "futures",
  "prost",
  "protoc-bin-vendored",
+ "quick-xml",
  "reqwest",
  "serde",
  "serde_json",

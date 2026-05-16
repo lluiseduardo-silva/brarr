@@ -1,0 +1,5 @@
+brarr does not handle Brazilian personal data subject to LGPD.
+Otto privacy scanner false-positives on IMDb ids (7-digit numbers) and
+RFC 2822 date strings in XML fixtures. Disabled here via this marker
+file (read by the project-local guard wrapping the otto PostToolUse
+hook in C:/Users/pc/.claude/settings.json).

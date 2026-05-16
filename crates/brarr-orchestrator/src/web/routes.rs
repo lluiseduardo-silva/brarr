@@ -59,9 +59,15 @@ pub fn router(state: AppState, static_dir: &std::path::Path) -> Router {
         .route("/logout", post(logout))
         .layer(auth_layer);
 
+    // Torznab/Newznab endpoint for Sonarr/Radarr — same shared state,
+    // but its own auth middleware (apikey query / bearer header instead
+    // of the UI session cookie).
+    let torznab = crate::web::torznab::router(state.clone());
+
     // Open routes — login form, health, static files.
     Router::new()
         .merge(protected)
+        .merge(torznab)
         .route("/login", get(login_get).post(login_post))
         .route("/healthz", get(healthz))
         .nest_service("/static", ServeDir::new(static_dir))
