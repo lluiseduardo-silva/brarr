@@ -234,21 +234,23 @@ async fn handle_api(
         "caps" => Ok(xml_response(StatusCode::OK, render_caps()?)),
         "movie" => handle_movie(&state, &q).await,
         "search" => {
-            // Free-text axis isn't implemented. Sonarr probes `t=search&q=`
-            // on indexer-add as a connectivity test — returning a valid
-            // empty feed makes that probe pass.
+            // Free-text axis isn't implemented, but Sonarr/Radarr block
+            // saving an indexer whose `t=search` returns zero items.
+            // Emit one sentinel placeholder so the test probe passes;
+            // the sentinel carries a 1999 pubDate so RSS sync never
+            // grabs it, and its proxy URL resolves to a 404.
             debug!(
                 target: "brarr_orchestrator::torznab",
-                "t=search probe — returning empty feed"
+                "t=search probe — returning sentinel placeholder"
             );
-            Ok(xml_response(StatusCode::OK, render_empty_feed()?))
+            Ok(xml_response(StatusCode::OK, render_placeholder_feed()?))
         }
         "tvsearch" | "tv-search" => {
             debug!(
                 target: "brarr_orchestrator::torznab",
-                "t=tvsearch — no TV axis yet, empty feed"
+                "t=tvsearch — no TV axis yet, returning sentinel placeholder"
             );
-            Ok(xml_response(StatusCode::OK, render_empty_feed()?))
+            Ok(xml_response(StatusCode::OK, render_placeholder_feed()?))
         }
         other => {
             warn!(
@@ -275,13 +277,16 @@ async fn handle_movie(state: &AppState, q: &ApiQuery) -> Result<Response, AppErr
         .transpose()
         .map_err(|e| AppError::InvalidInput(format!("tmdbid: {e}")))?;
     if tmdb.is_none() && imdb.is_none() {
-        // Sonarr always sends one of these on a real query. Returning an
-        // empty feed (instead of 400) keeps the probe loop quiet.
+        // Radarr's "Test Indexer" calls `t=movie` with only `cat=` and
+        // `extended=1` (no actual id) and refuses to save the indexer
+        // when the response is empty. Emit a sentinel placeholder so
+        // the probe passes; the sentinel carries a 1999 pubDate so RSS
+        // sync ignores it, and its proxy URL resolves to a 404.
         debug!(
             target: "brarr_orchestrator::torznab",
-            "t=movie with no tmdbid/imdbid — returning empty feed"
+            "t=movie with no tmdbid/imdbid — returning sentinel placeholder"
         );
-        return Ok(xml_response(StatusCode::OK, render_empty_feed()?));
+        return Ok(xml_response(StatusCode::OK, render_placeholder_feed()?));
     }
 
     let outcome = run_search(state, SearchKeys { tmdb, imdb }).await?;
@@ -480,8 +485,102 @@ fn render_feed_inner(items: &[Release]) -> Result<Vec<u8>, AppError> {
     Ok(writer.into_inner().into_inner())
 }
 
+#[cfg(test)]
 fn render_empty_feed() -> Result<Vec<u8>, AppError> {
+    // Kept under `#[cfg(test)]` so the regression test that asserts a
+    // zero-item RSS still parses survives, without leaving the helper
+    // dangling in the binary. Production paths emit the placeholder
+    // feed instead (Sonarr/Radarr can't add an indexer that returns
+    // 0 items on its test probe).
     render_feed_inner(&[])
+}
+
+/// Build an RSS feed with a single sentinel item so Sonarr / Radarr's
+/// "Test Indexer" probe — which counts `>0` items as "indexer works"
+/// — can pass for `?t=search` / `?t=tvsearch` / `?t=movie` without ids.
+///
+/// The sentinel is intentionally unattractive to any automated grabber:
+/// - Title makes its synthetic nature obvious to a human glancing at
+///   the Manual Search list.
+/// - `pubDate` is set to 1999-01-01, far outside any RSS-sync time
+///   window (Radarr / Sonarr default to the last 12-24h).
+/// - Size is 1 byte.
+/// - `download_url` points at `/torznab/download/{nil-uuid}` which the
+///   proxy resolves to 404, so an accidental grab fails fast and
+///   clearly.
+fn render_placeholder_feed() -> Result<Vec<u8>, AppError> {
+    let mut writer = Writer::new(Cursor::new(Vec::with_capacity(1024)));
+    writer
+        .write_event(Event::Decl(BytesDecl::new("1.0", Some("UTF-8"), None)))
+        .map_err(xml_err)?;
+
+    let mut rss = quick_xml::events::BytesStart::new("rss");
+    rss.push_attribute(("version", "2.0"));
+    rss.push_attribute(("xmlns:atom", "http://www.w3.org/2005/Atom"));
+    rss.push_attribute(("xmlns:torznab", "http://torznab.com/schemas/2015/feed"));
+    rss.push_attribute((
+        "xmlns:newznab",
+        "http://www.newznab.com/DTD/2010/feeds/attributes/",
+    ));
+    writer
+        .write_event(Event::Start(rss.borrow()))
+        .map_err(xml_err)?;
+
+    writer
+        .create_element("channel")
+        .write_inner_content(|cw| {
+            cw.create_element("title")
+                .write_text_content(BytesText::new("brarr"))?;
+            cw.create_element("description")
+                .write_text_content(BytesText::new("brarr probe — placeholder sentinel"))?;
+            cw.create_element("language")
+                .write_text_content(BytesText::new("pt-BR"))?;
+
+            cw.create_element("item").write_inner_content(|iw| {
+                iw.create_element("title")
+                    .write_text_content(BytesText::new(
+                        "brarr.indexer.health-check.placeholder.DO-NOT-GRAB",
+                    ))?;
+                iw.create_element("guid")
+                    .with_attribute(("isPermaLink", "false"))
+                    .write_text_content(BytesText::new("brarr-sentinel"))?;
+                // 1999-01-01 — older than any plausible Sonarr/Radarr
+                // RSS-sync lookback window, so the sentinel never gets
+                // auto-grabbed.
+                iw.create_element("pubDate")
+                    .write_text_content(BytesText::new("Fri, 01 Jan 1999 00:00:00 +0000"))?;
+                iw.create_element("link")
+                    .write_text_content(BytesText::new(
+                        "/torznab/download/00000000-0000-0000-0000-000000000000",
+                    ))?;
+                iw.create_element("category")
+                    .write_text_content(BytesText::new("2000"))?;
+                iw.create_element("enclosure")
+                    .with_attributes([
+                        (
+                            "url",
+                            "/torznab/download/00000000-0000-0000-0000-000000000000",
+                        ),
+                        ("length", "1"),
+                        ("type", "application/x-bittorrent"),
+                    ])
+                    .write_empty()?;
+                attr(iw, "category", "2000")?;
+                attr(iw, "size", "1")?;
+                attr(iw, "seeders", "0")?;
+                attr(iw, "peers", "0")?;
+                attr(iw, "leechers", "0")?;
+                attr(iw, "grabs", "0")?;
+                Ok(())
+            })?;
+            Ok(())
+        })
+        .map_err(xml_err)?;
+
+    writer
+        .write_event(Event::End(quick_xml::events::BytesEnd::new("rss")))
+        .map_err(xml_err)?;
+    Ok(writer.into_inner().into_inner())
 }
 
 fn render_feed(items: &[Release]) -> Result<Vec<u8>, AppError> {

@@ -76,7 +76,11 @@ async fn caps_returns_xml_with_movie_search() {
 }
 
 #[tokio::test]
-async fn search_probe_returns_empty_feed() {
+async fn search_probe_returns_placeholder_feed() {
+    // Sonarr/Radarr's "Test Indexer" probe rejects the indexer when
+    // `t=search` returns zero items. We emit one sentinel placeholder
+    // so the test passes; the placeholder has a 1999 pubDate so RSS
+    // sync never grabs it.
     let addr = spawn(AuthConfig::Disabled).await;
     let resp = client()
         .get(format!("http://{addr}/torznab/api?t=search&q=test"))
@@ -87,11 +91,19 @@ async fn search_probe_returns_empty_feed() {
     let body = resp.text().await.unwrap();
     assert!(body.contains("<rss"));
     assert!(body.contains("<channel>"));
-    assert!(!body.contains("<item>"));
+    assert!(body.contains("<item>"));
+    assert!(
+        body.contains("health-check"),
+        "placeholder title should make synthetic nature obvious"
+    );
+    assert!(
+        body.contains("1999"),
+        "pubDate must be far in the past so RSS sync ignores it"
+    );
 }
 
 #[tokio::test]
-async fn tvsearch_returns_empty_feed() {
+async fn tvsearch_returns_placeholder_feed() {
     let addr = spawn(AuthConfig::Disabled).await;
     let resp = client()
         .get(format!("http://{addr}/torznab/api?t=tvsearch&tvdbid=1234"))
@@ -101,7 +113,8 @@ async fn tvsearch_returns_empty_feed() {
     assert_eq!(resp.status(), 200);
     let body = resp.text().await.unwrap();
     assert!(body.contains("<rss"));
-    assert!(!body.contains("<item>"));
+    assert!(body.contains("<item>"));
+    assert!(body.contains("health-check"));
 }
 
 #[tokio::test]
@@ -138,6 +151,10 @@ async fn garbage_tmdbid_returns_400_with_clear_error() {
 
 #[tokio::test]
 async fn movie_with_no_providers_returns_empty_feed() {
+    // With a real tmdbid but no providers configured, no real items
+    // surface. The sentinel placeholder is only emitted when both ids
+    // are missing (Radarr's "Test Indexer" path), not on a real but
+    // empty search — that path stays honest about "no matches".
     let addr = spawn(AuthConfig::Disabled).await;
     let resp = client()
         .get(format!("http://{addr}/torznab/api?t=movie&tmdbid=603"))
@@ -148,6 +165,23 @@ async fn movie_with_no_providers_returns_empty_feed() {
     let body = resp.text().await.unwrap();
     assert!(body.contains("<rss"));
     assert!(!body.contains("<item>"));
+}
+
+#[tokio::test]
+async fn movie_test_probe_with_no_ids_returns_placeholder() {
+    // Radarr's "Test Indexer" hits `t=movie&cat=...&extended=1&offset=0
+    // &limit=100` with no tmdbid/imdbid. The placeholder feed lets the
+    // probe pass so the indexer can be saved; real searches with a
+    // concrete id continue running the full pipeline.
+    let addr = spawn(AuthConfig::Disabled).await;
+    let url = format!(
+        "http://{addr}/torznab/api?t=movie&cat=2000,2010,2020,2030,2040,2045,2050,2060&extended=1&offset=0&limit=100"
+    );
+    let resp = client().get(url).send().await.expect("send");
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("<item>"));
+    assert!(body.contains("health-check"));
 }
 
 #[tokio::test]
