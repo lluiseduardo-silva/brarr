@@ -91,8 +91,17 @@ pub fn parse_feed(body: &str) -> Result<RawFeed, ClientError> {
     let mut feed = RawFeed::default();
     let mut current: Option<RawItem> = None;
     // Tracks the topmost element we're currently inside so we can route
-    // `Text` events to the right field (`title`, `guid`, `comments`, ...).
+    // text-bearing events to the right field (`title`, `guid`,
+    // `comments`, ...).
     let mut text_target: Option<TextTarget> = None;
+    // Accumulator across `Event::Text` and `Event::GeneralRef` between
+    // the matching `<element>`/`</element>` pair. quick-xml 0.40 splits
+    // text containing entities into multiple events (e.g. `<link>` with
+    // `&amp;` arrives as Text("...?t=get"), GeneralRef("amp"),
+    // Text("id=..."), ...). Replacing the field on every Text event,
+    // as a naive parser would, drops everything past the first
+    // separator and produces truncated URLs.
+    let mut text_buf = String::new();
 
     loop {
         match reader.read_event() {
@@ -105,35 +114,52 @@ pub fn parse_feed(body: &str) -> Result<RawFeed, ClientError> {
             Ok(Event::Eof) => break,
             Ok(Event::Start(e)) => {
                 handle_start(&e, &mut current, &mut text_target);
+                text_buf.clear();
             }
             Ok(Event::Empty(e)) => {
                 handle_empty(&e, &mut current)?;
             }
             Ok(Event::End(e)) => {
                 let name = String::from_utf8_lossy(e.name().as_ref()).into_owned();
+                // Flush any buffered text to the target field before
+                // resetting state — guarantees we capture content
+                // that arrived as multiple Text/GeneralRef events.
+                if let (Some(item), Some(target)) = (current.as_mut(), text_target) {
+                    if !text_buf.is_empty() {
+                        apply_text(item, target, std::mem::take(&mut text_buf));
+                    }
+                }
                 if name == "item" {
                     if let Some(it) = current.take() {
                         feed.items.push(it);
                     }
                 }
                 text_target = None;
+                text_buf.clear();
             }
-            Ok(Event::Text(t)) => {
-                if let (Some(item), Some(target)) = (current.as_mut(), text_target) {
-                    let text = t
-                        .decode()
-                        .map_err(|e| ClientError::Xml(format!("decode: {e}")))?
-                        .into_owned();
-                    apply_text(item, target, text);
+            Ok(Event::Text(t)) if text_target.is_some() => {
+                let decoded = t
+                    .decode()
+                    .map_err(|err| ClientError::Xml(format!("decode: {err}")))?;
+                text_buf.push_str(&decoded);
+            }
+            // Resolve `&amp;` / `&lt;` / `&gt;` / `&quot;` / `&apos;`
+            // (the XML-1.0 predefined entity set). Custom entities
+            // declared via `<!ENTITY>` aren't honored — Newznab feeds
+            // don't declare any.
+            Ok(Event::GeneralRef(r)) if text_target.is_some() => {
+                let name = r
+                    .decode()
+                    .map_err(|err| ClientError::Xml(format!("entity decode: {err}")))?;
+                if let Some(resolved) = quick_xml::escape::resolve_predefined_entity(&name) {
+                    text_buf.push_str(resolved);
                 }
             }
-            Ok(Event::CData(c)) => {
-                if let (Some(item), Some(target)) = (current.as_mut(), text_target) {
-                    let bytes = c.into_inner();
-                    let text = String::from_utf8(bytes.into_owned())
-                        .map_err(|e| ClientError::Xml(format!("cdata utf-8: {e}")))?;
-                    apply_text(item, target, text);
-                }
+            Ok(Event::CData(c)) if text_target.is_some() => {
+                let bytes = c.into_inner();
+                let text = String::from_utf8(bytes.into_owned())
+                    .map_err(|err| ClientError::Xml(format!("cdata utf-8: {err}")))?;
+                text_buf.push_str(&text);
             }
             _ => {}
         }
@@ -314,6 +340,33 @@ mod tests {
         assert_eq!(it.title, "Other.Release");
         assert_eq!(it.size_bytes, 100);
         assert!(it.attr("imdb").is_none());
+    }
+
+    #[test]
+    fn link_text_unescapes_xml_entities() {
+        // Regression: NZBGeek encodes ampersands in `<link>` as `&amp;`.
+        // Without entity decoding the URL stayed `?t=get&amp;id=...`
+        // and `Url::parse` interpreted the query string as a single
+        // garbage pair, truncating the download URL in the probe view.
+        let body = r#"<?xml version="1.0"?>
+<rss xmlns:newznab="http://www.newznab.com/DTD/2010/feeds/attributes/">
+  <channel>
+    <item>
+      <title>x</title>
+      <guid>g</guid>
+      <link>https://api.example/api?t=get&amp;id=abc123&amp;apikey=KEY</link>
+    </item>
+  </channel>
+</rss>"#;
+        let feed = parse_feed(body).unwrap();
+        let url = feed.items[0].download_url.as_deref().unwrap();
+        assert!(url.contains("id=abc123"), "entity not decoded; url = {url}");
+        assert!(
+            url.contains("apikey=KEY"),
+            "entity not decoded past first ampersand; url = {url}"
+        );
+        // Inverse: the raw `&amp;` must NOT survive.
+        assert!(!url.contains("&amp;"), "still entity-encoded; url = {url}");
     }
 
     #[test]
