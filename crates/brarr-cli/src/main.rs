@@ -10,7 +10,10 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use anyhow::{Context, Result};
-use brarr_cli::{Cli, Command, Config, Engine, OutputFormat, RuleSet, SearchArgs, run_search};
+use brarr_cli::{
+    Cli, Command, Config, Engine, OutputFormat, RemoteArgs, RuleSet, SearchArgs, run_remote_search,
+    run_search,
+};
 use brarr_core::TmdbId;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
@@ -48,12 +51,14 @@ fn init_tracing(cli: &Cli) -> Result<()> {
 }
 
 fn run(cli: &Cli) -> Result<()> {
-    let config_path = resolve_config_path(cli.config.clone())?;
-    let config = Config::load(&config_path)
-        .with_context(|| format!("loading config from {}", config_path.display()))?;
-
     match &cli.command {
-        Command::Search(args) => dispatch_search(&config, args),
+        Command::Search(args) => {
+            let config_path = resolve_config_path(cli.config.clone())?;
+            let config = Config::load(&config_path)
+                .with_context(|| format!("loading config from {}", config_path.display()))?;
+            dispatch_search(&config, args)
+        }
+        Command::Remote(args) => dispatch_remote(args),
     }
 }
 
@@ -112,5 +117,34 @@ fn dispatch_search(config: &Config, args: &SearchArgs) -> Result<()> {
         );
     }
 
+    Ok(())
+}
+
+fn dispatch_remote(args: &RemoteArgs) -> Result<()> {
+    let tmdb = TmdbId::new(args.tmdb)
+        .with_context(|| format!("TMDB id {} is invalid (must be > 0)", args.tmdb))?;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("building tokio runtime")?;
+    let outcome = runtime
+        .block_on(run_remote_search(&args.addr, args.token.as_deref(), tmdb))
+        .with_context(|| format!("remote search against {}", args.addr))?;
+
+    let rendered = match args.format {
+        OutputFormat::Text => brarr_cli::format_outcome(&outcome, args.limit),
+        OutputFormat::Json => brarr_cli::format_outcome_json(&outcome, args.limit)
+            .context("serializing search outcome to JSON")?,
+    };
+    #[allow(
+        clippy::print_stdout,
+        reason = "CLI user-facing output goes to stdout by design"
+    )]
+    {
+        match args.format {
+            OutputFormat::Text => print!("{rendered}"),
+            OutputFormat::Json => println!("{rendered}"),
+        }
+    }
     Ok(())
 }

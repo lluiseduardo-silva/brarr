@@ -30,6 +30,10 @@ pub struct Cli {
 pub enum Command {
     /// Busca releases em todos os trackers configurados, em paralelo.
     Search(SearchArgs),
+    /// Despacha a busca para um `brarr-orchestrator` rodando via `gRPC`.
+    /// Não usa a config TOML local — o orchestrator tem a lista de trackers
+    /// armazenada em `SQLite`.
+    Remote(RemoteArgs),
 }
 
 /// Argumentos do subcomando `search`.
@@ -48,6 +52,32 @@ pub struct SearchArgs {
     /// - `text` (default): tabela humana com flags PT/HDR.
     /// - `json`: objeto JSON em uma só linha, útil para pipe em `jq` ou
     ///   integração com outras ferramentas.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    pub format: OutputFormat,
+}
+
+/// Argumentos do subcomando `remote`.
+#[derive(Debug, Args)]
+pub struct RemoteArgs {
+    /// ID `TMDB` do filme/série.
+    #[arg(long)]
+    pub tmdb: u32,
+
+    /// Endereço do orchestrator (default `127.0.0.1:50051`). Aceita
+    /// `host:port` ou URL completa com `http://`/`https://`.
+    #[arg(long, default_value = "127.0.0.1:50051")]
+    pub addr: String,
+
+    /// Token de autenticação (`BRARR_AUTH_TOKEN` no orchestrator).
+    /// Omita quando o orchestrator estiver em modo dev (auth desabilitado).
+    #[arg(long)]
+    pub token: Option<String>,
+
+    /// Quantos releases mostrar.
+    #[arg(long, default_value_t = 10)]
+    pub limit: usize,
+
+    /// Formato de saída (`text` ou `json`).
     #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
     pub format: OutputFormat,
 }
@@ -76,7 +106,7 @@ impl Cli {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use super::{Cli, Command};
     use clap::Parser;
@@ -84,22 +114,55 @@ mod tests {
     #[test]
     fn parses_search_with_tmdb_only() {
         let cli = Cli::try_parse_from(["brarr", "search", "--tmdb", "603"]).expect("valid args");
-        match cli.command {
-            Command::Search(args) => {
-                assert_eq!(args.tmdb, 603);
-                assert_eq!(args.limit, 10);
-                assert_eq!(args.format, super::OutputFormat::Text);
-            }
-        }
+        let Command::Search(args) = cli.command else {
+            panic!("expected Search subcommand");
+        };
+        assert_eq!(args.tmdb, 603);
+        assert_eq!(args.limit, 10);
+        assert_eq!(args.format, super::OutputFormat::Text);
         assert_eq!(cli.verbose, 0);
         assert!(cli.config.is_none());
+    }
+
+    #[test]
+    fn parses_remote_subcommand_with_defaults() {
+        let cli = Cli::try_parse_from(["brarr", "remote", "--tmdb", "603"]).expect("valid args");
+        let Command::Remote(args) = cli.command else {
+            panic!("expected Remote subcommand");
+        };
+        assert_eq!(args.tmdb, 603);
+        assert_eq!(args.addr, "127.0.0.1:50051");
+        assert!(args.token.is_none());
+        assert_eq!(args.limit, 10);
+    }
+
+    #[test]
+    fn parses_remote_with_addr_and_token() {
+        let cli = Cli::try_parse_from([
+            "brarr",
+            "remote",
+            "--tmdb",
+            "1",
+            "--addr",
+            "1.2.3.4:50051",
+            "--token",
+            "s3cret",
+        ])
+        .expect("valid args");
+        let Command::Remote(args) = cli.command else {
+            panic!("expected Remote");
+        };
+        assert_eq!(args.addr, "1.2.3.4:50051");
+        assert_eq!(args.token.as_deref(), Some("s3cret"));
     }
 
     #[test]
     fn parses_search_with_json_format() {
         let cli = Cli::try_parse_from(["brarr", "search", "--tmdb", "603", "--format", "json"])
             .expect("valid args");
-        let Command::Search(args) = cli.command;
+        let Command::Search(args) = cli.command else {
+            panic!("expected Search subcommand")
+        };
         assert_eq!(args.format, super::OutputFormat::Json);
     }
 
@@ -116,7 +179,9 @@ mod tests {
             "5",
         ])
         .expect("valid args");
-        let Command::Search(args) = cli.command;
+        let Command::Search(args) = cli.command else {
+            panic!("expected Search subcommand")
+        };
         assert_eq!(args.tmdb, 603);
         assert_eq!(args.limit, 5);
         assert_eq!(
