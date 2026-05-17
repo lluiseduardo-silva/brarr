@@ -31,6 +31,21 @@ impl Engine {
         Self::new(RuleSet::baseline())
     }
 
+    /// Build an engine from a profile's persisted rule list. When the
+    /// list is empty the call falls back to [`Self::baseline`] so
+    /// profiles created via the UI without any rules behave identically
+    /// to no-profile attachment. Used by the orchestrator's push
+    /// pipeline to pick the right engine per ARR instance once it
+    /// reaches the profile-resolution step.
+    #[must_use]
+    pub fn from_profile_rules(rules: RuleSet) -> Self {
+        if rules.rules.is_empty() {
+            Self::baseline()
+        } else {
+            Self::new(rules)
+        }
+    }
+
     /// Aplica todas as regras contra `release`.
     #[must_use]
     pub fn evaluate(&self, release: &Release) -> DecisionOutcome {
@@ -191,5 +206,37 @@ mod tests {
         let r = release(vec![Language::PtBr], Resolution::P2160, 25, true);
         let out = Engine::new(RuleSet::default()).evaluate(&r);
         assert_eq!(out.score.get(), 25);
+    }
+
+    #[test]
+    fn from_profile_rules_falls_back_to_baseline_when_empty() {
+        // Profiles created via the orchestrator UI without any custom
+        // rules carry an empty RuleSet. Treat that as "use baseline"
+        // so a fresh profile behaves identically to no attachment.
+        let r = release(vec![Language::PtBr], Resolution::P1080, 0, false);
+        let custom = Engine::from_profile_rules(RuleSet::default()).evaluate(&r);
+        let baseline = Engine::baseline().evaluate(&r);
+        assert_eq!(custom.score.get(), baseline.score.get());
+        assert_eq!(custom.matched_rules, baseline.matched_rules);
+    }
+
+    #[test]
+    fn from_profile_rules_uses_explicit_set_when_provided() {
+        let r = release(vec![Language::PtBr], Resolution::P1080, 0, false);
+        let only_pt = RuleSet {
+            rules: vec![crate::rule::Rule {
+                name: Some("just PT-BR".into()),
+                when: Condition {
+                    audio: Some(AudioFilter::PtBr),
+                    ..Condition::default()
+                },
+                add_score: 999,
+                tag: None,
+                reject: false,
+            }],
+        };
+        let custom = Engine::from_profile_rules(only_pt).evaluate(&r);
+        // Custom 999 + 0 seeders = 999. Baseline 110 would be way lower.
+        assert_eq!(custom.score.get(), 999);
     }
 }

@@ -314,6 +314,31 @@ pub async fn effective_threshold(pool: &Pool, row: &ArrInstanceRow) -> Result<u3
     }
 }
 
+/// Resolve the [`brarr_decision_service::Engine`] for one *arr
+/// instance. When the row has a profile attached the engine is built
+/// from the profile's persisted rule list (falling back to baseline
+/// when the list is empty); otherwise the baseline engine is returned.
+/// Used by the push pipeline so a Sonarr "Anime JP" profile can score
+/// releases differently from a Radarr "Filmes dublados" profile even
+/// though both consume the same search results.
+///
+/// # Errors
+///
+/// - [`AppError::NotFound`] when `profile_id` points at a deleted
+///   profile.
+/// - [`AppError::Database`] on SQL failure.
+pub async fn effective_engine(
+    pool: &Pool,
+    row: &ArrInstanceRow,
+) -> Result<brarr_decision_service::Engine, AppError> {
+    if let Some(pid) = row.profile_id {
+        let p = crate::db::quality_profiles::get_by_id(pool, pid).await?;
+        Ok(brarr_decision_service::Engine::from_profile_rules(p.rules))
+    } else {
+        Ok(brarr_decision_service::Engine::baseline())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -448,6 +473,85 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, AppError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn effective_engine_falls_back_to_baseline_without_profile() {
+        let pool = open_memory().await.unwrap();
+        let url = Url::parse("https://r.example/").unwrap();
+        let row = insert(&pool, ni("solo", ArrKind::Radarr, &url, "k"))
+            .await
+            .unwrap();
+        let engine = effective_engine(&pool, &row).await.unwrap();
+        // Build a fixture release and compare against baseline output.
+        let baseline = brarr_decision_service::Engine::baseline();
+        let release = brarr_core::Release::new(
+            "1",
+            brarr_core::TrackerSource::new("t", Url::parse("https://t.example/").unwrap()).unwrap(),
+            "Some.Movie.1080p.WEB-DL",
+            brarr_core::ReleaseKind::WebDl,
+            brarr_core::Resolution::P1080,
+            0,
+        )
+        .unwrap();
+        let a = engine.evaluate(&release);
+        let b = baseline.evaluate(&release);
+        assert_eq!(a.score.get(), b.score.get());
+    }
+
+    #[tokio::test]
+    async fn effective_engine_uses_profile_rules_when_attached() {
+        use brarr_decision_service::{AudioFilter, Condition, Rule, RuleSet};
+        let pool = open_memory().await.unwrap();
+        // Seed a custom profile with a single big rule.
+        let profile = crate::db::quality_profiles::insert(
+            &pool,
+            crate::db::quality_profiles::NewQualityProfile {
+                name: "anime jp",
+                description: None,
+                push_threshold: 100,
+            },
+        )
+        .await
+        .unwrap();
+        let custom_rules = RuleSet {
+            rules: vec![Rule {
+                name: Some("PT subtitle only".into()),
+                when: Condition {
+                    audio: Some(AudioFilter::PtBr),
+                    ..Condition::default()
+                },
+                add_score: 700,
+                tag: None,
+                reject: false,
+            }],
+        };
+        crate::db::quality_profiles::update_rules(&pool, profile.id, &custom_rules)
+            .await
+            .unwrap();
+        let url = Url::parse("https://r.example/").unwrap();
+        let mut new = ni("attached", ArrKind::Radarr, &url, "k");
+        new.profile_id = Some(profile.id);
+        let row = insert(&pool, new).await.unwrap();
+        let engine = effective_engine(&pool, &row).await.unwrap();
+        let tracker =
+            brarr_core::TrackerSource::new("t", Url::parse("https://t.example/").unwrap()).unwrap();
+        let mut release = brarr_core::Release::new(
+            "1",
+            tracker,
+            "x",
+            brarr_core::ReleaseKind::WebDl,
+            brarr_core::Resolution::P1080,
+            0,
+        )
+        .unwrap();
+        release.enrichment = Some(brarr_core::ReleaseEnrichment {
+            audio_languages: vec![brarr_core::Language::PtBr],
+            ..brarr_core::ReleaseEnrichment::default()
+        });
+        let out = engine.evaluate(&release);
+        // Custom rule: 700 + 0 seeders. Baseline would give 110.
+        assert_eq!(out.score.get(), 700);
     }
 
     #[tokio::test]
