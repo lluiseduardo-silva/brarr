@@ -69,21 +69,90 @@ use crate::auth::AuthConfig;
 use crate::search::{SearchKeys, run_search};
 use crate::{AppError, AppState};
 
-/// Build the Torznab sub-router. Designed to be merged into the main
-/// `web::router` so it shares the [`AppState`] but uses its own auth
-/// middleware (apikey + bearer instead of cookie).
+/// Build the indexer sub-router. Exposes two parallel surfaces so
+/// Sonarr / Radarr can label results by their real upstream protocol:
+///
+/// | Path                              | Indexer type in *arr UI | Items emitted                                    |
+/// |-----------------------------------|-------------------------|--------------------------------------------------|
+/// | `/torznab/api`, `/torznab/download/{id}` | Torznab Custom (Torrent) | Only torrent providers (UNIT3D / Torznab / plugin) |
+/// | `/newznab/api`,  `/newznab/download/{id}` | Newznab Custom (Usenet)  | Only Newznab (Usenet) providers                   |
+///
+/// Both feeds share the orchestrator's search pipeline, rules engine,
+/// SQLite history, and apikey middleware — the split is purely about
+/// per-item protocol labelling. Sonarr / Radarr's UI tags each result
+/// row with the **indexer's** configured protocol (Torrent vs Usenet),
+/// not the per-item `<enclosure type>`. Without the split, every
+/// NZBGeek release shows up as "torrent" in the *arr UI and grabs fail
+/// because the *arr client tries to hand the `.nzb` to qBittorrent.
 pub fn router(state: AppState) -> Router<AppState> {
     let auth_layer = middleware::from_fn_with_state(state, apikey_middleware);
     Router::new()
-        .route("/torznab/api", get(handle_api))
-        .route("/torznab/download/{decision_id}", get(handle_download))
+        .route("/torznab/api", get(handle_torznab_api))
+        .route(
+            "/torznab/download/{decision_id}",
+            get(handle_torznab_download),
+        )
+        .route("/newznab/api", get(handle_newznab_api))
+        .route(
+            "/newznab/download/{decision_id}",
+            get(handle_newznab_download),
+        )
         .layer(auth_layer)
 }
 
-/// `GET /torznab/download/{decision_id}` — proxy route used by the
-/// Torznab feed's `<enclosure url>`. Sonarr / Radarr hit this URL to
-/// grab the actual `.torrent` / `.nzb`; we look the decision up by id,
-/// pull the persisted upstream URL, and `302` to it.
+/// Protocol axis of an indexer feed. Selects which decisions are
+/// included, which `<enclosure type>` is emitted, and which download
+/// proxy path the feed points at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Protocol {
+    /// Torrent (UNIT3D + Torznab + plugin). Renders the `/torznab/*`
+    /// path family with `application/x-bittorrent` enclosures.
+    Torrent,
+    /// Usenet / Newznab. Renders the `/newznab/*` path family with
+    /// `application/x-nzb` enclosures.
+    Nzb,
+}
+
+impl Protocol {
+    /// Path prefix this protocol uses for the feed + download proxy
+    /// (`"/torznab"` or `"/newznab"`). Used to build absolute
+    /// `<enclosure url>` and `<link>` values that match the indexer
+    /// route the *arr client originally hit.
+    fn path_prefix(self) -> &'static str {
+        match self {
+            Self::Torrent => "/torznab",
+            Self::Nzb => "/newznab",
+        }
+    }
+
+    /// MIME type that goes into per-item `<enclosure type=...>`.
+    fn enclosure_type(self) -> &'static str {
+        match self {
+            Self::Torrent => "application/x-bittorrent",
+            Self::Nzb => "application/x-nzb",
+        }
+    }
+
+    /// Does a decision row's `provider_kind` belong on this feed?
+    ///
+    /// - Torrent: anything NOT `newznab`. Legacy rows (`None`),
+    ///   `unit3d`, `torznab`, and `plugin` all qualify.
+    /// - Nzb: only rows with `provider_kind == "newznab"` (case
+    ///   insensitive). Excludes legacy rows so the Usenet feed never
+    ///   serves an item with ambiguous protocol.
+    fn matches_kind(self, kind: Option<&str>) -> bool {
+        let normalized = kind.map(str::to_ascii_lowercase);
+        match self {
+            Self::Torrent => !matches!(normalized.as_deref(), Some("newznab")),
+            Self::Nzb => matches!(normalized.as_deref(), Some("newznab")),
+        }
+    }
+}
+
+/// `GET /{torznab|newznab}/download/{decision_id}` — proxy route used
+/// by the Torznab / Newznab feed's `<enclosure url>`. Sonarr / Radarr
+/// hit this URL to grab the actual `.torrent` / `.nzb`; we look the
+/// decision up by id, pull the persisted upstream URL, and `302` to it.
 ///
 /// Caveats:
 /// - The persisted URL retains the provider's apikey (Newznab style)
@@ -95,9 +164,10 @@ pub fn router(state: AppState) -> Router<AppState> {
 ///   UNIT3D trackers that include the token in the URL.
 /// - Returns `404` when the decision row no longer exists or has no
 ///   `download_url` (provider didn't expose one).
-async fn handle_download(
-    State(state): State<AppState>,
-    Path(decision_id): Path<String>,
+async fn handle_download_inner(
+    state: AppState,
+    decision_id: String,
+    protocol: Protocol,
 ) -> Result<Response, AppError> {
     let uuid = Uuid::parse_str(&decision_id)
         .map_err(|e| AppError::InvalidInput(format!("invalid decision id: {e}")))?;
@@ -111,9 +181,24 @@ async fn handle_download(
         target: "brarr_orchestrator::torznab",
         decision_id = %uuid,
         provider = %row.provider_name,
-        "redirecting torznab download to upstream"
+        protocol = ?protocol,
+        "redirecting indexer download to upstream"
     );
     Ok(Redirect::temporary(&url).into_response())
+}
+
+async fn handle_torznab_download(
+    State(state): State<AppState>,
+    Path(decision_id): Path<String>,
+) -> Result<Response, AppError> {
+    handle_download_inner(state, decision_id, Protocol::Torrent).await
+}
+
+async fn handle_newznab_download(
+    State(state): State<AppState>,
+    Path(decision_id): Path<String>,
+) -> Result<Response, AppError> {
+    handle_download_inner(state, decision_id, Protocol::Nzb).await
 }
 
 /// Middleware that gates every `/torznab/*` route on either:
@@ -220,10 +305,27 @@ fn parse_u32_param(raw: Option<&String>, field: &str) -> Result<Option<u32>, App
         .map_err(|_| AppError::InvalidInput(format!("{field} must be numeric, got {s:?}")))
 }
 
-async fn handle_api(
+async fn handle_torznab_api(
+    state: State<AppState>,
+    q: Query<ApiQuery>,
+    headers: axum::http::HeaderMap,
+) -> Result<Response, AppError> {
+    handle_api_inner(state, q, headers, Protocol::Torrent).await
+}
+
+async fn handle_newznab_api(
+    state: State<AppState>,
+    q: Query<ApiQuery>,
+    headers: axum::http::HeaderMap,
+) -> Result<Response, AppError> {
+    handle_api_inner(state, q, headers, Protocol::Nzb).await
+}
+
+async fn handle_api_inner(
     State(state): State<AppState>,
     Query(q): Query<ApiQuery>,
     headers: axum::http::HeaderMap,
+    protocol: Protocol,
 ) -> Result<Response, AppError> {
     let t =
         q.t.as_deref()
@@ -241,25 +343,27 @@ async fn handle_api(
 
     match t.as_str() {
         "caps" => Ok(xml_response(StatusCode::OK, render_caps()?)),
-        "movie" => handle_movie(&state, &q, &base_url).await,
+        "movie" => handle_movie(&state, &q, &base_url, protocol).await,
         "search" => {
             debug!(
                 target: "brarr_orchestrator::torznab",
+                protocol = ?protocol,
                 "t=search probe — returning sentinel placeholder"
             );
             Ok(xml_response(
                 StatusCode::OK,
-                render_placeholder_feed(&base_url)?,
+                render_placeholder_feed(&base_url, protocol)?,
             ))
         }
         "tvsearch" | "tv-search" => {
             debug!(
                 target: "brarr_orchestrator::torznab",
+                protocol = ?protocol,
                 "t=tvsearch — no TV axis yet, returning sentinel placeholder"
             );
             Ok(xml_response(
                 StatusCode::OK,
-                render_placeholder_feed(&base_url)?,
+                render_placeholder_feed(&base_url, protocol)?,
             ))
         }
         other => {
@@ -282,6 +386,7 @@ async fn handle_movie(
     state: &AppState,
     q: &ApiQuery,
     base_url: &str,
+    protocol: Protocol,
 ) -> Result<Response, AppError> {
     let imdb = parse_imdb(q.imdbid.as_deref())?;
     let tmdb_raw = parse_u32_param(q.tmdbid.as_ref(), "tmdbid")?;
@@ -298,23 +403,34 @@ async fn handle_movie(
         // so RSS sync ignores it, and its proxy URL resolves to a 404.
         debug!(
             target: "brarr_orchestrator::torznab",
+            protocol = ?protocol,
             "t=movie with no tmdbid/imdbid — returning sentinel placeholder"
         );
         return Ok(xml_response(
             StatusCode::OK,
-            render_placeholder_feed(base_url)?,
+            render_placeholder_feed(base_url, protocol)?,
         ));
     }
 
     let outcome = run_search(state, SearchKeys { tmdb, imdb }).await?;
+    // Filter to only the decision rows that belong on this feed's
+    // protocol axis. `total` reflects the post-filter count so the
+    // `<newznab:response total=>` element matches what the client can
+    // actually see — Sonarr / Radarr stop paginating once
+    // `offset + items.len() >= total`, and they'll re-request forever
+    // if `total` overcounts.
+    let matching: Vec<&crate::db::decisions::DecisionRow> = outcome
+        .decisions
+        .iter()
+        .filter(|d| protocol.matches_kind(d.provider_kind.as_deref()))
+        .collect();
+    let total = matching.len();
     let limit_raw = parse_u32_param(q.limit.as_ref(), "limit")?;
     let limit = limit_raw.map_or(100, |v| v.clamp(1, 1_000)) as usize;
     let offset_raw = parse_u32_param(q.offset.as_ref(), "offset")?;
     let offset = offset_raw.unwrap_or(0) as usize;
-    let total = outcome.decisions.len();
-    let items: Vec<FeedItem> = outcome
-        .decisions
-        .iter()
+    let items: Vec<FeedItem> = matching
+        .into_iter()
         .skip(offset)
         .take(limit)
         .filter_map(decision_to_feed_item)
@@ -322,7 +438,7 @@ async fn handle_movie(
 
     Ok(xml_response(
         StatusCode::OK,
-        render_feed(&items, base_url, offset, total)?,
+        render_feed(&items, base_url, offset, total, protocol)?,
     ))
 }
 
@@ -536,6 +652,7 @@ fn render_feed_inner(
     base_url: &str,
     offset: usize,
     total: usize,
+    protocol: Protocol,
 ) -> Result<Vec<u8>, AppError> {
     let mut writer = Writer::new(Cursor::new(Vec::with_capacity(2048)));
     writer
@@ -575,7 +692,7 @@ fn render_feed_inner(
             cw.create_element("language")
                 .write_text_content(BytesText::new("pt-BR"))?;
             for item in items {
-                write_item(cw, item, base_url)?;
+                write_item(cw, item, base_url, protocol)?;
             }
             Ok(())
         })
@@ -589,7 +706,7 @@ fn render_feed_inner(
 
 #[cfg(test)]
 fn render_empty_feed() -> Result<Vec<u8>, AppError> {
-    render_feed_inner(&[], "http://127.0.0.1:3000", 0, 0)
+    render_feed_inner(&[], "http://127.0.0.1:3000", 0, 0, Protocol::Torrent)
 }
 
 /// Build an RSS feed with a single sentinel item so Sonarr / Radarr's
@@ -610,8 +727,11 @@ fn render_empty_feed() -> Result<Vec<u8>, AppError> {
 ///   Search instantly recognizes its synthetic nature.
 /// - Size is 1 byte and the enclosure URL resolves to a 404 through
 ///   the download proxy, so an accidental grab fails fast and clearly.
-fn render_placeholder_feed(base_url: &str) -> Result<Vec<u8>, AppError> {
-    let sentinel_url = format!("{base_url}/torznab/download/00000000-0000-0000-0000-000000000000");
+fn render_placeholder_feed(base_url: &str, protocol: Protocol) -> Result<Vec<u8>, AppError> {
+    let sentinel_url = format!(
+        "{base_url}{prefix}/download/00000000-0000-0000-0000-000000000000",
+        prefix = protocol.path_prefix(),
+    );
     let mut writer = Writer::new(Cursor::new(Vec::with_capacity(1024)));
     writer
         .write_event(Event::Decl(BytesDecl::new("1.0", Some("UTF-8"), None)))
@@ -669,7 +789,7 @@ fn render_placeholder_feed(base_url: &str) -> Result<Vec<u8>, AppError> {
                     .with_attributes([
                         ("url", sentinel_url.as_str()),
                         ("length", "1"),
-                        ("type", "application/x-bittorrent"),
+                        ("type", protocol.enclosure_type()),
                     ])
                     .write_empty()?;
                 // Cover every Movies subcategory brarr advertises in
@@ -700,25 +820,25 @@ fn render_feed(
     base_url: &str,
     offset: usize,
     total: usize,
+    protocol: Protocol,
 ) -> Result<Vec<u8>, AppError> {
-    render_feed_inner(items, base_url, offset, total)
+    render_feed_inner(items, base_url, offset, total, protocol)
 }
 
 fn write_item<W: std::io::Write>(
     w: &mut Writer<W>,
     item: &FeedItem,
     base_url: &str,
+    protocol: Protocol,
 ) -> std::io::Result<()> {
     let r = &item.release;
-    // Newznab providers ship `.nzb` (Usenet); UNIT3D / Torznab / plugin
-    // providers ship `.torrent`. Sonarr / Radarr added as a Torznab
-    // indexer reject `application/x-nzb` items, and vice versa. The
-    // type discriminator lets one brarr instance serve both indexer
-    // types from the same `/torznab/api` endpoint.
-    let enclosure_type = match item.provider_kind.as_deref() {
-        Some(k) if k.eq_ignore_ascii_case("newznab") => "application/x-nzb",
-        _ => "application/x-bittorrent",
-    };
+    // The feed routes split torrent / nzb providers by protocol, so the
+    // enclosure type is fixed per feed instead of per item. *arr apps
+    // tag every result row with the **indexer's** configured protocol
+    // (Torrent vs Usenet); per-item type only matters when the *arr
+    // client validates the MIME after the redirect.
+    let _ = item.provider_kind.as_deref();
+    let enclosure_type = protocol.enclosure_type();
     let categories = categories_for(r);
     let primary_cat = categories.first().copied().unwrap_or(2000);
     // Always emit a brarr-side proxy URL — never the raw upstream link.
@@ -735,7 +855,8 @@ fn write_item<W: std::io::Write>(
     // with a relative `<enclosure url>` (their RSS parser refuses to
     // resolve it even against the configured indexer URL).
     let download_url = format!(
-        "{base_url}/torznab/download/{id}",
+        "{base_url}{prefix}/download/{id}",
+        prefix = protocol.path_prefix(),
         id = r.tracker_release_id
     );
     let details_url = r
@@ -984,7 +1105,7 @@ mod tests {
     #[test]
     fn feed_emits_newznab_response_offset_and_total() {
         let items = vec![sample_feed_item("1", None)];
-        let bytes = render_feed(&items, "http://h:3000", 100, 110).unwrap();
+        let bytes = render_feed(&items, "http://h:3000", 100, 110, Protocol::Torrent).unwrap();
         let xml = String::from_utf8(bytes).unwrap();
         assert!(
             xml.contains(r#"<newznab:response offset="100" total="110""#),
@@ -1004,7 +1125,7 @@ mod tests {
         // 2023-11-15 12:34:56 UTC
         let ts = OffsetDateTime::from_unix_timestamp(1_700_051_696).unwrap();
         let items = vec![sample_feed_item("1", Some(ts))];
-        let bytes = render_feed(&items, "http://h:3000", 0, 1).unwrap();
+        let bytes = render_feed(&items, "http://h:3000", 0, 1, Protocol::Torrent).unwrap();
         let xml = String::from_utf8(bytes).unwrap();
         assert!(
             xml.contains("<pubDate>Wed, 15 Nov 2023 12:34:56 +0000</pubDate>"),
@@ -1015,7 +1136,7 @@ mod tests {
     #[test]
     fn feed_falls_back_to_now_when_published_at_missing() {
         let items = vec![sample_feed_item("1", None)];
-        let bytes = render_feed(&items, "http://h:3000", 0, 1).unwrap();
+        let bytes = render_feed(&items, "http://h:3000", 0, 1, Protocol::Torrent).unwrap();
         let xml = String::from_utf8(bytes).unwrap();
         // Just confirm a pubDate element shows up — the value is "now"
         // and we don't pin a specific timestamp.
@@ -1023,6 +1144,46 @@ mod tests {
             xml.contains("<pubDate>"),
             "expected fallback pubDate, got: {xml}"
         );
+    }
+
+    #[test]
+    fn torrent_protocol_filters_out_newznab_provider() {
+        // Sanity for the kind-routing predicate. The /torznab feed must
+        // never include items whose provider_kind is "newznab" —
+        // otherwise Radarr (added as a Torznab Custom indexer) labels
+        // Usenet items as torrents and fails to grab them.
+        assert!(Protocol::Torrent.matches_kind(Some("unit3d")));
+        assert!(Protocol::Torrent.matches_kind(Some("torznab")));
+        assert!(Protocol::Torrent.matches_kind(Some("plugin")));
+        assert!(Protocol::Torrent.matches_kind(None)); // legacy rows
+        assert!(!Protocol::Torrent.matches_kind(Some("newznab")));
+        assert!(!Protocol::Torrent.matches_kind(Some("NEWZNAB"))); // case-insensitive
+
+        assert!(Protocol::Nzb.matches_kind(Some("newznab")));
+        assert!(Protocol::Nzb.matches_kind(Some("Newznab")));
+        assert!(!Protocol::Nzb.matches_kind(Some("unit3d")));
+        assert!(!Protocol::Nzb.matches_kind(Some("torznab")));
+        assert!(!Protocol::Nzb.matches_kind(None)); // legacy rows excluded
+    }
+
+    #[test]
+    fn torrent_protocol_emits_bittorrent_enclosure_and_torznab_path() {
+        let items = vec![sample_feed_item("123", None)];
+        let bytes = render_feed(&items, "http://h:3000", 0, 1, Protocol::Torrent).unwrap();
+        let xml = String::from_utf8(bytes).unwrap();
+        assert!(xml.contains(r#"type="application/x-bittorrent""#), "{xml}");
+        assert!(xml.contains("http://h:3000/torznab/download/123"), "{xml}");
+        assert!(!xml.contains("/newznab/download/"), "{xml}");
+    }
+
+    #[test]
+    fn nzb_protocol_emits_nzb_enclosure_and_newznab_path() {
+        let items = vec![sample_feed_item("123", None)];
+        let bytes = render_feed(&items, "http://h:3000", 0, 1, Protocol::Nzb).unwrap();
+        let xml = String::from_utf8(bytes).unwrap();
+        assert!(xml.contains(r#"type="application/x-nzb""#), "{xml}");
+        assert!(xml.contains("http://h:3000/newznab/download/123"), "{xml}");
+        assert!(!xml.contains("/torznab/download/"), "{xml}");
     }
 
     #[test]

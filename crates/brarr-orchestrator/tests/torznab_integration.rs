@@ -309,6 +309,57 @@ async fn download_proxy_requires_apikey_when_auth_enabled() {
 }
 
 #[tokio::test]
+async fn newznab_caps_route_works_for_usenet_indexer_mode() {
+    // brarr serves a parallel `/newznab/api` route so users can add it
+    // to Sonarr/Radarr as a "Newznab Custom" indexer (Usenet protocol)
+    // alongside the `/torznab/api` indexer (Torrent protocol). Caps
+    // response is shared between routes.
+    let addr = spawn(AuthConfig::Disabled).await;
+    let resp = client()
+        .get(format!("http://{addr}/newznab/api?t=caps"))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+    assert!(body.contains(r#"<server title="brarr""#), "body: {body}");
+    assert!(body.contains(r#"<movie-search available="yes""#));
+}
+
+#[tokio::test]
+async fn newznab_test_probe_emits_nzb_typed_placeholder() {
+    // Newznab Custom indexer test in *arr UI: ?t=movie with no ids must
+    // return a sentinel, AND that sentinel must carry an NZB enclosure
+    // (not a torrent one) — otherwise the *arr client may reject the
+    // probe as wrong-protocol.
+    let addr = spawn(AuthConfig::Disabled).await;
+    let url = format!(
+        "http://{addr}/newznab/api?t=movie&cat=2000,2010,2020,2030,2040,2045,2050,2060&extended=1&offset=0&limit=100"
+    );
+    let resp = client().get(url).send().await.expect("send");
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("<item>"));
+    assert!(
+        body.contains(r#"type="application/x-nzb""#),
+        "newznab placeholder must emit nzb enclosure, body: {body}"
+    );
+    assert!(body.contains("/newznab/download/"), "body: {body}");
+}
+
+#[tokio::test]
+async fn newznab_download_proxy_404s_for_unknown_decision() {
+    let addr = spawn(AuthConfig::Disabled).await;
+    let bogus = "00000000-0000-4000-8000-000000000000";
+    let resp = client()
+        .get(format!("http://{addr}/newznab/download/{bogus}"))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 404);
+}
+
+#[tokio::test]
 async fn torznab_routes_do_not_redirect_to_login() {
     // Sanity check: auth-enabled mode redirects UI routes to /login,
     // but the torznab router must NOT — Sonarr would follow the
