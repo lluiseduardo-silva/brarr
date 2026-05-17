@@ -1,0 +1,103 @@
+# Build the orchestrator container image and push it to GitHub
+# Container Registry (GHCR). Triggered on:
+#
+#   - every push to `master` / `main`  → tags: `latest`, `sha-<short>`
+#   - every push of a `v*` tag         → tags: `v1.2.3`, `1.2.3`, `1.2`, `1`
+#   - manual dispatch from the Actions UI
+#
+# Pull requests get a build-only run (no push) so a contributor can
+# see the image build before merge without leaking write access to
+# the registry.
+#
+# Image name:
+#   ghcr.io/<owner>/brarr:<tag>
+#
+# Multi-arch:
+#   linux/amd64 + linux/arm64 (Apple Silicon dev hosts + Pi-class
+#   Linux). The Dockerfile branches on TARGETARCH for the Tailwind
+#   binary download.
+
+name: docker
+
+on:
+  push:
+    branches: [master, main]
+    tags: ["v*"]
+  pull_request:
+    branches: [master, main]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+concurrency:
+  group: docker-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-push:
+    name: build + push
+    runs-on: ubuntu-latest
+    # GITHUB_TOKEN needs `packages: write` to push to GHCR. Read
+    # access on `contents` covers the checkout step.
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        # Cross-build for arm64 from amd64 runners; QEMU emulates the
+        # foreign architecture during the build steps.
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        # Skipped on pull_request — those runs build without pushing.
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (tags, labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # Tag map:
+          #   - master / main HEAD  → `latest`
+          #   - any branch HEAD     → `<branch>`
+          #   - any v* git tag      → `1.2.3`, `1.2`, `1`
+          #   - every push          → `sha-<short>` for pinning
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+            type=sha,format=short
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # GHA cache backend: scoped per workflow + branch. Speeds up
+          # rebuilds when only docs / styles change.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # Stamp the image with the commit it was built from so
+          # `docker inspect` carries the provenance.
+          build-args: |
+            RUST_VERSION=1.95

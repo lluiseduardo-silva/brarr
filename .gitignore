@@ -39,6 +39,11 @@ tmp_*.py
 # Claude Code per-project config (preview server launch, etc.)
 .claude/
 
+# Local rule fixtures used to test the profile editor — operator-
+# specific drafts, not source. Keep them out of source control.
+*-rule.json
+*-rules.json
+
 # Tailwind standalone binary (per-platform; install via scripts/install-tailwind.{sh,ps1})
 /tools/
 

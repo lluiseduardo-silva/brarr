@@ -1,0 +1,83 @@
+# Workspace lint + test on every push / pull-request.
+#
+# Keeps the `master` branch in the same state the local CLAUDE.md
+# contract promises: `cargo fmt --check`, `cargo clippy -D warnings`,
+# `cargo test --workspace --all-targets` all green. The Docker image
+# build lives in a separate workflow (docker.yml) so a failing build
+# on a draft PR doesn't block image pushes from `master`.
+
+name: ci
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_NET_RETRY: 10
+  RUSTFLAGS: -D warnings
+  RUST_BACKTRACE: 1
+
+# Cancel in-flight runs for the same branch when a new push arrives —
+# saves runner minutes on rapid pushes during code review.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: cargo fmt --all -- --check
+        run: cargo fmt --all -- --check
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Install system build deps
+        # protoc is vendored via `protoc-bin-vendored` in crates/*/build.rs,
+        # so we only need the C toolchain that aws-lc-sys + openssl-sys
+        # invoke from their own build scripts.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake libssl-dev pkg-config
+      - name: cargo cache
+        uses: Swatinem/rust-cache@v2
+      - name: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    name: cargo test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install system build deps
+        # protoc is vendored via `protoc-bin-vendored` in crates/*/build.rs,
+        # so we only need the C toolchain that aws-lc-sys + openssl-sys
+        # invoke from their own build scripts.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake libssl-dev pkg-config
+      - name: cargo cache
+        uses: Swatinem/rust-cache@v2
+      - name: cargo test --workspace --all-targets
+        run: cargo test --workspace --all-targets --locked
