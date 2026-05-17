@@ -13,9 +13,13 @@
 #   ghcr.io/<owner>/brarr:<tag>
 #
 # Multi-arch:
-#   linux/amd64 + linux/arm64 (Apple Silicon dev hosts + Pi-class
-#   Linux). The Dockerfile branches on TARGETARCH for the Tailwind
-#   binary download.
+#   linux/amd64 only for now. The Rust release compile under QEMU-
+#   emulated arm64 on a standard GHA runner takes 30+ min and routinely
+#   exhausts the ~7GB available RAM. arm64 can come back once we either
+#   (a) move to a native arm64 runner (GitHub-hosted ARM runners or a
+#   self-hosted Pi), or (b) accept matrix-builds that publish per-arch
+#   images and merge via `docker manifest`. Operators on x86_64 home
+#   servers (the actual brarr audience) aren't blocked by this scope cut.
 
 name: docker
 
@@ -89,7 +93,7 @@ jobs:
         with:
           context: .
           file: ./Dockerfile
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
