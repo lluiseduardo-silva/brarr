@@ -253,6 +253,16 @@ async fn pick_pushable<'a>(
             );
             continue;
         }
+        if !matches_arr_kind(&d.release_name, arr.kind) {
+            debug!(
+                target: "brarr_orchestrator::poll",
+                decision_id = %d.id,
+                release = %d.release_name,
+                arr_kind = arr.kind.label(),
+                "skip release whose title shape mismatches arr flavour"
+            );
+            continue;
+        }
         let Some(provider_id) = d.provider_id else {
             continue;
         };
@@ -276,6 +286,76 @@ async fn pick_pushable<'a>(
         return Ok(Some(d));
     }
     Ok(None)
+}
+
+/// Reject decisions whose release title clearly belongs to a different
+/// *arr flavour than the one we're about to push to.
+///
+/// Live failure that motivated this: capybara's UNIT3D fork doesn't
+/// scope `/api/torrents/filter?tmdbId=` to a media-type category, so a
+/// movie tmdb that happens to collide with a TV series on capybara's
+/// side returns episode/season releases. brarr pushed `Teen Titans
+/// S05 720p WEB-DL ... DUAL-NeX` to Radarr and Radarr's title parser
+/// 400'd with `Unable to parse`.
+///
+/// Policy:
+/// - Radarr → drop titles with `S<digits>E<digits>` (episodes) or
+///   bare `S<digits>` season packs.
+/// - Sonarr → permissive (its parser is fine with weird movie titles
+///   and the upstream search axis is TV-only already).
+fn matches_arr_kind(title: &str, kind: ArrKind) -> bool {
+    match kind {
+        ArrKind::Radarr => !title_looks_like_tv(title),
+        ArrKind::Sonarr => true,
+    }
+}
+
+/// Match `S<digits>E<digits>` (episode) or a bare `S<digits>` season
+/// marker surrounded by non-alphanumeric boundaries. Case-insensitive.
+///
+/// Examples that count as TV:
+///   `Show.S01E02.1080p`, `Show s01e02`, `Teen.Titans.S05.720p`,
+///   `Teen Titans S05 720p`, `Show.S5E10`.
+///
+/// Examples that do NOT count as TV:
+///   `Stardust.2007`, `S Movie 2024`, `Sword.2024`, `123S456`.
+fn title_looks_like_tv(title: &str) -> bool {
+    let bytes = title.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        // Need an `S` (case-insensitive) preceded by a separator or
+        // the start of the string — `Show.S01` and `Show S01`.
+        if (b == b's' || b == b'S')
+            && (i == 0 || !bytes[i - 1].is_ascii_alphanumeric())
+            && i + 1 < bytes.len()
+            && bytes[i + 1].is_ascii_digit()
+        {
+            let mut j = i + 1;
+            while j < bytes.len() && bytes[j].is_ascii_digit() {
+                j += 1;
+            }
+            // S<digits>E<digits> — proper episode marker.
+            if j < bytes.len()
+                && (bytes[j] == b'e' || bytes[j] == b'E')
+                && j + 1 < bytes.len()
+                && bytes[j + 1].is_ascii_digit()
+            {
+                return true;
+            }
+            // S<digits> followed by non-alpha boundary — season pack.
+            // `j == i + 1` would mean S not followed by digits (already
+            // ruled out by the `is_ascii_digit` guard above). Bound the
+            // season number length to ≤ 4 digits so `S2024` (year tag
+            // some scene groups use) doesn't false-positive.
+            let digit_len = j - (i + 1);
+            if digit_len <= 3 && (j == bytes.len() || !bytes[j].is_ascii_alphabetic()) {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
 }
 
 /// Drop torrent releases that won't be grabbable — zero seeders means
@@ -571,6 +651,41 @@ mod tests {
     fn meets_quality_keeps_newznab_even_with_zero_seeders() {
         // NZB has no seeders concept — `seeders == 0` is the default.
         assert!(meets_quality(&decision_with(Some("newznab"), 0)));
+    }
+
+    #[test]
+    fn title_looks_like_tv_catches_episode_and_season_markers() {
+        assert!(title_looks_like_tv("The Rookie S08E14 1080p"));
+        assert!(title_looks_like_tv("the.rookie.s08e14.1080p"));
+        assert!(title_looks_like_tv("Teen Titans S05 720p WEB-DL"));
+        assert!(title_looks_like_tv("Teen.Titans.S05.720p"));
+        assert!(title_looks_like_tv("Show S2E10 web"));
+    }
+
+    #[test]
+    fn title_looks_like_tv_skips_movies_and_year_tags() {
+        assert!(!title_looks_like_tv("Stardust.2007.1080p.BluRay"));
+        assert!(!title_looks_like_tv("Star Wars 1977"));
+        assert!(!title_looks_like_tv("The Matrix 1999 1080p"));
+        // S2024 (4-digit) shouldn't count — sometimes scene tags use it
+        // for year. Capped to ≤ 3-digit season.
+        assert!(!title_looks_like_tv("Title S2024 1080p"));
+        // `123S456` — digits adjacent to S, no separator boundary.
+        assert!(!title_looks_like_tv("123S456 1080p"));
+    }
+
+    #[test]
+    fn matches_arr_kind_drops_tv_for_radarr() {
+        assert!(!matches_arr_kind("Teen Titans S05 720p", ArrKind::Radarr));
+        assert!(!matches_arr_kind("Show.S08E14.1080p", ArrKind::Radarr));
+        assert!(matches_arr_kind("The Matrix 1999 1080p", ArrKind::Radarr));
+    }
+
+    #[test]
+    fn matches_arr_kind_permissive_for_sonarr() {
+        // Sonarr accepts anything — its own parser filters.
+        assert!(matches_arr_kind("Show.S08E14.1080p", ArrKind::Sonarr));
+        assert!(matches_arr_kind("Weird Movie 2024", ArrKind::Sonarr));
     }
 
     #[test]
