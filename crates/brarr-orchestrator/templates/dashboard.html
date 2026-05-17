@@ -11,14 +11,17 @@
         <h1 class="font-semibold text-[28px] leading-9 text-fg-primary">Bem-vindo de volta</h1>
         <p class="text-base text-fg-secondary mt-1">Veja como seus providers e *arr estão performando hoje.</p>
     </div>
-    <a href="/#new-search"
-       class="brand-gradient flex items-center gap-2 px-5 h-11 rounded-lg text-white text-base font-semibold whitespace-nowrap"
-       style="box-shadow: 0 8px 20px var(--color-glow);">
+    <button type="button"
+            hx-get="/searches/new"
+            hx-target="#modal-target"
+            hx-swap="innerHTML"
+            class="brand-gradient flex items-center gap-2 px-5 h-11 rounded-lg text-white text-base font-semibold whitespace-nowrap cursor-pointer"
+            style="box-shadow: 0 8px 20px var(--color-glow);">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="white">
             <path d="M12 3l2 6 6 2-6 2-2 6-2-6-6-2 6-2z"/>
         </svg>
         Nova busca
-    </a>
+    </button>
 </div>
 
 {# Stat cards. Only the metrics we already compute server-side render

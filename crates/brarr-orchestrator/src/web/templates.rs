@@ -231,6 +231,17 @@ pub struct ErrorTemplate {
     pub message: String,
 }
 
+/// Nova Busca dialog partial returned by `GET /searches/new`. Swapped
+/// into the `#modal-target` slot in `base.html`; `modal.js` auto-opens
+/// the <dialog> on `htmx:afterSwap`.
+#[derive(Debug, Template)]
+#[template(path = "partials/new_search_modal.html")]
+pub struct NewSearchModalPartial {
+    /// Number of provider rows currently enabled — copy in the
+    /// footer reads "Buscará em N providers ativos".
+    pub provider_count: usize,
+}
+
 /// Single-search view at `/searches/{id}`.
 #[derive(Debug, Template)]
 #[template(path = "search_detail.html")]

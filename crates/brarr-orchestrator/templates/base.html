@@ -108,5 +108,11 @@
     </main>
     {% endblock %}
 
+    {# HTMX swap target for modal partials (Nova Busca, future
+       confirmation dialogs). modal.js auto-opens any <dialog> that
+       lands here and clears the slot once the dialog closes. #}
+    <div id="modal-target"></div>
+    <script src="/static/modal.js" defer></script>
+
 </body>
 </html>

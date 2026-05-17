@@ -43,9 +43,9 @@ use crate::search::run_tmdb_search;
 use crate::web::render::html;
 use crate::web::templates::{
     ArrInstanceView, ArrInstancesListPartial, ArrInstancesTemplate, DashboardTemplate,
-    DecisionView, ErrorTemplate, LoginTemplate, ProviderView, ProvidersListPartial,
-    ProvidersTemplate, PushGroupView, PushHistoryView, PushesTemplate, RecentSearchView,
-    ReleasesTemplate, SearchDetailTemplate,
+    DecisionView, ErrorTemplate, LoginTemplate, NewSearchModalPartial, ProviderView,
+    ProvidersListPartial, ProvidersTemplate, PushGroupView, PushHistoryView, PushesTemplate,
+    RecentSearchView, ReleasesTemplate, SearchDetailTemplate,
 };
 use crate::{AppError, AppState};
 use brarr_core::TmdbId;
@@ -77,6 +77,7 @@ pub fn router(state: AppState, static_dir: &std::path::Path) -> Router {
         .route("/pushes", get(pushes_index))
         .route("/releases", get(releases_index))
         .route("/searches", post(searches_create))
+        .route("/searches/new", get(new_search_modal))
         .route("/searches/{id}", get(search_detail))
         .route("/logout", post(logout))
         .layer(auth_layer);
@@ -923,6 +924,20 @@ fn parse_optional_imdb(raw: Option<&str>) -> Result<Option<brarr_core::ImdbId>, 
     brarr_core::ImdbId::new(n)
         .map(Some)
         .map_err(|e| AppError::InvalidInput(format!("imdb_id inválido: {e}")))
+}
+
+/// Returns the Nova Busca modal partial — swapped into the
+/// `#modal-target` slot by HTMX on the Dashboard/Releases CTA. The
+/// partial is just a <dialog> + form; modal.js calls `.showModal()`
+/// once the swap lands. The form posts back to `/searches`, which
+/// already issues `HX-Redirect` to the new detail page.
+async fn new_search_modal(State(state): State<AppState>) -> Result<Response, AppError> {
+    let provider_count = providers::list_all(state.pool())
+        .await?
+        .into_iter()
+        .filter(|p| p.enabled)
+        .count();
+    html(&NewSearchModalPartial { provider_count })
 }
 
 async fn search_detail(

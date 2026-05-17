@@ -1,0 +1,101 @@
+{# Nova Busca dialog partial.
+
+   Returned by `GET /searches/new` and swapped into the `#modal-target`
+   slot rendered in base.html. modal.js listens for HTMX swap events
+   on that target and calls `.showModal()` on the <dialog> so the
+   server doesn't need to know about open/close state. ESC closes
+   natively (HTML5 <dialog>); the backdrop click is wired via the
+   form action="dialog" pattern below. #}
+<dialog id="new-search-dialog"
+        class="bg-transparent p-0 max-w-full max-h-full backdrop:bg-[rgba(10,6,18,0.7)]"
+        aria-label="Nova busca">
+    <div class="w-[560px] max-w-full card-hairline bg-bg-surface border border-border-default rounded-2xl"
+         style="box-shadow: 0 24px 60px var(--color-glow);">
+
+        {# Header — icon tile + title + close button. The close button
+           is a <form method="dialog"> submit so ESC + button share
+           the same dismissal path. #}
+        <header class="flex items-center justify-between gap-3 px-6 py-5">
+            <div class="flex items-center gap-3">
+                <div class="shrink-0 w-10 h-10 rounded-[10px] bg-accent-soft flex items-center justify-center text-accent-soft-fg">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                        <circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>
+                    </svg>
+                </div>
+                <div>
+                    <h2 class="text-[22px] font-semibold leading-tight text-fg-primary">Nova busca</h2>
+                    <p class="text-xs text-fg-secondary">Busca em todos providers ativos em paralelo</p>
+                </div>
+            </div>
+            <form method="dialog" class="contents">
+                <button type="submit" aria-label="Fechar"
+                        class="p-2 rounded-md bg-bg-muted text-fg-secondary hover:bg-bg-surface-raised hover:text-fg-primary">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+                </button>
+            </form>
+        </header>
+
+        <div class="h-px bg-border-default"></div>
+
+        {# Body — TMDb / IMDb inputs. We post to the same /searches
+           endpoint as the inline form; the redirect header still drives
+           navigation to the search-detail page. #}
+        <form hx-post="/searches"
+              hx-swap="none"
+              hx-disabled-elt="find button[type=submit]"
+              class="px-6 py-5 flex flex-col gap-4">
+
+            <label class="block">
+                <span class="block mb-1.5 text-xs font-medium uppercase tracking-[0.06em] text-fg-muted">TMDB ID</span>
+                <input name="tmdb_id" type="number" min="1" autofocus placeholder="Ex.: 603"
+                       class="w-full font-mono px-3 h-11 rounded-lg bg-bg-canvas border border-border-strong text-base text-fg-primary placeholder:text-fg-muted focus:outline-none focus:border-accent-solid">
+            </label>
+
+            <div class="flex items-center gap-3">
+                <div class="flex-1 h-px bg-border-default"></div>
+                <span class="text-xs text-fg-muted">ou</span>
+                <div class="flex-1 h-px bg-border-default"></div>
+            </div>
+
+            <label class="block">
+                <span class="block mb-1.5 text-xs font-medium uppercase tracking-[0.06em] text-fg-muted">IMDB ID</span>
+                <input name="imdb_id" type="text" placeholder="Ex.: tt0133093"
+                       class="w-full font-mono px-3 h-11 rounded-lg bg-bg-canvas border border-border-strong text-base text-fg-primary placeholder:text-fg-muted focus:outline-none focus:border-accent-solid">
+            </label>
+
+            <div class="flex items-start gap-2.5 px-3 py-2.5 rounded-lg bg-info-soft border border-info-solid">
+                <div class="shrink-0 mt-0.5 w-[18px] h-[18px] rounded-full bg-info-solid flex items-center justify-center">
+                    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="3"><circle cx="12" cy="12" r="10"/><path d="M12 11v6M12 7.5v.5" stroke-linecap="round"/></svg>
+                </div>
+                <p class="text-xs text-info-soft-fg">
+                    Pelo menos um ID obrigatório. TMDb cobre UNIT3D; IMDb cobre Newznab/Torznab. Use ambos pra maximizar matches.
+                </p>
+            </div>
+
+            <div class="h-px bg-border-default -mx-6"></div>
+
+            <div class="flex items-center justify-between gap-3 pt-1">
+                <div class="flex items-center gap-2 text-xs text-fg-muted">
+                    <span>Buscará em</span>
+                    <span class="px-2 py-1 rounded font-semibold text-accent-soft-fg bg-accent-soft">
+                        {{ provider_count }} provider{% if provider_count != 1 %}s{% endif %} ativos
+                    </span>
+                </div>
+                <div class="flex items-center gap-2">
+                    <form method="dialog" class="contents">
+                        <button type="submit"
+                                class="px-4 h-10 rounded-lg bg-bg-canvas border border-border-strong text-fg-primary text-sm font-medium">
+                            Cancelar
+                        </button>
+                    </form>
+                    <button type="submit"
+                            class="brand-gradient flex items-center gap-2 px-5 h-10 rounded-lg text-white text-sm font-semibold"
+                            style="box-shadow: 0 6px 16px var(--color-glow);">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="white"><path d="M12 3l2 6 6 2-6 2-2 6-2-6-6-2 6-2z"/></svg>
+                        Buscar agora
+                    </button>
+                </div>
+            </div>
+        </form>
+    </div>
+</dialog>
