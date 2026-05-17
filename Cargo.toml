@@ -9,6 +9,7 @@ members = [
     "crates/brarr-orchestrator",
     "crates/brarr-decision-service",
     "crates/brarr-plugin-host",
+    "crates/brarr-arr",
 ]
 
 [workspace.package]
