@@ -30,108 +30,36 @@
 </div>
 
 {% if decisions.is_empty() %}
-<div class="card-hairline bg-bg-surface border border-border-default rounded-xl px-5 py-10 text-center">
-    <p class="text-fg-muted italic">Ainda não há decisões persistidas. Rode uma busca pelo botão "Nova busca" no Dashboard.</p>
+<div class="card-hairline bg-bg-surface border border-border-default rounded-xl px-6 py-16 flex flex-col items-center text-center gap-4">
+    <div class="w-16 h-16 rounded-full bg-accent-soft flex items-center justify-center text-accent-soft-fg">
+        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>
+        </svg>
+    </div>
+    <div>
+        <h2 class="text-lg font-semibold text-fg-primary mb-1">Sem decisões ainda</h2>
+        <p class="text-sm text-fg-secondary max-w-md">
+            Rode uma busca pelo botão acima ou aguarde o auto-poll dos *arr. Cada release encontrada vira uma decisão pontuada e aparece aqui.
+        </p>
+    </div>
+    <button type="button"
+            hx-get="/searches/new"
+            hx-target="#modal-target"
+            hx-swap="innerHTML"
+            class="brand-gradient flex items-center gap-2 px-5 h-11 rounded-lg text-white text-sm font-semibold cursor-pointer"
+            style="box-shadow: 0 8px 20px var(--color-glow);">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="white"><path d="M12 3l2 6 6 2-6 2-2 6-2-6-6-2 6-2z"/></svg>
+        Nova busca
+    </button>
 </div>
 {% else %}
-{# Fixed-height scroll container so the horizontal scrollbar lives
-   *next to* the table instead of pinned to the bottom of the viewport.
-   Sticky <thead> keeps column labels visible while the body scrolls.
-   `max-h-[calc(100vh-280px)]` reserves space for nav (64) + page
-   title (~80) + filter bar (~60) + padding. #}
-<div class="card-hairline bg-bg-surface border border-border-default rounded-xl overflow-hidden">
-    <div class="overflow-auto max-h-[calc(100vh-280px)]">
-        <table class="w-full text-sm">
-            <thead class="bg-bg-muted sticky top-0 z-10">
-                <tr class="text-left">
-                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Score</th>
-                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Provider</th>
-                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Release</th>
-                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Qualidade</th>
-                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Tamanho</th>
-                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Seeders</th>
-                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Regras</th>
-                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Status</th>
-                    {% if !arr_instances.is_empty() %}
-                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted text-right">Push</th>
-                    {% endif %}
-                </tr>
-            </thead>
-            <tbody>
-            {% for d in decisions %}
-                <tr class="border-t border-border-default {% if d.rejected %}bg-danger-soft{% endif %}">
-                    {# Score cell — number + gradient mini-bar (score/10 %). #}
-                    <td class="px-4 py-3 w-[140px]">
-                        <p class="font-mono font-semibold text-base text-fg-primary leading-none">
-                            {{ d.score }}<span class="text-[10px] text-fg-muted font-normal">/1000</span>
-                        </p>
-                        <div class="mt-1.5 h-1 w-[110px] rounded-full bg-bg-muted overflow-hidden">
-                            <div class="brand-gradient h-full" style="width: {{ d.score / 10 }}%;"></div>
-                        </div>
-                    </td>
-
-                    <td class="px-4 py-3">
-                        <span class="font-medium text-fg-primary">{{ d.provider_name }}</span>
-                    </td>
-
-                    <td class="px-4 py-3 max-w-[360px]">
-                        <p class="text-sm font-medium text-fg-primary truncate">{{ d.release_name }}</p>
-                        {% if !d.tags.is_empty() %}
-                        <p class="text-[10px] text-fg-muted font-mono mt-0.5 truncate" title="{{ d.tags }}">{{ d.tags }}</p>
-                        {% endif %}
-                    </td>
-
-                    <td class="px-4 py-3 font-mono text-sm text-fg-primary">{{ d.resolution }}</td>
-                    <td class="px-4 py-3 font-mono text-xs text-fg-secondary">{{ d.size_human }}</td>
-                    <td class="px-4 py-3 font-mono text-sm text-fg-secondary">{{ d.seeders }}</td>
-
-                    <td class="px-4 py-3 text-xs text-fg-secondary max-w-[260px]">
-                        <span class="truncate block" title="{{ d.matched_rules }}">{{ d.matched_rules }}</span>
-                    </td>
-
-                    {# Status badge — soft + bordered, with leading
-                       check/x icon per Figma status-badge spec. #}
-                    <td class="px-4 py-3">
-                        {% if d.rejected %}
-                        <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-danger-soft text-danger-soft-fg border border-danger-solid">
-                            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
-                            rejeitado
-                        </span>
-                        {% else %}
-                        <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-success-soft text-success-soft-fg border border-success-solid">
-                            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5L20 7"/></svg>
-                            mantido
-                        </span>
-                        {% endif %}
-                    </td>
-
-                    {# Per-instance push buttons. Gradient for Radarr,
-                       outlined for Sonarr — visually distinguishes
-                       movies vs series destination at a glance. #}
-                    {% if !arr_instances.is_empty() %}
-                    <td class="px-4 py-3 whitespace-nowrap">
-                        <div class="flex items-center justify-end gap-1.5 flex-wrap">
-                            {% for a in arr_instances %}
-                            <button hx-post="/decisions/{{ d.id }}/push/{{ a.id }}"
-                                    hx-target="#push-{{ d.id }}-{{ a.id }}"
-                                    hx-swap="outerHTML"
-                                    title="Push para {{ a.name }} ({{ a.kind }})"
-                                    class='{% if a.kind == "radarr" %}brand-gradient text-white{% else %}bg-bg-muted border border-border-strong text-fg-primary{% endif %} inline-flex items-center gap-1 px-2.5 h-7 rounded-md text-[11px] font-semibold'>
-                                <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor">
-                                    <path d="M13 2L4 14h6l-1 8 9-12h-6l1-8z"/>
-                                </svg>
-                                {{ a.name }}
-                            </button>
-                            <span id="push-{{ d.id }}-{{ a.id }}" class="text-[10px] text-fg-muted italic"></span>
-                            {% endfor %}
-                        </div>
-                    </td>
-                    {% endif %}
-                </tr>
-            {% endfor %}
-            </tbody>
-        </table>
-    </div>
+{# Card grid — 2 columns on md+ (cards 280px tall each). No more
+   horizontal scroll: wide release names truncate inside each card
+   instead of pushing the table out of the viewport. #}
+<div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+{% for d in decisions %}
+    {% include "partials/release_card.html" %}
+{% endfor %}
 </div>
 {% endif %}
 

@@ -1,6 +1,16 @@
 <section id="arr-instances-list" class="card-hairline bg-bg-surface border border-border-default rounded-xl overflow-hidden">
     {% if instances.is_empty() %}
-    <p class="px-5 py-6 text-sm italic text-fg-muted">Nenhum *arr cadastrado. Adicione um Radarr/Sonarr acima pra ativar push automático.</p>
+    <div class="px-6 py-12 flex flex-col items-center text-center gap-3">
+        <div class="w-14 h-14 rounded-full bg-warning-soft flex items-center justify-center text-warning-soft-fg">
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M13 2L4 14h6l-1 8 9-12h-6l1-8z"/>
+            </svg>
+        </div>
+        <div>
+            <h3 class="text-base font-semibold text-fg-primary mb-1">Nenhum *arr cadastrado</h3>
+            <p class="text-sm text-fg-secondary max-w-md">Adicione um Radarr / Sonarr acima pra ativar push automático. brarr identifica releases que passam do threshold + dispara grab no *arr correspondente.</p>
+        </div>
+    </div>
     {% else %}
     <div class="overflow-x-auto">
         <table class="w-full text-sm">
@@ -41,10 +51,23 @@
                         <a href="{{ a.base_url }}" class="hover:text-accent-soft-fg" target="_blank" rel="noopener">{{ a.base_url }}</a>
                     </td>
 
-                    {# Inline threshold editor. The ✓ button submits the
-                       form; the entire list partial gets swapped back
-                       in so the new value renders pre-validated. #}
+                    {# Threshold column: shows the attached profile
+                       chip (gradient name + effective threshold) when
+                       set, falling back to the inline threshold editor
+                       when no profile is attached. The chip stays
+                       static — to swap profile the operator goes
+                       through the *arr instance form. #}
                     <td class="px-4 py-3">
+                        {% if let Some(pname) = a.profile_name %}
+                        <a href="/profiles"
+                           class="inline-flex items-center gap-2 px-2.5 h-8 rounded-md bg-accent-soft border border-accent-solid"
+                           title="Profile attached — clique para gerenciar">
+                            <span class="text-[11px] font-semibold text-accent-soft-fg truncate max-w-[120px]">{{ pname }}</span>
+                            <span class="font-mono font-bold text-[11px] text-accent-soft-fg whitespace-nowrap">
+                                ≥ {% if let Some(t) = a.profile_threshold %}{{ t }}{% else %}{{ a.push_threshold }}{% endif %}
+                            </span>
+                        </a>
+                        {% else %}
                         <form hx-post="/arr-instances/{{ a.id }}/threshold"
                               hx-target="#arr-instances-list"
                               hx-swap="outerHTML"
@@ -63,6 +86,7 @@
                                 </svg>
                             </button>
                         </form>
+                        {% endif %}
                     </td>
 
                     <td class="px-4 py-3">

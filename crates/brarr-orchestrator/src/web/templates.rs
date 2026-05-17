@@ -12,6 +12,12 @@ pub struct DashboardTemplate {
     pub provider_count: usize,
     /// Aggregated stat for the header cards.
     pub search_count: usize,
+    /// Total push attempts ever recorded — denominator of the
+    /// push-success-rate stat card.
+    pub push_total: u64,
+    /// Push attempts that returned `status='ok'`. Stat card renders
+    /// `100 * push_ok / push_total` as a percentage when total > 0.
+    pub push_ok: u64,
     /// Most recent searches.
     pub recent_searches: Vec<RecentSearchView>,
     /// Most recent kept decisions (any search, non-rejected).
@@ -51,6 +57,11 @@ pub struct DecisionView {
     /// 145 because: PT ambíguo + 2160p + HDR" without forcing the
     /// operator to read the rule engine source.
     pub matched_rules: String,
+    /// Same data as `matched_rules` but pre-split + classified into
+    /// (label, kind) pairs the templates render as coloured chips.
+    /// `kind` is one of `"pt"` | `"accent"` | `"warning"` | `"neutral"`
+    /// — purely a UI hint, not a domain enum.
+    pub rule_chips: Vec<(String, String)>,
     /// Resolution label.
     pub resolution: String,
     /// Kind label.
@@ -103,6 +114,11 @@ pub struct ProvidersListPartial {
 pub struct ArrInstancesTemplate {
     /// All configured *arr endpoints.
     pub instances: Vec<ArrInstanceView>,
+    /// All quality profiles — populates the "Quality Profile" select
+    /// in the add-instance form. Empty when no profiles exist; the
+    /// template hides the select and falls back to the threshold
+    /// input.
+    pub profiles: Vec<ProfileView>,
 }
 
 /// Single row in the *arr admin table.
@@ -117,7 +133,19 @@ pub struct ArrInstanceView {
     /// Base URL of the *arr instance.
     pub base_url: String,
     /// Minimum decision score required to trigger an auto-push.
+    /// Profile's threshold (when attached) wins over this value at
+    /// push time; the list view still shows it as a fallback so the
+    /// operator can see what would apply if the profile is detached.
     pub push_threshold: u32,
+    /// Display name of the attached quality profile (resolved by the
+    /// list handler so the template doesn't need a second query).
+    /// `None` when no profile is attached — the row falls back to
+    /// `push_threshold`.
+    pub profile_name: Option<String>,
+    /// Threshold inherited from the attached profile (only populated
+    /// when `profile_name` is `Some`). Lets the row chip render the
+    /// effective threshold without another query.
+    pub profile_threshold: Option<u32>,
     /// `true` if this row is currently eligible for push.
     pub enabled: bool,
     /// Creation timestamp (ISO-8601).
@@ -282,6 +310,10 @@ pub struct SearchDetailTemplate {
     pub submitted_at: String,
     /// All decision rows for this search (kept + rejected).
     pub decisions: Vec<DecisionView>,
+    /// *arr instances enabled for push, so the shared release card
+    /// partial can render per-instance push buttons. Empty when no
+    /// *arr is configured — the card hides the buttons in that case.
+    pub arr_instances: Vec<ArrInstanceView>,
     /// Per-provider failure messages (transient — not persisted).
     pub failures: Vec<(String, String)>,
 }

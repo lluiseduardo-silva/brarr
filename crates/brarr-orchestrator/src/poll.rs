@@ -239,9 +239,16 @@ async fn pick_pushable<'a>(
     arr: &ArrInstanceRow,
     decisions: &'a [crate::db::decisions::DecisionRow],
 ) -> Result<Option<&'a crate::db::decisions::DecisionRow>, AppError> {
+    // Resolve the effective push threshold once per call. When the
+    // *arr has a quality profile attached the profile's threshold
+    // wins; otherwise we fall back to the row's own integer. The
+    // resolver also handles the FK-orphan edge case (profile deleted
+    // mid-poll) by falling back to the raw `push_threshold`.
+    let threshold =
+        crate::db::arr_instances::effective_threshold(state.pool(), arr).await?;
     for d in decisions
         .iter()
-        .take_while(|d| d.score >= arr.push_threshold)
+        .take_while(|d| d.score >= threshold)
     {
         if !meets_quality(d) {
             debug!(

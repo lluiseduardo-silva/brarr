@@ -203,7 +203,7 @@ async fn releases_index_renders_empty_state() {
     assert_eq!(resp.status(), 200);
     let body = resp.text().await.unwrap();
     assert!(body.contains("Releases history"));
-    assert!(body.contains("Ainda não há decisões"));
+    assert!(body.contains("Sem decisões ainda"));
 }
 
 #[tokio::test]
@@ -415,6 +415,7 @@ async fn decisions_push_records_transport_failure_against_dead_arr() {
             base_url: &url::Url::parse("http://127.0.0.1:1/").unwrap(),
             api_key: "x",
             push_threshold: None,
+            profile_id: None,
             enabled: None,
         },
     )

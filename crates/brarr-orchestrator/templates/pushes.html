@@ -10,11 +10,22 @@
 </div>
 
 {% if groups.is_empty() %}
-<div class="card-hairline bg-bg-surface border border-border-default rounded-xl px-5 py-10 text-center">
-    <p class="text-fg-muted italic">
-        Nenhum push registrado ainda. Use o botão <em>push</em> em
-        <a href="/releases" class="text-accent-soft-fg font-semibold">releases</a> ou aguarde o auto-push do scheduler.
-    </p>
+<div class="card-hairline bg-bg-surface border border-border-default rounded-xl px-6 py-16 flex flex-col items-center text-center gap-4">
+    <div class="w-16 h-16 rounded-full bg-warning-soft flex items-center justify-center text-warning-soft-fg">
+        <svg width="32" height="32" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M13 2L4 14h6l-1 8 9-12h-6l1-8z"/>
+        </svg>
+    </div>
+    <div>
+        <h2 class="text-lg font-semibold text-fg-primary mb-1">Nenhum push registrado</h2>
+        <p class="text-sm text-fg-secondary max-w-md">
+            Quando uma release passar do threshold de algum *arr ativo, brarr dispara um push e a tentativa aparece aqui — agrupada por release × instância.
+        </p>
+    </div>
+    <div class="flex items-center gap-2">
+        <a href="/releases" class="px-5 h-11 inline-flex items-center gap-2 rounded-lg bg-bg-canvas border border-border-strong text-fg-primary text-sm font-medium">Ver releases</a>
+        <a href="/arr-instances" class="brand-gradient inline-flex items-center gap-2 px-5 h-11 rounded-lg text-white text-sm font-semibold" style="box-shadow: 0 8px 20px var(--color-glow);">Configurar *arr</a>
+    </div>
 </div>
 {% else %}
 

@@ -1,0 +1,124 @@
+{#
+  Release card — vertical layout, fixed 280h, slot-clip overflow.
+
+  Renders one DecisionView. Variables expected in scope:
+    `d`              : DecisionView
+    `arr_instances`  : Vec<ArrInstanceView> (may be empty — buttons
+                       only render when there are enabled *arr rows)
+
+  Used by `releases.html` and `search_detail.html` inside their
+  {% for d in decisions %} loops. Search detail also relies on this
+  same partial so the two pages stay visually identical.
+
+  Slot heights chosen so a 4-rule chip row, a 4-spec chip row, and a
+  2-line title all fit without the card growing past 280px. Any
+  overflow is clipped (clipsContent equivalent via `overflow-hidden`).
+#}
+<article class="card-hairline bg-bg-surface border border-border-default rounded-xl overflow-hidden
+                {% if d.rejected %}!bg-danger-soft{% endif %}"
+         style="height: 280px;">
+    <div class="h-full flex flex-col p-[18px] pt-[16px] gap-2.5">
+
+        {# ─── HEADER ─── #}
+        <header class="flex items-start justify-between gap-3">
+            <div class="min-w-0 flex-1 overflow-hidden">
+                <h3 class="text-[15px] font-semibold text-fg-primary truncate" title="{{ d.release_name }}">{{ d.release_name }}</h3>
+                <p class="text-[11px] font-mono text-fg-muted truncate">{{ d.provider_name }}</p>
+            </div>
+            {# Provider kind tag — small mark + label. We don't know
+               the provider kind here (DecisionRow only carries
+               provider_name); show a neutral chip instead so the
+               header still has a visual anchor on the right. #}
+            <span class="shrink-0 inline-flex items-center gap-1.5 pl-1 pr-2.5 py-1 rounded-md bg-bg-muted">
+                <span class="inline-flex items-center justify-center w-5 h-5 rounded font-mono font-bold text-[10px] bg-fg-secondary text-bg-surface">{{ d.kind|truncate(1) }}</span>
+                <span class="text-[11px] font-semibold text-fg-secondary">{{ d.kind }}</span>
+            </span>
+        </header>
+
+        {# ─── RULE CHIPS ─── 28h fixo + overflow clip. #}
+        <div class="h-7 flex items-center gap-1.5 overflow-hidden">
+        {% if d.rule_chips.is_empty() %}
+            <span class="text-[11px] font-mono italic text-fg-muted">— nenhuma regra casada</span>
+        {% else %}
+            {% for chip in d.rule_chips %}
+                {% if chip.1 == "pt" %}
+                <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-semibold bg-success-soft text-success-soft-fg whitespace-nowrap">
+                    <span class="w-1.5 h-1.5 rounded-full bg-success-solid"></span>{{ chip.0 }}
+                </span>
+                {% else if chip.1 == "accent" %}
+                <span class="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-semibold bg-accent-soft text-accent-soft-fg whitespace-nowrap">{{ chip.0 }}</span>
+                {% else if chip.1 == "warning" %}
+                <span class="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-semibold bg-warning-soft text-warning-soft-fg whitespace-nowrap">{{ chip.0 }}</span>
+                {% else %}
+                <span class="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-semibold bg-bg-muted text-fg-secondary whitespace-nowrap">{{ chip.0 }}</span>
+                {% endif %}
+            {% endfor %}
+        {% endif %}
+        </div>
+
+        {# ─── SPEC CHIPS ─── 26h fixo. #}
+        <div class="h-[26px] flex items-center gap-1.5 overflow-hidden">
+            <span class="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-mono font-semibold bg-bg-muted text-fg-primary whitespace-nowrap">{{ d.resolution }}</span>
+            <span class="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-mono font-medium bg-bg-muted text-fg-secondary whitespace-nowrap">{{ d.size_human }}</span>
+            <span class="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-mono font-medium bg-bg-muted text-fg-secondary whitespace-nowrap">{{ d.seeders }} seeders</span>
+            {% if !d.tags.is_empty() %}
+            <span class="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-mono font-medium bg-bg-muted text-fg-muted whitespace-nowrap truncate min-w-0" title="{{ d.tags }}">{{ d.tags }}</span>
+            {% endif %}
+        </div>
+
+        {# ─── SCORE ─── #}
+        <div class="flex flex-col gap-1.5">
+            <div class="flex items-baseline justify-between">
+                <span class="text-[10px] font-semibold uppercase tracking-[0.06em] text-fg-muted">SCORE</span>
+                <span class="flex items-baseline gap-1">
+                    <span class="font-mono font-semibold text-lg text-fg-primary leading-none">{{ d.score }}</span>
+                    <span class="font-mono text-[11px] text-fg-muted">/ 500</span>
+                </span>
+            </div>
+            <div class="h-1.5 w-full rounded-full bg-bg-muted overflow-hidden">
+                <div class="brand-gradient h-full" style="width: {{ d.score * 100 / 500 }}%; max-width: 100%;"></div>
+            </div>
+        </div>
+
+        {# Spacer pushes footer to bottom — uses flex-grow. #}
+        <div class="flex-1"></div>
+
+        <div class="h-px bg-border-default"></div>
+
+        {# ─── FOOTER ─── status + actions. #}
+        <footer class="flex items-center justify-between gap-2">
+            {% if d.rejected %}
+            <div class="flex items-center gap-2 min-w-0 flex-1 overflow-hidden">
+                <span class="shrink-0 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-danger-soft text-danger-soft-fg border border-danger-solid">
+                    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+                    rejeitado
+                </span>
+                <span class="text-[11px] text-danger-soft-fg truncate">score abaixo do threshold</span>
+            </div>
+            {% else %}
+            <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-success-soft text-success-soft-fg border border-success-solid">
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5L20 7"/></svg>
+                mantido
+            </span>
+            {% endif %}
+
+            {% if !arr_instances.is_empty() && !d.rejected %}
+            <div class="flex items-center gap-2 shrink-0">
+                {% for a in arr_instances %}
+                <button hx-post="/decisions/{{ d.id }}/push/{{ a.id }}"
+                        hx-target="#push-{{ d.id }}-{{ a.id }}"
+                        hx-swap="outerHTML"
+                        title="Push para {{ a.name }} ({{ a.kind }})"
+                        class='{% if a.kind == "radarr" %}brand-gradient text-white{% else %}bg-bg-canvas border border-border-strong text-fg-primary{% endif %} inline-flex items-center gap-1.5 px-3 h-8 rounded-md text-xs font-semibold'>
+                    <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><path d="M13 2L4 14h6l-1 8 9-12h-6l1-8z"/></svg>
+                    {{ a.name }}
+                </button>
+                <span id="push-{{ d.id }}-{{ a.id }}" class="hidden"></span>
+                {% endfor %}
+            </div>
+            {% else if d.rejected %}
+            <a href="/searches/{{ d.id }}" class="shrink-0 text-[11px] font-semibold text-danger-soft-fg whitespace-nowrap">ver razão →</a>
+            {% endif %}
+        </footer>
+    </div>
+</article>

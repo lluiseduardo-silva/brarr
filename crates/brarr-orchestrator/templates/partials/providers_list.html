@@ -1,6 +1,16 @@
 <section id="providers-list" class="card-hairline bg-bg-surface border border-border-default rounded-xl overflow-hidden">
     {% if providers.is_empty() %}
-    <p class="px-5 py-6 text-sm italic text-fg-muted">Nenhum provider configurado ainda.</p>
+    <div class="px-6 py-12 flex flex-col items-center text-center gap-3">
+        <div class="w-14 h-14 rounded-full bg-accent-soft flex items-center justify-center text-accent-soft-fg">
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 010 18M12 3a14 14 0 000 18"/>
+            </svg>
+        </div>
+        <div>
+            <h3 class="text-base font-semibold text-fg-primary mb-1">Nenhum provider configurado</h3>
+            <p class="text-sm text-fg-secondary max-w-md">Adicione um tracker UNIT3D, indexer Newznab/Torznab ou plugin WASM no formulário acima. Sem providers, brarr não tem onde buscar.</p>
+        </div>
+    </div>
     {% else %}
     <div class="overflow-x-auto">
         <table class="w-full text-sm">

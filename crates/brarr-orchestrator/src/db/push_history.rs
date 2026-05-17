@@ -208,6 +208,28 @@ pub async fn recent(pool: &Pool, limit: u32) -> Result<Vec<PushHistoryRow>, AppE
     rows.iter().map(row_to_push).collect()
 }
 
+/// Aggregate success counters for the dashboard. Returns
+/// `(total_attempts, successful_attempts)` across the full
+/// `push_history` table. Dashboard uses the ratio to render the
+/// "PUSHES OK" stat card.
+///
+/// # Errors
+///
+/// Returns [`AppError::Database`] on SQL failure.
+pub async fn success_rate(pool: &Pool) -> Result<(u64, u64), AppError> {
+    let row = sqlx::query(
+        "SELECT \
+            COUNT(*) AS total, \
+            SUM(CASE WHEN status = 'ok' THEN 1 ELSE 0 END) AS ok \
+         FROM push_history",
+    )
+    .fetch_one(pool)
+    .await?;
+    let total: i64 = row.try_get("total").unwrap_or(0);
+    let ok: i64 = row.try_get("ok").unwrap_or(0);
+    Ok((u64::try_from(total).unwrap_or(0), u64::try_from(ok).unwrap_or(0)))
+}
+
 /// All push attempts for a given decision, oldest first.
 ///
 /// # Errors
@@ -413,6 +435,7 @@ mod tests {
                 base_url: &url,
                 api_key: "k",
                 push_threshold: None,
+                profile_id: None,
                 enabled: None,
             },
         )

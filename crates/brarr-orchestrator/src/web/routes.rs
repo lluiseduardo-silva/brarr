@@ -239,9 +239,13 @@ async fn dashboard(State(state): State<AppState>) -> Result<Response, AppError> 
         .map(decision_view)
         .collect();
 
+    let (push_total, push_ok) = push_history::success_rate(pool).await?;
+
     let tmpl = DashboardTemplate {
         provider_count: provider_rows.len(),
         search_count: searches::recent(pool, 200).await?.len(),
+        push_total,
+        push_ok,
         recent_searches,
         recent_decisions,
     };
@@ -436,8 +440,38 @@ async fn providers_test(
 
 async fn arr_instances_index(State(state): State<AppState>) -> Result<Response, AppError> {
     let rows = arr_instances::list_all(state.pool()).await?;
-    let instances = rows.into_iter().map(arr_instance_view).collect();
-    html(&ArrInstancesTemplate { instances })
+    let profile_rows = quality_profiles::list_all(state.pool()).await?;
+    let profile_by_id: std::collections::HashMap<Uuid, &crate::db::quality_profiles::QualityProfileRow> =
+        profile_rows.iter().map(|p| (p.id, p)).collect();
+    let instances = rows
+        .iter()
+        .map(|r| arr_instance_view_with_profile(r, &profile_by_id))
+        .collect();
+    let profiles = profile_rows
+        .iter()
+        .map(|p| ProfileView {
+            id: p.id.to_string(),
+            name: p.name.clone(),
+            description: p.description.clone(),
+            push_threshold: p.push_threshold,
+            is_preset: p.is_preset,
+        })
+        .collect();
+    html(&ArrInstancesTemplate { instances, profiles })
+}
+
+fn arr_instance_view_with_profile(
+    row: &crate::db::arr_instances::ArrInstanceRow,
+    profiles: &std::collections::HashMap<Uuid, &crate::db::quality_profiles::QualityProfileRow>,
+) -> ArrInstanceView {
+    let mut v = arr_instance_view(row.clone());
+    if let Some(pid) = row.profile_id {
+        if let Some(p) = profiles.get(&pid) {
+            v.profile_name = Some(p.name.clone());
+            v.profile_threshold = Some(p.push_threshold);
+        }
+    }
+    v
 }
 
 #[derive(Debug, Deserialize)]
@@ -448,6 +482,8 @@ struct CreateArrInstanceForm {
     api_key: String,
     #[serde(default)]
     push_threshold: Option<String>,
+    #[serde(default)]
+    profile_id: Option<String>,
 }
 
 async fn arr_instances_create(
@@ -474,6 +510,15 @@ async fn arr_instances_create(
         .transpose()
         .map_err(|e| AppError::InvalidInput(format!("push_threshold must be 0..=1000: {e}")))?;
 
+    let profile_id = form
+        .profile_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(Uuid::parse_str)
+        .transpose()
+        .map_err(|e| AppError::InvalidInput(format!("profile_id deve ser uuid: {e}")))?;
+
     arr_instances::insert(
         state.pool(),
         arr_instances::NewArrInstance {
@@ -482,6 +527,7 @@ async fn arr_instances_create(
             base_url: &url,
             api_key: form.api_key.trim(),
             push_threshold,
+            profile_id,
             enabled: Some(true),
         },
     )
@@ -751,6 +797,8 @@ fn arr_instance_view(row: crate::db::arr_instances::ArrInstanceRow) -> ArrInstan
         kind: row.kind.label().to_string(),
         base_url: row.base_url.to_string(),
         push_threshold: row.push_threshold,
+        profile_name: None,
+        profile_threshold: None,
         enabled: row.enabled,
         created_at: row
             .created_at
@@ -1063,6 +1111,8 @@ async fn search_detail(
     let search = searches::get_by_id(state.pool(), uuid).await?;
     let decisions_rows = decisions::list_for_search(state.pool(), uuid).await?;
     let decisions = decisions_rows.into_iter().map(decision_view).collect();
+    let arr_rows = arr_instances::list_enabled(state.pool()).await?;
+    let arr_instances = arr_rows.into_iter().map(arr_instance_view).collect();
     let tmpl = SearchDetailTemplate {
         id: search.id.to_string(),
         tmdb_id: search
@@ -1070,6 +1120,7 @@ async fn search_detail(
             .map_or_else(|| "-".to_string(), |v| v.to_string()),
         submitted_at: format_ts(search.submitted_at),
         decisions,
+        arr_instances,
         failures: Vec::new(), // live failures aren't persisted today
     };
     html(&tmpl)
@@ -1102,6 +1153,11 @@ async fn providers_toggle(
 }
 
 fn decision_view(d: crate::db::decisions::DecisionRow) -> DecisionView {
+    let rule_chips: Vec<(String, String)> = d
+        .matched_rules
+        .iter()
+        .map(|name| (name.clone(), classify_rule_chip(name).to_string()))
+        .collect();
     let matched_rules = d.matched_rules.join(", ");
     DecisionView {
         id: d.id.to_string(),
@@ -1111,10 +1167,39 @@ fn decision_view(d: crate::db::decisions::DecisionRow) -> DecisionView {
         rejected: d.rejected,
         tags: d.tags.join(", "),
         matched_rules,
+        rule_chips,
         resolution: d.resolution,
         kind: d.kind,
         seeders: d.seeders,
         size_human: humanize_bytes(d.size_bytes),
+    }
+}
+
+/// Map a rule name to the chip colour kind the release card uses.
+/// Heuristic — looks for substrings in the rule's display name. We
+/// don't store per-rule metadata in the decision row (would balloon
+/// the schema for a UI hint), so name-matching is the lightest
+/// approach. Unknown rules fall through to `neutral`.
+fn classify_rule_chip(name: &str) -> &'static str {
+    let lower = name.to_lowercase();
+    if lower.contains("pt")
+        || lower.contains("portug")
+        || lower.contains("legenda")
+        || lower.contains("dublag")
+    {
+        "pt"
+    } else if lower.contains("resol")
+        || lower.contains("1080")
+        || lower.contains("2160")
+        || lower.contains("720")
+        || lower.contains("hdr")
+        || lower.contains("4k")
+    {
+        "accent"
+    } else if lower.contains("seed") || lower.contains("idade") || lower.contains("age") {
+        "warning"
+    } else {
+        "neutral"
     }
 }
 

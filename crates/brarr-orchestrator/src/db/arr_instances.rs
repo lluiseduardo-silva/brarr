@@ -27,10 +27,15 @@ pub struct ArrInstanceRow {
     pub base_url: Url,
     /// API key for the *arr's `X-Api-Key` header.
     pub api_key: String,
-    /// Minimum [`brarr_core::DecisionScore`] required to auto-push.
-    /// Below this score the release is persisted as a decision but
-    /// never pushed.
+    /// Minimum [`brarr_core::DecisionScore`] required to auto-push
+    /// when no quality profile is attached. Profile, when present,
+    /// supersedes this value. Below the resolved threshold the
+    /// release is persisted as a decision but never pushed.
     pub push_threshold: u32,
+    /// Attached quality profile, if any. `None` falls back to
+    /// `push_threshold` above. Resolved by `effective_threshold`
+    /// in the push pipeline.
+    pub profile_id: Option<Uuid>,
     /// `false` short-circuits push without deleting the row — useful
     /// for "drain mode" where the operator wants to silence one *arr
     /// without losing its config.
@@ -65,9 +70,12 @@ pub struct NewArrInstance<'a> {
     pub base_url: &'a Url,
     /// API key.
     pub api_key: &'a str,
-    /// Push threshold (0..=1000). Defaults to 700 in the DB layer
-    /// when `None`.
+    /// Push threshold (0..=1000). Defaults to 150 when `None`.
+    /// Ignored at push time when `profile_id` is set.
     pub push_threshold: Option<u32>,
+    /// Optional quality-profile attachment. When set, the profile's
+    /// threshold wins over `push_threshold` above.
+    pub profile_id: Option<Uuid>,
     /// Enabled flag. Defaults to `true` when `None`.
     pub enabled: Option<bool>,
 }
@@ -100,8 +108,8 @@ pub async fn insert(pool: &Pool, new: NewArrInstance<'_>) -> Result<ArrInstanceR
     let id = Uuid::new_v4();
     let now = OffsetDateTime::now_utc();
     sqlx::query(
-        "INSERT INTO arr_instances (id, name, kind, base_url, api_key, push_threshold, enabled, created_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO arr_instances (id, name, kind, base_url, api_key, push_threshold, profile_id, enabled, created_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(id.to_string())
     .bind(new.name)
@@ -109,6 +117,7 @@ pub async fn insert(pool: &Pool, new: NewArrInstance<'_>) -> Result<ArrInstanceR
     .bind(new.base_url.as_str())
     .bind(new.api_key)
     .bind(i64::from(threshold))
+    .bind(new.profile_id.map(|u| u.to_string()))
     .bind(i64::from(u8::from(enabled)))
     .bind(now.unix_timestamp())
     .execute(pool)
@@ -120,6 +129,7 @@ pub async fn insert(pool: &Pool, new: NewArrInstance<'_>) -> Result<ArrInstanceR
         base_url: new.base_url.clone(),
         api_key: new.api_key.to_string(),
         push_threshold: threshold,
+        profile_id: new.profile_id,
         enabled,
         created_at: now,
     })
@@ -132,7 +142,7 @@ pub async fn insert(pool: &Pool, new: NewArrInstance<'_>) -> Result<ArrInstanceR
 /// Returns [`AppError::Database`] on SQL failure.
 pub async fn list_all(pool: &Pool) -> Result<Vec<ArrInstanceRow>, AppError> {
     let rows = sqlx::query(
-        "SELECT id, name, kind, base_url, api_key, push_threshold, enabled, created_at \
+        "SELECT id, name, kind, base_url, api_key, push_threshold, profile_id, enabled, created_at \
          FROM arr_instances ORDER BY name ASC",
     )
     .fetch_all(pool)
@@ -148,7 +158,7 @@ pub async fn list_all(pool: &Pool) -> Result<Vec<ArrInstanceRow>, AppError> {
 /// Returns [`AppError::Database`] on SQL failure.
 pub async fn list_enabled(pool: &Pool) -> Result<Vec<ArrInstanceRow>, AppError> {
     let rows = sqlx::query(
-        "SELECT id, name, kind, base_url, api_key, push_threshold, enabled, created_at \
+        "SELECT id, name, kind, base_url, api_key, push_threshold, profile_id, enabled, created_at \
          FROM arr_instances WHERE enabled = 1 ORDER BY name ASC",
     )
     .fetch_all(pool)
@@ -163,7 +173,7 @@ pub async fn list_enabled(pool: &Pool) -> Result<Vec<ArrInstanceRow>, AppError> 
 /// Returns [`AppError::NotFound`] if no row matches.
 pub async fn get_by_id(pool: &Pool, id: Uuid) -> Result<ArrInstanceRow, AppError> {
     let row_opt = sqlx::query(
-        "SELECT id, name, kind, base_url, api_key, push_threshold, enabled, created_at \
+        "SELECT id, name, kind, base_url, api_key, push_threshold, profile_id, enabled, created_at \
          FROM arr_instances WHERE id = ?",
     )
     .bind(id.to_string())
@@ -236,6 +246,12 @@ fn row_to_instance(row: &SqliteRow) -> Result<ArrInstanceRow, AppError> {
     })?;
     let threshold_i64: i64 = row.try_get("push_threshold")?;
     let push_threshold = u32::try_from(threshold_i64).unwrap_or(0);
+    let profile_id_str: Option<String> = row.try_get("profile_id")?;
+    let profile_id = profile_id_str
+        .as_deref()
+        .map(Uuid::parse_str)
+        .transpose()
+        .map_err(|e| AppError::InvalidInput(format!("invalid uuid in arr_instances.profile_id: {e}")))?;
     let enabled_i64: i64 = row.try_get("enabled")?;
     let created_unix: i64 = row.try_get("created_at")?;
     let created_at = OffsetDateTime::from_unix_timestamp(created_unix)
@@ -247,9 +263,53 @@ fn row_to_instance(row: &SqliteRow) -> Result<ArrInstanceRow, AppError> {
         base_url,
         api_key: row.try_get("api_key")?,
         push_threshold,
+        profile_id,
         enabled: enabled_i64 != 0,
         created_at,
     })
+}
+
+/// Update which quality profile is attached to one instance. Pass
+/// `None` to detach (falls back to the row's own `push_threshold`
+/// integer).
+///
+/// # Errors
+///
+/// - [`AppError::NotFound`] when no row matches `id`.
+/// - [`AppError::Database`] on SQL failure.
+pub async fn update_profile_id(
+    pool: &Pool,
+    id: Uuid,
+    profile_id: Option<Uuid>,
+) -> Result<ArrInstanceRow, AppError> {
+    let res = sqlx::query("UPDATE arr_instances SET profile_id = ? WHERE id = ?")
+        .bind(profile_id.map(|u| u.to_string()))
+        .bind(id.to_string())
+        .execute(pool)
+        .await?;
+    if res.rows_affected() == 0 {
+        return Err(AppError::NotFound(format!("arr_instance {id}")));
+    }
+    get_by_id(pool, id).await
+}
+
+/// Resolve the effective push threshold for one *arr instance —
+/// reads the attached profile's threshold when set, otherwise falls
+/// back to the row's `push_threshold` integer.
+///
+/// # Errors
+///
+/// - [`AppError::NotFound`] when `profile_id` points at a deleted
+///   profile (shouldn't happen in practice: the FK is
+///   `ON DELETE SET NULL`).
+/// - [`AppError::Database`] on SQL failure.
+pub async fn effective_threshold(pool: &Pool, row: &ArrInstanceRow) -> Result<u32, AppError> {
+    if let Some(pid) = row.profile_id {
+        let p = crate::db::quality_profiles::get_by_id(pool, pid).await?;
+        Ok(p.push_threshold)
+    } else {
+        Ok(row.push_threshold)
+    }
 }
 
 #[cfg(test)]
@@ -266,6 +326,7 @@ mod tests {
             base_url: base,
             api_key: key,
             push_threshold: None,
+            profile_id: None,
             enabled: None,
         }
     }

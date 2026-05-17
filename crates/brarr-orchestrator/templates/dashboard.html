@@ -27,7 +27,7 @@
 {# Stat cards. Only the metrics we already compute server-side render
    with a real value; the rest are placeholders pending instrumentation
    (push success rate, week-over-week delta, sparkline buckets). #}
-<div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
     <div class="card-hairline bg-bg-surface border border-border-default rounded-xl p-5">
         <div class="flex items-center justify-between mb-2">
             <span class="text-xs font-medium uppercase tracking-[0.06em] text-fg-muted">Providers configurados</span>
@@ -59,6 +59,33 @@
         </div>
         <p class="brand-gradient-text font-semibold text-[36px] leading-10 -tracking-[0.02em]">{{ recent_decisions.len() }}</p>
         <p class="text-xs text-fg-muted mt-1">Mais recentes (todas as buscas)</p>
+    </div>
+
+    {# Push success rate. Renders "—" + `denominador 0` copy when
+       no push has ever happened, so the empty install doesn't show
+       a misleading "0%" or "NaN%". Trend icon stays green only when
+       rate ≥ 80%; below that the stat needs attention so the icon
+       turns danger. #}
+    <div class="card-hairline bg-bg-surface border border-border-default rounded-xl p-5">
+        <div class="flex items-center justify-between mb-2">
+            <span class="text-xs font-medium uppercase tracking-[0.06em] text-fg-muted">Push success rate</span>
+            {% if push_total > 0 && push_ok * 100 / push_total >= 80 %}
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="text-success-soft-fg">
+                <path d="M3 17l6-6 4 4 8-8M14 7h7v7"/>
+            </svg>
+            {% else %}
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="text-danger-soft-fg">
+                <path d="M3 7l6 6 4-4 8 8M14 17h7v-7"/>
+            </svg>
+            {% endif %}
+        </div>
+        {% if push_total == 0 %}
+        <p class="brand-gradient-text font-semibold text-[36px] leading-10 -tracking-[0.02em]">—</p>
+        <p class="text-xs text-fg-muted mt-1">Nenhum push registrado ainda</p>
+        {% else %}
+        <p class="brand-gradient-text font-semibold text-[36px] leading-10 -tracking-[0.02em]">{{ push_ok * 100 / push_total }}%</p>
+        <p class="text-xs text-fg-muted mt-1">{{ push_ok }} / {{ push_total }} tentativas</p>
+        {% endif %}
     </div>
 </div>
 

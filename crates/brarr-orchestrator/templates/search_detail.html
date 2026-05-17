@@ -67,72 +67,27 @@
 {% endif %}
 
 {% if decisions.is_empty() %}
-<div class="card-hairline bg-bg-surface border border-border-default rounded-xl px-5 py-10 text-center">
-    <p class="text-fg-muted italic">Nenhum release encontrado para esta busca.</p>
+<div class="card-hairline bg-bg-surface border border-border-default rounded-xl px-6 py-16 flex flex-col items-center text-center gap-4">
+    <div class="w-16 h-16 rounded-full bg-info-soft flex items-center justify-center text-info-soft-fg">
+        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>
+        </svg>
+    </div>
+    <div>
+        <h2 class="text-lg font-semibold text-fg-primary mb-1">Nenhum release encontrado</h2>
+        <p class="text-sm text-fg-secondary max-w-md">
+            Os providers não retornaram resultados pra essa busca. Verifique se o título está cadastrado nos trackers ou tente outro id (TMDb / IMDb / TVDB).
+        </p>
+    </div>
+    <a href="/releases" class="px-5 h-11 inline-flex items-center gap-2 rounded-lg bg-bg-canvas border border-border-strong text-fg-primary text-sm font-medium">Voltar pra releases</a>
 </div>
 {% else %}
-<div class="card-hairline bg-bg-surface border border-border-default rounded-xl overflow-hidden">
-    <div class="overflow-x-auto">
-        <table class="w-full text-sm">
-            <thead class="bg-bg-muted">
-                <tr class="text-left">
-                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Score</th>
-                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Provider</th>
-                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Release</th>
-                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Qualidade</th>
-                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Tamanho</th>
-                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Seeders</th>
-                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Regras</th>
-                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Status</th>
-                </tr>
-            </thead>
-            <tbody>
-            {% for d in decisions %}
-                <tr class="border-t border-border-default {% if d.rejected %}bg-danger-soft{% endif %}">
-                    <td class="px-4 py-3 w-[140px]">
-                        <p class="font-mono font-semibold text-base text-fg-primary leading-none">
-                            {{ d.score }}<span class="text-[10px] text-fg-muted font-normal">/1000</span>
-                        </p>
-                        <div class="mt-1.5 h-1 w-[110px] rounded-full bg-bg-muted overflow-hidden">
-                            <div class="brand-gradient h-full" style="width: {{ d.score / 10 }}%;"></div>
-                        </div>
-                    </td>
-
-                    <td class="px-4 py-3"><span class="font-medium text-fg-primary">{{ d.provider_name }}</span></td>
-
-                    <td class="px-4 py-3 max-w-[420px]">
-                        <p class="text-sm font-medium text-fg-primary truncate">{{ d.release_name }}</p>
-                        {% if !d.tags.is_empty() %}
-                        <p class="text-[10px] text-fg-muted font-mono mt-0.5 truncate" title="{{ d.tags }}">{{ d.tags }}</p>
-                        {% endif %}
-                    </td>
-
-                    <td class="px-4 py-3 font-mono text-sm text-fg-primary">{{ d.resolution }}</td>
-                    <td class="px-4 py-3 font-mono text-xs text-fg-secondary">{{ d.size_human }}</td>
-                    <td class="px-4 py-3 font-mono text-sm text-fg-secondary">{{ d.seeders }}</td>
-
-                    <td class="px-4 py-3 text-xs text-fg-secondary max-w-[280px]">
-                        <span class="truncate block" title="{{ d.matched_rules }}">{{ d.matched_rules }}</span>
-                    </td>
-
-                    <td class="px-4 py-3">
-                        {% if d.rejected %}
-                        <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-danger-soft text-danger-soft-fg border border-danger-solid">
-                            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
-                            rejeitado
-                        </span>
-                        {% else %}
-                        <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-success-soft text-success-soft-fg border border-success-solid">
-                            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5L20 7"/></svg>
-                            mantido
-                        </span>
-                        {% endif %}
-                    </td>
-                </tr>
-            {% endfor %}
-            </tbody>
-        </table>
-    </div>
+{# Card grid — shares the release_card partial with releases.html so
+   visual style stays identical across both pages. #}
+<div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+{% for d in decisions %}
+    {% include "partials/release_card.html" %}
+{% endfor %}
 </div>
 {% endif %}
 
