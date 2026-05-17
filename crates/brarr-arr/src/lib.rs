@@ -221,6 +221,77 @@ pub struct WantedMovie {
     pub has_file: bool,
 }
 
+/// One wanted-missing episode row from Sonarr `/api/v3/wanted/missing`.
+/// Brarr's poller iterates this to drive per-episode TV searches.
+///
+/// The endpoint paginates by default (`pageSize=10`); brarr uses
+/// `pageSize=200` to keep the loop short on libraries with thousands
+/// of missing episodes.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WantedEpisode {
+    /// Sonarr-side episode id (debug + dedup).
+    pub id: u64,
+    /// Episode title (logging only — brarr searches by tvdb+season+ep).
+    pub title: String,
+    /// Season number (1-based per Sonarr convention).
+    pub season_number: u16,
+    /// Episode number within the season.
+    pub episode_number: u16,
+    /// Whether Sonarr wants this episode grabbed.
+    #[serde(default)]
+    pub monitored: bool,
+    /// `true` if Sonarr already has a file. Always `false` on
+    /// `/wanted/missing` rows; the field stays here for symmetry with
+    /// [`WantedMovie`] and to defend against future Sonarr versions
+    /// shifting the endpoint semantics.
+    #[serde(default)]
+    pub has_file: bool,
+    /// Nested series data — the only place the `tvdbId` brarr needs
+    /// surfaces on the missing endpoint.
+    pub series: WantedEpisodeSeries,
+}
+
+/// Minimal series projection embedded inside [`WantedEpisode`].
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WantedEpisodeSeries {
+    /// Sonarr-side series id.
+    pub id: u64,
+    /// Series title (logging).
+    pub title: String,
+    /// `TVDB` id — required for the search axis. `0` means "not
+    /// linked" (skip).
+    #[serde(default)]
+    pub tvdb_id: u32,
+    /// Whether Sonarr is monitoring this series overall. Episode
+    /// `monitored` can be `true` while the series-level is `false`
+    /// when the user toggled individual episodes; brarr poller respects
+    /// the episode-level flag.
+    #[serde(default)]
+    pub monitored: bool,
+}
+
+/// Sonarr's pagination envelope around any `records:` endpoint.
+/// Surfaced for [`ArrClient::wanted_episodes`] only.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WantedEpisodesPage {
+    /// 1-based page index Sonarr returned for this call.
+    #[serde(default)]
+    pub page: u32,
+    /// Echo of the requested `pageSize`.
+    #[serde(default)]
+    pub page_size: u32,
+    /// Total rows that match the query across all pages — drives the
+    /// stop condition in [`ArrClient::wanted_episodes`].
+    #[serde(default)]
+    pub total_records: u32,
+    /// Episode rows for this page.
+    #[serde(default)]
+    pub records: Vec<WantedEpisode>,
+}
+
 /// HTTP client for one *arr instance. Cheap to clone (wraps a shared
 /// `reqwest::Client` Arc internally). One instance per *arr in the
 /// orchestrator pool.
@@ -383,6 +454,90 @@ impl ArrClient {
             kind: self.instance.kind,
             source,
         })
+    }
+
+    /// `GET /api/v3/wanted/missing?page=N&pageSize=200&sortKey=airDateUtc` —
+    /// walk every page until the total is consumed and return the
+    /// flattened list. Brarr's poller filters to
+    /// `monitored && tvdb_id > 0` to drive per-episode TV searches.
+    ///
+    /// Only meaningful for [`ArrKind::Sonarr`]. Calling against Radarr
+    /// returns an [`ArrError::Http`] (404).
+    ///
+    /// # Errors
+    ///
+    /// - [`ArrError::Transport`] on network failure.
+    /// - [`ArrError::Http`] on non-2xx.
+    /// - [`ArrError::Decode`] if a page's JSON doesn't shape like
+    ///   [`WantedEpisodesPage`].
+    pub async fn wanted_episodes(&self) -> Result<Vec<WantedEpisode>, ArrError> {
+        const PAGE_SIZE: u32 = 200;
+        let mut all: Vec<WantedEpisode> = Vec::new();
+        let mut page: u32 = 1;
+        loop {
+            let mut url = self.endpoint("wanted/missing")?;
+            {
+                let mut qp = url.query_pairs_mut();
+                qp.append_pair("page", &page.to_string());
+                qp.append_pair("pageSize", &PAGE_SIZE.to_string());
+                qp.append_pair("sortKey", "airDateUtc");
+                qp.append_pair("sortDirection", "descending");
+            }
+            debug!(
+                target: "brarr_arr",
+                kind = self.instance.kind.label(),
+                name = %self.instance.name,
+                page,
+                url = %url,
+                "fetch wanted episodes"
+            );
+            let resp = self
+                .http
+                .get(url)
+                .header("X-Api-Key", &self.instance.api_key)
+                .send()
+                .await
+                .map_err(|source| ArrError::Transport {
+                    kind: self.instance.kind,
+                    source,
+                })?;
+            let status = resp.status();
+            let body = resp.text().await.map_err(|source| ArrError::Transport {
+                kind: self.instance.kind,
+                source,
+            })?;
+            if !status.is_success() {
+                warn!(
+                    target: "brarr_arr",
+                    kind = self.instance.kind.label(),
+                    status = status.as_u16(),
+                    "wanted_episodes returned non-2xx"
+                );
+                return Err(ArrError::Http {
+                    kind: self.instance.kind,
+                    status: status.as_u16(),
+                    body: truncate_body(&body),
+                });
+            }
+            let parsed: WantedEpisodesPage =
+                serde_json::from_str(&body).map_err(|source| ArrError::Decode {
+                    kind: self.instance.kind,
+                    source,
+                })?;
+            let total = parsed.total_records;
+            let got_records = parsed.records.len();
+            all.extend(parsed.records);
+            // Stop when we've seen everything or the page returned a
+            // partial batch (defensive: avoids infinite loops if the
+            // server lies about totalRecords).
+            if u32::try_from(all.len()).unwrap_or(u32::MAX) >= total
+                || got_records < PAGE_SIZE as usize
+            {
+                break;
+            }
+            page += 1;
+        }
+        Ok(all)
     }
 
     /// `POST /api/v3/release/push` — inject a release for *arr to

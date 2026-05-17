@@ -203,6 +203,73 @@ async fn monitored_movies_propagates_http_404() {
 }
 
 #[tokio::test]
+async fn wanted_episodes_single_page_returns_parsed_list() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v3/wanted/missing"))
+        .and(header("X-Api-Key", API_KEY))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "page": 1,
+            "pageSize": 200,
+            "totalRecords": 2,
+            "records": [
+                {
+                    "id": 1,
+                    "title": "Pilot",
+                    "seasonNumber": 1,
+                    "episodeNumber": 1,
+                    "monitored": true,
+                    "hasFile": false,
+                    "series": {
+                        "id": 10,
+                        "title": "Some Show",
+                        "tvdbId": 12345,
+                        "monitored": true
+                    }
+                },
+                {
+                    "id": 2,
+                    "title": "Two",
+                    "seasonNumber": 1,
+                    "episodeNumber": 2,
+                    "monitored": true,
+                    "hasFile": false,
+                    "series": {
+                        "id": 10,
+                        "title": "Some Show",
+                        "tvdbId": 12345,
+                        "monitored": true
+                    }
+                }
+            ]
+        })))
+        .mount(&server)
+        .await;
+    let c = client(&server, ArrKind::Sonarr);
+    let eps = c.wanted_episodes().await.unwrap();
+    assert_eq!(eps.len(), 2);
+    assert_eq!(eps[0].series.tvdb_id, 12345);
+    assert_eq!(eps[0].season_number, 1);
+    assert_eq!(eps[0].episode_number, 1);
+}
+
+#[tokio::test]
+async fn wanted_episodes_404_surfaces_as_http_error() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v3/wanted/missing"))
+        .respond_with(ResponseTemplate::new(404).set_body_string("not found"))
+        .mount(&server)
+        .await;
+    let c = client(&server, ArrKind::Sonarr);
+    let err = c.wanted_episodes().await.unwrap_err();
+    match err {
+        ArrError::Http { status, .. } => assert_eq!(status, 404),
+        other => panic!("expected Http 404, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn push_release_supports_usenet_protocol_value() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))

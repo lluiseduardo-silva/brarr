@@ -1,20 +1,19 @@
 //! Scheduled poller that closes the autobrr-style loop.
 //!
 //! Every `BRARR_ARR_POLL_INTERVAL_SECS` (default 1800 = 30 min), brarr:
-//!   1. Walks every enabled *arr instance via [`ArrClient::monitored_movies`].
-//!   2. For each monitored, file-less movie with a known TMDb / IMDb id,
-//!      runs the brarr search pipeline as if a user submitted it.
+//!   1. Walks every enabled *arr instance — Radarr via
+//!      [`ArrClient::monitored_movies`] (movies on disk + monitored),
+//!      Sonarr via [`ArrClient::wanted_episodes`] (`/wanted/missing`).
+//!   2. For each wanted row, builds [`SearchKeys`] from its external
+//!      ids (TMDb/IMDb for movies; TVDB+season+episode for episodes)
+//!      and runs the brarr search pipeline as if a user submitted it.
 //!   3. Sorts the resulting kept decisions by score descending.
 //!   4. For the top scorer that exceeds the *arr's `push_threshold`
 //!      AND hasn't been pushed to this *arr already, calls
 //!      [`crate::push::push_decision`] — recording the attempt in
 //!      `push_history` regardless of outcome.
-//!   5. Moves to the next movie. One push per movie per poll cycle so
-//!      brarr never spams *arr with competing grabs for the same title.
-//!
-//! Sonarr support is deferred — TV-search axis isn't wired through
-//! the search pipeline yet (CHECKPOINT bug #5). The poller logs and
-//! skips Sonarr rows.
+//!   5. Moves to the next row. One push per row per poll cycle so
+//!      brarr never spams *arr with competing grabs for the same item.
 //!
 //! ## Manual trigger
 //!
@@ -25,8 +24,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use brarr_arr::{ArrClient, ArrKind, WantedMovie};
-use brarr_core::{ImdbId, TmdbId};
+use brarr_arr::{ArrClient, ArrKind, WantedEpisode, WantedMovie};
+use brarr_core::{ImdbId, TmdbId, TvdbId};
 use tokio::task::JoinHandle;
 use tokio::time;
 use tracing::{debug, info, warn};
@@ -137,17 +136,14 @@ pub async fn run_once_for_instance(
     state: &AppState,
     arr: &ArrInstanceRow,
 ) -> Result<PollSummary, AppError> {
-    let mut summary = PollSummary::default();
-    if arr.kind != ArrKind::Radarr {
-        warn!(
-            target: "brarr_orchestrator::poll",
-            arr_name = %arr.name,
-            kind = arr.kind.label(),
-            "Sonarr poll skipped — TV search axis not implemented"
-        );
-        return Ok(summary);
+    match arr.kind {
+        ArrKind::Radarr => run_once_radarr(state, arr).await,
+        ArrKind::Sonarr => run_once_sonarr(state, arr).await,
     }
+}
 
+async fn run_once_radarr(state: &AppState, arr: &ArrInstanceRow) -> Result<PollSummary, AppError> {
+    let mut summary = PollSummary::default();
     let client = match ArrClient::new(arr.to_arr_instance()) {
         Ok(c) => c,
         Err(e) => {
@@ -173,12 +169,7 @@ pub async fn run_once_for_instance(
         }
     };
 
-    let base_url = crate::push::env_public_base_url().unwrap_or_else(|| {
-        // The scheduled poller has no request to derive from — fall
-        // back to localhost. *arr running on the same host will work;
-        // a distributed setup needs BRARR_PUBLIC_URL set.
-        "http://127.0.0.1:3000".to_string()
-    });
+    let base_url = poll_base_url();
 
     let mut iter = movies.into_iter();
     while let Some(movie) = iter.next() {
@@ -240,10 +231,129 @@ pub async fn run_once_for_instance(
     Ok(summary)
 }
 
+/// Sonarr poll: walk `/wanted/missing`, search per episode by
+/// tvdb+season+episode, push the top decision crossing the threshold.
+/// Same throttling/dedup story as the Radarr path.
+async fn run_once_sonarr(state: &AppState, arr: &ArrInstanceRow) -> Result<PollSummary, AppError> {
+    let mut summary = PollSummary::default();
+    let client = match ArrClient::new(arr.to_arr_instance()) {
+        Ok(c) => c,
+        Err(e) => {
+            warn!(
+                target: "brarr_orchestrator::poll",
+                arr_name = %arr.name,
+                error = %e,
+                "failed to build ArrClient"
+            );
+            return Ok(summary);
+        }
+    };
+    let episodes = match client.wanted_episodes().await {
+        Ok(e) => e,
+        Err(e) => {
+            warn!(
+                target: "brarr_orchestrator::poll",
+                arr_name = %arr.name,
+                error = %e,
+                "fetch wanted episodes failed"
+            );
+            return Ok(summary);
+        }
+    };
+    let base_url = poll_base_url();
+
+    let mut iter = episodes.into_iter();
+    while let Some(ep) = iter.next() {
+        summary.considered += 1;
+        if !is_pollable_episode(&ep) {
+            continue;
+        }
+        let Some(keys) = build_keys_for_episode(&ep) else {
+            continue;
+        };
+        summary.searched += 1;
+        match run_search(state, keys).await {
+            Ok(outcome) => {
+                if let Some(decision) = outcome
+                    .decisions
+                    .iter()
+                    .find(|d| d.score >= arr.push_threshold)
+                {
+                    if push_history::already_pushed(state.pool(), decision.id, arr.id).await? {
+                        debug!(
+                            target: "brarr_orchestrator::poll",
+                            decision_id = %decision.id,
+                            arr_name = %arr.name,
+                            "already pushed, skipping"
+                        );
+                    } else {
+                        match push_decision(state, decision, arr, &base_url).await {
+                            Ok(row) => {
+                                if matches!(row.status, push_history::PushStatus::Ok) {
+                                    summary.pushed += 1;
+                                }
+                            }
+                            Err(e) => warn!(
+                                target: "brarr_orchestrator::poll",
+                                decision_id = %decision.id,
+                                error = %e,
+                                "push failed at DB layer"
+                            ),
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                summary.search_errors += 1;
+                warn!(
+                    target: "brarr_orchestrator::poll",
+                    series = %ep.series.title,
+                    season = ep.season_number,
+                    episode = ep.episode_number,
+                    error = %e,
+                    "search failed"
+                );
+            }
+        }
+        if iter.len() > 0 {
+            time::sleep(PER_MOVIE_DELAY).await;
+        }
+    }
+    Ok(summary)
+}
+
+/// Externally-reachable origin used to build push proxy URLs. Same
+/// fallback as the request-path version in `crate::push`, but reads
+/// only the env var since the poller has no incoming request.
+fn poll_base_url() -> String {
+    crate::push::env_public_base_url().unwrap_or_else(|| "http://127.0.0.1:3000".to_string())
+}
+
 /// `true` when this Radarr movie is something brarr should search
 /// for: user-monitored, not already on disk.
 fn is_pollable(m: &WantedMovie) -> bool {
     m.monitored && !m.has_file
+}
+
+/// `true` when this Sonarr episode is something brarr should search
+/// for: monitored at the episode level and not already grabbed.
+fn is_pollable_episode(e: &WantedEpisode) -> bool {
+    e.monitored && !e.has_file
+}
+
+/// Build [`SearchKeys`] for a Sonarr wanted episode. Returns `None`
+/// when the series isn't TVDB-linked (`tvdb_id == 0`); brarr's TV
+/// search is TVDB-only today.
+fn build_keys_for_episode(e: &WantedEpisode) -> Option<SearchKeys> {
+    if e.series.tvdb_id == 0 {
+        return None;
+    }
+    let tvdb = TvdbId::new(e.series.tvdb_id).ok()?;
+    Some(SearchKeys::from_tvdb(
+        tvdb,
+        Some(e.season_number),
+        Some(e.episode_number),
+    ))
 }
 
 /// Build [`SearchKeys`] from a Radarr movie row. Prefers IMDb when
@@ -348,6 +458,43 @@ mod tests {
     #[test]
     fn default_poll_interval_is_30_min() {
         assert_eq!(DEFAULT_POLL_INTERVAL.as_secs(), 1800);
+    }
+
+    fn ep(monitored: bool, has_file: bool, tvdb: u32, season: u16, episode: u16) -> WantedEpisode {
+        WantedEpisode {
+            id: 1,
+            title: "ep".into(),
+            season_number: season,
+            episode_number: episode,
+            monitored,
+            has_file,
+            series: brarr_arr::WantedEpisodeSeries {
+                id: 10,
+                title: "show".into(),
+                tvdb_id: tvdb,
+                monitored: true,
+            },
+        }
+    }
+
+    #[test]
+    fn is_pollable_episode_requires_monitored_and_no_file() {
+        assert!(is_pollable_episode(&ep(true, false, 12345, 1, 1)));
+        assert!(!is_pollable_episode(&ep(false, false, 12345, 1, 1)));
+        assert!(!is_pollable_episode(&ep(true, true, 12345, 1, 1)));
+    }
+
+    #[test]
+    fn build_keys_for_episode_carries_season_and_ep() {
+        let keys = build_keys_for_episode(&ep(true, false, 12345, 2, 5)).unwrap();
+        assert_eq!(keys.tvdb.unwrap().get(), 12345);
+        assert_eq!(keys.season, Some(2));
+        assert_eq!(keys.episode, Some(5));
+    }
+
+    #[test]
+    fn build_keys_for_episode_returns_none_when_tvdb_zero() {
+        assert!(build_keys_for_episode(&ep(true, false, 0, 1, 1)).is_none());
     }
 
     #[test]
