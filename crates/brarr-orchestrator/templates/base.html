@@ -4,27 +4,100 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <title>{% block title %}brarr{% endblock %}</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://unpkg.com/htmx.org@2.0.4"></script>
-    <style>
-        body { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
-        .badge { padding: 0.125rem 0.5rem; border-radius: 9999px; font-size: 0.75rem; }
-    </style>
+
+    {# Apply the saved theme synchronously, before paint, so users
+       don't see a flash of the wrong palette on load. #}
+    <script>
+        (function () {
+            var pairs = document.cookie ? document.cookie.split('; ') : [];
+            for (var i = 0; i < pairs.length; i++) {
+                var idx = pairs[i].indexOf('=');
+                if (idx > -1 && pairs[i].slice(0, idx) === 'brarr_theme') {
+                    var v = decodeURIComponent(pairs[i].slice(idx + 1));
+                    if (v === 'light' || v === 'dark') {
+                        document.documentElement.setAttribute('data-theme', v);
+                    }
+                    break;
+                }
+            }
+        })();
+    </script>
+
+    {# Inter + JetBrains Mono via Google Fonts. The orchestrator runs in
+       a homelab context where outbound HTTPS is fine; if you want a
+       self-hosted setup, drop the woff2 files under static/fonts/ and
+       swap this link for `@font-face` declarations in input.css. #}
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap">
+
+    {# Compiled Tailwind v4 bundle. See scripts/build-css.{sh,ps1}. #}
+    <link rel="stylesheet" href="/static/app.css">
+
+    {# HTMX — pinned to the same major as the previous CDN reference. #}
+    <script src="https://unpkg.com/htmx.org@2.0.4" defer></script>
+
+    {# Theme toggle + nav active-link helpers. `defer` ensures DOM is
+       parsed before they run; both register handlers on DOMContentLoaded. #}
+    <script src="/static/theme.js" defer></script>
+    <script src="/static/nav.js" defer></script>
 </head>
-<body class="bg-slate-50 text-slate-900 min-h-screen">
-    <nav class="bg-slate-900 text-slate-100">
-        <div class="max-w-6xl mx-auto px-4 py-3 flex items-center gap-6">
-            <a href="/" class="font-bold text-lg">brarr</a>
-            <a href="/" class="hover:text-amber-300">Dashboard</a>
-            <a href="/providers" class="hover:text-amber-300">Providers</a>
-            <a href="/arr-instances" class="hover:text-amber-300">*arr</a>
-            <a href="/releases" class="hover:text-amber-300">Releases</a>
-            <a href="/pushes" class="hover:text-amber-300">Pushes</a>
-            <span class="ml-auto text-xs text-slate-400">orchestrator</span>
+<body class="bg-bg-canvas text-fg-primary min-h-screen flex flex-col">
+
+    <nav class="bg-bg-surface border-b border-border-default">
+        <div class="max-w-7xl mx-auto px-8 h-16 flex items-center justify-between gap-8">
+            {# Logo lockup + primary links. #}
+            <div class="flex items-center gap-10">
+                <a href="/" class="flex items-center gap-2.5 text-fg-primary">
+                    {# Funnel mark — Figma direction A. #}
+                    <svg width="24" height="24" viewBox="0 0 80 80" fill="none" xmlns="http://www.w3.org/2000/svg" class="text-accent-solid">
+                        <path d="M10 18 L40 40 L10 62" stroke="currentColor" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+                        <path d="M28 22 L52 40 L28 58" stroke="currentColor" stroke-width="6" stroke-linecap="round" stroke-linejoin="round" opacity="0.55"/>
+                        <circle cx="68" cy="40" r="6" fill="currentColor"/>
+                    </svg>
+                    <span class="font-semibold text-xl -tracking-[0.03em]">brarr</span>
+                </a>
+
+                <ul class="flex items-center gap-1">
+                    <li><a class="nav-link" data-section="dashboard"     href="/">Dashboard</a></li>
+                    <li><a class="nav-link" data-section="providers"    href="/providers">Providers</a></li>
+                    <li><a class="nav-link" data-section="arr-instances" href="/arr-instances">*arr</a></li>
+                    <li><a class="nav-link" data-section="profiles"     href="/profiles">Profiles</a></li>
+                    <li><a class="nav-link" data-section="releases"     href="/releases">Releases</a></li>
+                    <li><a class="nav-link" data-section="pushes"       href="/pushes">Pushes</a></li>
+                </ul>
+            </div>
+
+            <div class="flex items-center gap-2">
+                <button type="button"
+                        class="theme-toggle p-2 rounded-md bg-bg-muted text-fg-secondary hover:bg-bg-surface-raised hover:text-fg-primary"
+                        aria-label="Alternar tema claro/escuro"
+                        onclick="window.brarrTheme && window.brarrTheme.toggle()">
+                    <svg class="block dark:hidden" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <circle cx="12" cy="12" r="5"/>
+                        <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/>
+                    </svg>
+                    <svg class="hidden dark:block" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M21 12.79A9 9 0 1 1 11.21 3a7 7 0 0 0 9.79 9.79z"/>
+                    </svg>
+                </button>
+
+                <form action="/logout" method="post" class="contents">
+                    <button type="submit"
+                            class="flex items-center gap-1.5 px-3 py-2 rounded-md text-fg-secondary hover:text-fg-primary hover:bg-bg-muted text-sm font-medium">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4M16 17l5-5-5-5M21 12H9"/>
+                        </svg>
+                        Sair
+                    </button>
+                </form>
+            </div>
         </div>
     </nav>
-    <main class="max-w-6xl mx-auto px-4 py-6">
+
+    <main class="flex-1 max-w-7xl w-full mx-auto px-8 py-8">
         {% block content %}{% endblock %}
     </main>
+
 </body>
 </html>

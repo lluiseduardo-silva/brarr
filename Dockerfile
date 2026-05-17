@@ -29,7 +29,45 @@
 #     brarr:latest
 
 # ------------------------------------------------------------------
-# Stage 1 — build the workspace in release mode.
+# Stage 1a — compile the Tailwind v4 bundle.
+#
+# Uses the upstream standalone binary (no Node), pinned by checksum
+# in the install script to keep CI reproducible. The output lands at
+# /css/app.css and is copied into the runtime image alongside the
+# other static assets.
+# ------------------------------------------------------------------
+ARG TAILWIND_VERSION=v4.1.16
+FROM debian:bookworm-slim AS css-builder
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
+
+ARG TARGETARCH
+WORKDIR /css
+
+# Pick the right Tailwind asset for the build platform. We support
+# x86_64 + arm64 hosts (covers GHA runners + Apple Silicon laptops).
+RUN set -eu; \
+    case "${TARGETARCH:-amd64}" in \
+      amd64) ASSET=tailwindcss-linux-x64 ;; \
+      arm64) ASSET=tailwindcss-linux-arm64 ;; \
+      *) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    curl --fail --location --silent --show-error \
+      --output /usr/local/bin/tailwindcss \
+      "https://github.com/tailwindlabs/tailwindcss/releases/download/${TAILWIND_VERSION}/${ASSET}"; \
+    chmod +x /usr/local/bin/tailwindcss
+
+# Only the inputs the compiler reads — keeps this layer's cache hot.
+COPY crates/brarr-orchestrator/styles/    /css/styles/
+COPY crates/brarr-orchestrator/templates/ /css/templates/
+COPY crates/brarr-orchestrator/src/       /css/src/
+
+RUN tailwindcss --input /css/styles/input.css --output /css/app.css --minify
+
+# ------------------------------------------------------------------
+# Stage 1b — build the workspace in release mode.
 # ------------------------------------------------------------------
 ARG RUST_VERSION=1.95
 FROM rust:${RUST_VERSION}-slim-bookworm AS builder
@@ -88,7 +126,10 @@ RUN groupadd --system --gid ${APP_UID} brarr \
     && chown -R brarr:brarr /data /plugins /static
 
 # Static assets the orchestrator's `nest_service("/static", ...)` mounts.
+# The CSS bundle comes from stage 1a (Tailwind compile); everything
+# else (JS, icons, future assets) is checked in to the repo.
 COPY --chown=brarr:brarr crates/brarr-orchestrator/static /static
+COPY --chown=brarr:brarr --from=css-builder /css/app.css /static/app.css
 
 # Binaries.
 COPY --from=builder /build/target/release/brarr-orchestrator /usr/local/bin/brarr-orchestrator

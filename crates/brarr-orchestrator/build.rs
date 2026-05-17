@@ -34,4 +34,24 @@ fn main() {
 
     println!("cargo:rerun-if-changed=proto/brarr.proto");
     println!("cargo:rerun-if-changed=build.rs");
+
+    // Tailwind v4 source + every template / Rust file it scans for
+    // utility classes. We don't run the CSS compile here (would force
+    // a Node-less toolchain on every contributor); instead we emit a
+    // warning if the bundled artifact is missing so the local dev
+    // notices on the very first run rather than at first HTTP hit.
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    println!("cargo:rerun-if-changed=styles/input.css");
+    println!("cargo:rerun-if-changed=templates");
+    println!("cargo:rerun-if-changed=static/theme.js");
+    println!("cargo:rerun-if-changed=static/nav.js");
+
+    let app_css = manifest.join("static").join("app.css");
+    if !app_css.exists() {
+        println!(
+            "cargo:warning=static/app.css missing — run scripts/build-css.{{sh,ps1}} \
+             after scripts/install-tailwind.{{sh,ps1}}. The orchestrator will \
+             still build, but the admin UI will render unstyled."
+        );
+    }
 }
