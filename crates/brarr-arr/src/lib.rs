@@ -392,17 +392,19 @@ impl ArrClient {
     /// the configured download client if the parse + library lookup
     /// succeed.
     ///
-    /// Returns `Ok(())` on a 2xx response. *arr will sometimes accept
-    /// the push but reject the grab at parse-time (e.g. "Unknown
-    /// series"); those don't fail this call — they show up in *arr's
-    /// activity log as "rejected" but the HTTP response is still 200.
+    /// Returns the **response body** verbatim (truncated to 1KiB) on
+    /// a 2xx response. *arr returns rejection reasons inside the JSON
+    /// body even when the HTTP status is 200 (e.g. "Unknown movie",
+    /// "Quality profile rejected"). Callers should persist the body
+    /// so operators can audit *why* an apparently-successful push
+    /// didn't trigger a download.
     ///
     /// # Errors
     ///
     /// - [`ArrError::Transport`] on network / TLS failure.
     /// - [`ArrError::Http`] on non-2xx status (400 means malformed
     ///   payload, 401 means bad apikey).
-    pub async fn push_release(&self, payload: &PushReleasePayload) -> Result<(), ArrError> {
+    pub async fn push_release(&self, payload: &PushReleasePayload) -> Result<String, ArrError> {
         let url = self.endpoint("release/push")?;
         debug!(
             target: "brarr_arr",
@@ -424,25 +426,37 @@ impl ArrClient {
                 source,
             })?;
         let status = resp.status();
-        if status.is_success() {
-            return Ok(());
-        }
         let body = resp
             .text()
             .await
             .unwrap_or_else(|_| String::from("<no body>"));
+        let truncated = truncate_body(&body);
+        if status.is_success() {
+            // *arr returns rejection reasons inside the 200 body. A
+            // non-empty rejections array means "I accepted the request
+            // but won't grab" — the operator needs the body to debug
+            // why. An empty array `[]` is the happy path.
+            debug!(
+                target: "brarr_arr",
+                kind = self.instance.kind.label(),
+                name = %self.instance.name,
+                body_excerpt = %truncated,
+                "push accepted"
+            );
+            return Ok(truncated);
+        }
         warn!(
             target: "brarr_arr",
             kind = self.instance.kind.label(),
             name = %self.instance.name,
             status = status.as_u16(),
-            body_excerpt = %truncate_body(&body),
+            body_excerpt = %truncated,
             "push rejected"
         );
         Err(ArrError::Http {
             kind: self.instance.kind,
             status: status.as_u16(),
-            body: truncate_body(&body),
+            body: truncated,
         })
     }
 }

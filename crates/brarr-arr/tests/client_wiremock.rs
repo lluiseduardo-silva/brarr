@@ -103,9 +103,11 @@ async fn push_release_sends_camelcase_body_with_apikey_header() {
         .await;
 
     let c = client(&server, ArrKind::Radarr);
-    c.push_release(&sample_push())
+    let body = c
+        .push_release(&sample_push())
         .await
         .expect("push should succeed");
+    assert!(body.contains("[]") || body.is_empty(), "body = {body}");
 }
 
 #[tokio::test]

@@ -56,6 +56,10 @@ pub type PushOutcome = PushHistoryRow;
 /// they're persisted into the history row and the function still
 /// returns `Ok`. Callers wanting to surface those to the operator
 /// should read the returned [`PushHistoryRow::status`].
+#[allow(
+    clippy::too_many_lines,
+    reason = "linear error-record-and-return path is clearer flat than split"
+)]
 pub async fn push_decision(
     state: &AppState,
     decision: &DecisionRow,
@@ -90,14 +94,25 @@ pub async fn push_decision(
     };
 
     match client.push_release(&payload).await {
-        Ok(()) => {
+        Ok(body) => {
+            // *arr returns the parsed release + rejection array even on
+            // 200. Non-empty `rejections` means "accepted the HTTP
+            // request but won't grab" (e.g. wrong title, quality
+            // mismatch). Persist the body verbatim so the operator can
+            // see *why* on `/pushes`.
             info!(
                 target: "brarr_orchestrator::push",
                 decision_id = %decision.id,
                 arr_id = %arr_instance.id,
                 arr_name = %arr_instance.name,
+                body_excerpt = %body.chars().take(120).collect::<String>(),
                 "push accepted"
             );
+            let body_opt = if body.is_empty() {
+                None
+            } else {
+                Some(body.as_str())
+            };
             push_history::insert(
                 state.pool(),
                 NewPushHistory {
@@ -107,7 +122,7 @@ pub async fn push_decision(
                     arr_kind: arr_instance.kind,
                     status: PushStatus::Ok,
                     http_status: Some(200),
-                    response_body: None,
+                    response_body: body_opt,
                 },
             )
             .await
