@@ -79,7 +79,9 @@
         {% for s in recent_searches %}
             <li class="flex items-center justify-between gap-3 px-5 py-3 {% if !loop.first %}border-t border-border-default{% endif %}">
                 <div class="flex items-center gap-3 min-w-0">
-                    <span class="font-mono text-xs text-fg-muted whitespace-nowrap">{{ s.submitted_at }}</span>
+                    <time class="font-mono text-xs text-fg-muted whitespace-nowrap"
+                          data-datetime="{{ s.submitted_at }}"
+                          data-datetime-style="short">{{ s.submitted_at }}</time>
                     <span class="font-mono text-[11px] px-2 py-0.5 rounded bg-bg-muted text-fg-secondary whitespace-nowrap">tmdb:{{ s.tmdb_id }}</span>
                     <span class="text-sm text-fg-primary font-medium whitespace-nowrap">{{ s.result_count }} resultados</span>
                 </div>

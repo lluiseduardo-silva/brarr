@@ -45,6 +45,8 @@ fn main() {
     println!("cargo:rerun-if-changed=templates");
     println!("cargo:rerun-if-changed=static/theme.js");
     println!("cargo:rerun-if-changed=static/nav.js");
+    println!("cargo:rerun-if-changed=static/modal.js");
+    println!("cargo:rerun-if-changed=static/datetime.js");
 
     let app_css = manifest.join("static").join("app.css");
     if !app_css.exists() {

@@ -58,7 +58,9 @@
                     <span class="px-2 py-0.5 rounded text-[11px] font-medium bg-bg-muted text-fg-secondary">
                         via {{ g.provider_name }}
                     </span>
-                    <span class="text-[11px] text-fg-muted font-mono ml-auto">{{ g.latest_at }}</span>
+                    <time class="text-[11px] text-fg-muted font-mono ml-auto"
+                          data-datetime="{{ g.latest_at }}"
+                          data-datetime-style="short">{{ g.latest_at }}</time>
                 </div>
             </div>
 
@@ -84,7 +86,9 @@
                 <tbody>
                 {% for p in g.attempts %}
                     <tr class="border-t border-border-default">
-                        <td class="px-4 py-2.5 font-mono text-xs text-fg-secondary whitespace-nowrap">{{ p.pushed_at }}</td>
+                        <td class="px-4 py-2.5 font-mono text-xs text-fg-secondary whitespace-nowrap">
+                            <time data-datetime="{{ p.pushed_at }}" data-datetime-style="long">{{ p.pushed_at }}</time>
+                        </td>
                         <td class="px-4 py-2.5">
                             {% if p.status == "ok" %}
                             <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-success-soft text-success-soft-fg border border-success-solid">

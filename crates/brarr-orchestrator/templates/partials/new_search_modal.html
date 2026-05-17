@@ -37,13 +37,17 @@
 
         <div class="h-px bg-border-default"></div>
 
-        {# Body — TMDb / IMDb inputs. We post to the same /searches
-           endpoint as the inline form; the redirect header still drives
-           navigation to the search-detail page. #}
+        {# Body — Filme (TMDb/IMDb) ou Série (TVDB + season/episode).
+           We post to the same /searches endpoint as the inline form;
+           the redirect header still drives navigation to the
+           search-detail page. The Série panel toggles open via the
+           native `<details>` element — zero JS, accessible by
+           default. #}
         <form hx-post="/searches"
               hx-swap="none"
               hx-disabled-elt="find button[type=submit]"
-              class="px-6 py-5 flex flex-col gap-4">
+              id="new-search-form"
+              class="px-6 py-5 flex flex-col gap-4 relative">
 
             <label class="block">
                 <span class="block mb-1.5 text-xs font-medium uppercase tracking-[0.06em] text-fg-muted">TMDB ID</span>
@@ -63,12 +67,42 @@
                        class="w-full font-mono px-3 h-11 rounded-lg bg-bg-canvas border border-border-strong text-base text-fg-primary placeholder:text-fg-muted focus:outline-none focus:border-accent-solid">
             </label>
 
+            {# Série collapsible — TVDB id + optional season/episode
+               filters. Closed by default so the dialog stays compact
+               for the common (movie) flow. #}
+            <details class="rounded-lg border border-border-default bg-bg-canvas">
+                <summary class="cursor-pointer px-3 py-2.5 text-xs font-medium uppercase tracking-[0.06em] text-fg-muted flex items-center justify-between">
+                    <span>Série (TVDB + temporada)</span>
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+                </summary>
+                <div class="px-3 pb-3 grid grid-cols-3 gap-2">
+                    <label class="col-span-3">
+                        <span class="block mb-1 text-[10px] font-medium uppercase tracking-[0.06em] text-fg-muted">TVDB ID</span>
+                        <input name="tvdb_id" type="number" min="1" placeholder="Ex.: 78804"
+                               class="w-full font-mono px-3 h-10 rounded-lg bg-bg-surface border border-border-strong text-sm text-fg-primary placeholder:text-fg-muted focus:outline-none focus:border-accent-solid">
+                    </label>
+                    <label>
+                        <span class="block mb-1 text-[10px] font-medium uppercase tracking-[0.06em] text-fg-muted">Temporada</span>
+                        <input name="season" type="number" min="1" placeholder="Ex.: 4"
+                               class="w-full font-mono px-3 h-10 rounded-lg bg-bg-surface border border-border-strong text-sm text-fg-primary placeholder:text-fg-muted focus:outline-none focus:border-accent-solid">
+                    </label>
+                    <label>
+                        <span class="block mb-1 text-[10px] font-medium uppercase tracking-[0.06em] text-fg-muted">Episódio</span>
+                        <input name="episode" type="number" min="1" placeholder="Ex.: 8"
+                               class="w-full font-mono px-3 h-10 rounded-lg bg-bg-surface border border-border-strong text-sm text-fg-primary placeholder:text-fg-muted focus:outline-none focus:border-accent-solid">
+                    </label>
+                    <p class="col-span-3 text-[10px] text-fg-muted leading-snug">
+                        TVDB exigido pra TV. Temporada / episódio são opcionais — sem eles o backend cai pro tv-search agregado.
+                    </p>
+                </div>
+            </details>
+
             <div class="flex items-start gap-2.5 px-3 py-2.5 rounded-lg bg-info-soft border border-info-solid">
                 <div class="shrink-0 mt-0.5 w-[18px] h-[18px] rounded-full bg-info-solid flex items-center justify-center">
                     <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="3"><circle cx="12" cy="12" r="10"/><path d="M12 11v6M12 7.5v.5" stroke-linecap="round"/></svg>
                 </div>
                 <p class="text-xs text-info-soft-fg">
-                    Pelo menos um ID obrigatório. TMDb cobre UNIT3D; IMDb cobre Newznab/Torznab. Use ambos pra maximizar matches.
+                    Pelo menos um ID obrigatório. TMDb cobre UNIT3D; IMDb cobre Newznab/Torznab; TVDB cobre TV. Use múltiplos pra maximizar matches.
                 </p>
             </div>
 
@@ -95,6 +129,20 @@
                         Buscar agora
                     </button>
                 </div>
+            </div>
+
+            {# In-flight overlay — HTMX toggles `htmx-request` on the
+               form element while POST /searches is pending; the CSS
+               rule in input.css flips `.htmx-indicator` from
+               display:none to flex automatically. Empty fallback
+               keeps the layout stable when the modal first opens. #}
+            <div class="htmx-indicator absolute inset-0 rounded-b-2xl bg-bg-surface/95 backdrop-blur-sm flex-col items-center justify-center gap-3">
+                <svg width="40" height="40" viewBox="0 0 50 50" class="text-accent-solid animate-spin">
+                    <circle cx="25" cy="25" r="20" fill="none" stroke="currentColor" stroke-width="4" stroke-opacity="0.2"/>
+                    <path d="M25 5 a20 20 0 0 1 20 20" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round"/>
+                </svg>
+                <p class="text-sm font-semibold text-fg-primary">Buscando em {{ provider_count }} provider{% if provider_count != 1 %}s{% endif %}…</p>
+                <p class="text-xs text-fg-muted">Pode levar alguns segundos. Aguarde o redirect.</p>
             </div>
         </form>
     </div>

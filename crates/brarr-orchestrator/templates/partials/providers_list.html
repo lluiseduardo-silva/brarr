@@ -58,7 +58,9 @@
                         <a href="{{ p.base_url }}" class="hover:text-accent-soft-fg" target="_blank" rel="noopener">{{ p.base_url }}</a>
                     </td>
 
-                    <td class="px-4 py-3 font-mono text-xs text-fg-muted">{{ p.created_at }}</td>
+                    <td class="px-4 py-3 font-mono text-xs text-fg-muted">
+                        <time data-datetime="{{ p.created_at }}" data-datetime-style="short">{{ p.created_at }}</time>
+                    </td>
 
                     <td class="px-4 py-3">
                         <span id="ping-{{ p.id }}" class="text-xs italic text-fg-muted">não testado</span>

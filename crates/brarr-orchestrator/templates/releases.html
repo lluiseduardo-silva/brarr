@@ -34,10 +34,15 @@
     <p class="text-fg-muted italic">Ainda não há decisões persistidas. Rode uma busca pelo botão "Nova busca" no Dashboard.</p>
 </div>
 {% else %}
+{# Fixed-height scroll container so the horizontal scrollbar lives
+   *next to* the table instead of pinned to the bottom of the viewport.
+   Sticky <thead> keeps column labels visible while the body scrolls.
+   `max-h-[calc(100vh-280px)]` reserves space for nav (64) + page
+   title (~80) + filter bar (~60) + padding. #}
 <div class="card-hairline bg-bg-surface border border-border-default rounded-xl overflow-hidden">
-    <div class="overflow-x-auto">
+    <div class="overflow-auto max-h-[calc(100vh-280px)]">
         <table class="w-full text-sm">
-            <thead class="bg-bg-muted">
+            <thead class="bg-bg-muted sticky top-0 z-10">
                 <tr class="text-left">
                     <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Score</th>
                     <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Provider</th>

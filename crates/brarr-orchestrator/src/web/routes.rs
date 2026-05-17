@@ -855,27 +855,41 @@ async fn releases_index(State(state): State<AppState>) -> Result<Response, AppEr
     })
 }
 
-/// Multi-id form: at least one of `tmdb_id` / `imdb_id` must be set.
-/// Both fields are typed `Option<String>` so an empty input doesn't
-/// trip serde's `u32` parser and the handler can apply its own
-/// validation with a friendly error.
+/// Multi-id form: at least one of `tmdb_id` / `imdb_id` / `tvdb_id`
+/// must be set. Every field is typed `Option<String>` so an empty
+/// input doesn't trip serde's `u32` parser and the handler can apply
+/// its own validation with a friendly error.
 #[derive(Debug, Deserialize)]
 struct CreateSearchForm {
     #[serde(default)]
     tmdb_id: Option<String>,
     #[serde(default)]
     imdb_id: Option<String>,
+    #[serde(default)]
+    tvdb_id: Option<String>,
+    #[serde(default)]
+    season: Option<String>,
+    #[serde(default)]
+    episode: Option<String>,
 }
 
+#[allow(
+    clippy::similar_names,
+    reason = "tmdb/imdb/tvdb are the canonical 4-letter ID names; renaming any one of them \
+              would obscure which provider axis the value comes from"
+)]
 async fn searches_create(
     State(state): State<AppState>,
     Form(form): Form<CreateSearchForm>,
 ) -> Result<Response, AppError> {
     let tmdb = parse_optional_tmdb(form.tmdb_id.as_deref())?;
     let imdb = parse_optional_imdb(form.imdb_id.as_deref())?;
-    if tmdb.is_none() && imdb.is_none() {
+    let tvdb = parse_optional_tvdb(form.tvdb_id.as_deref())?;
+    let season = parse_optional_u16(form.season.as_deref(), "season")?;
+    let episode = parse_optional_u16(form.episode.as_deref(), "episode")?;
+    if tmdb.is_none() && imdb.is_none() && tvdb.is_none() {
         return Err(AppError::InvalidInput(
-            "informe TMDb id ou IMDb id (tt-prefixado ou numérico)".to_string(),
+            "informe TMDb id, IMDb id (tt-prefixado ou numérico) ou TVDB id".to_string(),
         ));
     }
     let outcome = crate::search::run_search(
@@ -883,7 +897,9 @@ async fn searches_create(
         crate::search::SearchKeys {
             tmdb,
             imdb,
-            ..crate::search::SearchKeys::default()
+            tvdb,
+            season,
+            episode,
         },
     )
     .await?;
@@ -929,6 +945,27 @@ fn parse_optional_imdb(raw: Option<&str>) -> Result<Option<brarr_core::ImdbId>, 
     brarr_core::ImdbId::new(n)
         .map(Some)
         .map_err(|e| AppError::InvalidInput(format!("imdb_id inválido: {e}")))
+}
+
+fn parse_optional_tvdb(raw: Option<&str>) -> Result<Option<brarr_core::TvdbId>, AppError> {
+    let Some(s) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    let n: u32 = s
+        .parse()
+        .map_err(|_| AppError::InvalidInput(format!("tvdb_id deve ser numérico, recebi {s:?}")))?;
+    brarr_core::TvdbId::new(n)
+        .map(Some)
+        .map_err(|e| AppError::InvalidInput(format!("tvdb_id inválido: {e}")))
+}
+
+fn parse_optional_u16(raw: Option<&str>, label: &str) -> Result<Option<u16>, AppError> {
+    let Some(s) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    s.parse::<u16>()
+        .map(Some)
+        .map_err(|_| AppError::InvalidInput(format!("{label} deve ser numérico (0..=65535), recebi {s:?}")))
 }
 
 /// Returns the Nova Busca modal partial — swapped into the

@@ -297,4 +297,20 @@
     background-image: linear-gradient(90deg, var(--color-grad-start), var(--color-grad-end));
     pointer-events: none;
   }
+
+  /* Browser default for <dialog>[open] is centred via margin:auto,
+     but Tailwind v4 preflight resets `margin: 0` on every element,
+     which strands the modal at the top-left. Re-centre top-layer
+     dialogs explicitly. */
+  dialog[open] {
+    margin: auto;
+    inset: 0;
+  }
+
+  /* HTMX request indicator — show .htmx-indicator while the request
+     is in flight (HTMX toggles the parent's `htmx-request` class).
+     `display:none` default keeps spinner hidden until needed. */
+  .htmx-indicator { display: none; }
+  .htmx-request .htmx-indicator { display: flex; }
+  .htmx-request.htmx-indicator { display: flex; }
 }
