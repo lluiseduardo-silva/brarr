@@ -447,6 +447,67 @@ async fn profile_update_with_bad_json_returns_editor_with_error_banner() {
 }
 
 #[tokio::test]
+async fn profile_preview_evaluates_fixtures_against_form_rules() {
+    let (addr, state) = spawn().await;
+    let row = db::quality_profiles::insert(
+        state.pool(),
+        db::quality_profiles::NewQualityProfile {
+            name: "preview-target",
+            description: None,
+            push_threshold: 100,
+        },
+    )
+    .await
+    .unwrap();
+    // Rule list that gives PT-BR audio a huge bump so the verdict for
+    // the bread-and-butter fixture clearly reads "kept".
+    let rules = r#"{"rule":[{"name":"PT-BR jackpot","when":{"audio":"pt-br"},"add_score":500,"tag":null,"reject":false}]}"#;
+    let form = [("rules_json", rules)];
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{addr}/profiles/{}/preview", row.id))
+        .form(&form)
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+    // All three fixture labels must show up in the breakdown HTML.
+    assert!(body.contains("PT-BR Dub"));
+    assert!(body.contains("Anime JP"));
+    assert!(body.contains("EN-only"));
+    // Custom rule fired on the PT-BR fixture and bumped score above the
+    // 150 "kept" threshold the preview uses for badge colour.
+    assert!(body.contains("PT-BR jackpot"));
+}
+
+#[tokio::test]
+async fn profile_preview_with_bad_json_returns_error_message() {
+    let (addr, state) = spawn().await;
+    let row = db::quality_profiles::insert(
+        state.pool(),
+        db::quality_profiles::NewQualityProfile {
+            name: "preview-bad-json",
+            description: None,
+            push_threshold: 100,
+        },
+    )
+    .await
+    .unwrap();
+    let form = [("rules_json", "not-json")];
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{addr}/profiles/{}/preview", row.id))
+        .form(&form)
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("JSON inválido"));
+}
+
+#[tokio::test]
 async fn pushes_index_renders_empty_state() {
     let (addr, _state) = spawn().await;
     let client = reqwest::Client::new();

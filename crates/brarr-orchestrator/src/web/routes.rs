@@ -17,6 +17,7 @@
 //! the auth middleware. When [`crate::AuthConfig::Disabled`] is in
 //! effect the middleware no-ops.
 
+use std::fmt::Write as _;
 use std::net::SocketAddr;
 
 use axum::Router;
@@ -84,6 +85,7 @@ pub fn router(state: AppState, static_dir: &std::path::Path) -> Router {
             delete(profiles_delete).put(profiles_update),
         )
         .route("/profiles/{id}/edit", get(profiles_edit))
+        .route("/profiles/{id}/preview", post(profiles_preview))
         .route("/releases", get(releases_index))
         .route("/searches", post(searches_create))
         .route("/searches/new", get(new_search_modal))
@@ -1142,6 +1144,170 @@ struct UpdateProfileForm {
     description: Option<String>,
     push_threshold: u32,
     rules_json: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct PreviewProfileForm {
+    /// Only the rules textarea content matters for preview — the rest
+    /// of the form is intentionally ignored so the operator can iterate
+    /// on rules without committing identity/threshold changes.
+    #[serde(default)]
+    rules_json: String,
+}
+
+/// `POST /profiles/{id}/preview` — evaluate the in-flight rule list
+/// (from the form, **not** the persisted row) against three reference
+/// release fixtures and return an HTML breakdown. Lets the operator
+/// see the score impact of a rule change before clicking Save.
+///
+/// Fixtures cover the canonical brarr use cases:
+///   1. **PT-BR Dub 1080p WEB-DL** — the bread-and-butter Radarr push.
+///   2. **Anime original JP + legenda PT-BR 1080p** — the case that
+///      motivated the rule builder in the first place.
+///   3. **EN-only 2160p HDR BluRay** — Premium tier without dub;
+///      surfaces whether the rules accidentally over-reward HDR.
+async fn profiles_preview(
+    State(_state): State<AppState>,
+    Path(_id): Path<String>,
+    Form(form): Form<PreviewProfileForm>,
+) -> Result<Response, AppError> {
+    let rules_result: Result<brarr_decision_service::RuleSet, _> =
+        serde_json::from_str(&form.rules_json);
+    let engine = match rules_result {
+        Ok(r) => brarr_decision_service::Engine::from_profile_rules(r),
+        Err(e) => {
+            return Ok(html_string(format!(
+                r#"<p class="text-sm text-danger-soft-fg">JSON inválido: {}</p>"#,
+                crate::web::templates::escape(&e.to_string())
+            )));
+        }
+    };
+
+    let fixtures = preview_fixtures()?;
+    let mut buf = String::new();
+    buf.push_str(r#"<div class="flex flex-col gap-3">"#);
+    for (label, release) in fixtures {
+        let outcome = engine.evaluate(&release);
+        let badge_class = if outcome.rejected {
+            "bg-danger-soft text-danger-soft-fg"
+        } else if outcome.score.get() >= 150 {
+            "bg-success-soft text-success-soft-fg"
+        } else {
+            "bg-bg-muted text-fg-secondary"
+        };
+        let verdict = if outcome.rejected { "rejected" } else { "kept" };
+        let mut rules_block = String::new();
+        if outcome.matched_rules.is_empty() {
+            rules_block
+                .push_str(r#"<span class="italic text-fg-muted">— nenhuma regra casou</span>"#);
+        } else {
+            rules_block.push_str(r#"<ul class="mt-1 space-y-0.5">"#);
+            for r in &outcome.matched_rules {
+                let _ = write!(
+                    rules_block,
+                    r#"<li class="text-[11px] font-mono text-fg-secondary">{}</li>"#,
+                    crate::web::templates::escape(r),
+                );
+            }
+            rules_block.push_str("</ul>");
+        }
+        let _ = write!(
+            buf,
+            r#"<div class="rounded-md border border-border-default p-3 bg-bg-canvas">
+                <div class="flex items-center justify-between gap-2 mb-1">
+                    <span class="text-xs font-semibold text-fg-primary truncate">{label}</span>
+                    <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[10px] font-semibold uppercase tracking-[0.06em] {badge_class}">{verdict} · {score}</span>
+                </div>
+                {rules_block}
+            </div>"#,
+            label = crate::web::templates::escape(label),
+            score = outcome.score.get(),
+        );
+    }
+    buf.push_str("</div>");
+    Ok(html_string(buf))
+}
+
+fn html_string(body: String) -> Response {
+    let mut resp = Response::new(axum::body::Body::from(body));
+    resp.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    resp
+}
+
+/// Static set of release fixtures the live preview evaluates against.
+/// Each entry mirrors a real-world brarr use case so an operator
+/// editing rules sees concrete deltas instead of abstract numbers.
+fn preview_fixtures() -> Result<Vec<(&'static str, brarr_core::Release)>, AppError> {
+    use brarr_core::{
+        Language, Release, ReleaseEnrichment, ReleaseKind, Resolution, TrackerSource,
+    };
+    let tracker = TrackerSource::new(
+        "capybara",
+        url::Url::parse("https://capybarabr.com/api/")
+            .map_err(|e| AppError::InvalidInput(format!("preview tracker URL: {e}")))?,
+    )
+    .map_err(|e| AppError::InvalidInput(format!("preview tracker: {e}")))?;
+    let make = |title: &'static str,
+                kind: ReleaseKind,
+                resolution: Resolution,
+                audio: Vec<Language>,
+                subtitle: Vec<Language>,
+                has_hdr: bool,
+                seeders: u32|
+     -> Result<Release, AppError> {
+        let mut r = Release::new("0", tracker.clone(), title, kind, resolution, 5_000_000_000)
+            .map_err(|e| AppError::InvalidInput(format!("preview release {title}: {e}")))?;
+        r.seeders = seeders;
+        r.enrichment = Some(ReleaseEnrichment {
+            audio_languages: audio,
+            subtitle_languages: subtitle,
+            has_hdr,
+            ..ReleaseEnrichment::default()
+        });
+        Ok(r)
+    };
+
+    Ok(vec![
+        (
+            "PT-BR Dub · 1080p WEB-DL",
+            make(
+                "The Matrix 1999 1080p WEB-DL DD5.1 H.264-NeX",
+                ReleaseKind::WebDl,
+                Resolution::P1080,
+                vec![Language::PtBr, Language::En],
+                vec![Language::PtBr],
+                false,
+                40,
+            )?,
+        ),
+        (
+            "Anime JP + leg PT-BR · 1080p",
+            make(
+                "Steins;Gate S01E01 1080p BluRay x264-NIPPON",
+                ReleaseKind::BluRay,
+                Resolution::P1080,
+                vec![Language::Other("Japanese".to_string())],
+                vec![Language::PtBr],
+                false,
+                12,
+            )?,
+        ),
+        (
+            "EN-only · 2160p HDR BluRay",
+            make(
+                "Dune 2021 2160p UHD BluRay x265 HDR-FraMeSToR",
+                ReleaseKind::BluRay,
+                Resolution::P2160,
+                vec![Language::En],
+                vec![Language::En],
+                true,
+                3,
+            )?,
+        ),
+    ])
 }
 
 /// `PUT /profiles/{id}` — persist editor changes. Validates the rule
