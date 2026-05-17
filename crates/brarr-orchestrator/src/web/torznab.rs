@@ -152,18 +152,22 @@ impl Protocol {
 /// `GET /{torznab|newznab}/download/{decision_id}` — proxy route used
 /// by the Torznab / Newznab feed's `<enclosure url>`. Sonarr / Radarr
 /// hit this URL to grab the actual `.torrent` / `.nzb`; we look the
-/// decision up by id, pull the persisted upstream URL, and `302` to it.
+/// decision up by id and route based on the provider's auth shape:
 ///
-/// Caveats:
-/// - The persisted URL retains the provider's apikey (Newznab style)
-///   or download token (UNIT3D style). For UNIT3D trackers that gate
-///   download on a `Authorization: Bearer` header rather than a URL
-///   token, this redirect won't carry credentials — server-side fetch
-///   with Bearer injection is a follow-up. The current redirect path
-///   works out of the box for all Newznab / Torznab providers and for
-///   UNIT3D trackers that include the token in the URL.
-/// - Returns `404` when the decision row no longer exists or has no
-///   `download_url` (provider didn't expose one).
+/// - **UNIT3D providers**: server-side fetch with the configured
+///   `Authorization: Bearer <token>` header, stream the bytes back as
+///   `application/x-bittorrent`. A naive `302` redirect drops the
+///   header and the *arr client gets HTML/JSON error pages instead of
+///   a `.torrent`, then crashes its BEncode parser with
+///   `IndexOutOfRangeException`.
+/// - **Newznab / Torznab providers**: `302` to the upstream URL. Those
+///   indexers embed an apikey in the URL query string, so a redirect
+///   carries credentials.
+/// - **Legacy rows** (no `provider_id` snapshot): `302` to whatever URL
+///   was stored.
+///
+/// Returns `404` when the decision row no longer exists or has no
+/// `download_url` (provider didn't expose one).
 async fn handle_download_inner(
     state: AppState,
     decision_id: String,
@@ -177,14 +181,89 @@ async fn handle_download_inner(
             "decision {uuid} has no upstream download URL"
         )));
     };
+
+    // UNIT3D download URLs require an `Authorization: Bearer` header;
+    // a 302 strips it. Fall back to the legacy redirect when the
+    // provider snapshot is missing (None) or anything other than
+    // unit3d (newznab/torznab/plugin embed creds in the URL).
+    let needs_server_side_fetch = row
+        .provider_kind
+        .as_deref()
+        .is_some_and(|k| k.eq_ignore_ascii_case("unit3d"));
+
+    if !needs_server_side_fetch {
+        debug!(
+            target: "brarr_orchestrator::torznab",
+            decision_id = %uuid,
+            provider = %row.provider_name,
+            provider_kind = ?row.provider_kind,
+            protocol = ?protocol,
+            "redirecting indexer download to upstream"
+        );
+        return Ok(Redirect::temporary(&url).into_response());
+    }
+
+    let Some(provider_id) = row.provider_id else {
+        warn!(
+            target: "brarr_orchestrator::torznab",
+            decision_id = %uuid,
+            "unit3d decision without provider_id snapshot — falling back to 302"
+        );
+        return Ok(Redirect::temporary(&url).into_response());
+    };
+    let provider = crate::db::providers::get_by_id(state.pool(), provider_id).await?;
+
     debug!(
         target: "brarr_orchestrator::torznab",
         decision_id = %uuid,
-        provider = %row.provider_name,
-        protocol = ?protocol,
-        "redirecting indexer download to upstream"
+        provider = %provider.name,
+        "server-side fetch with Bearer auth"
     );
-    Ok(Redirect::temporary(&url).into_response())
+    let client = reqwest::Client::builder()
+        .user_agent(concat!("brarr/", env!("CARGO_PKG_VERSION")))
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| AppError::InvalidInput(format!("build http client: {e}")))?;
+    let upstream = client
+        .get(&url)
+        .bearer_auth(&provider.api_token)
+        .header("Accept", "application/x-bittorrent")
+        .send()
+        .await
+        .map_err(|e| AppError::InvalidInput(format!("upstream fetch failed: {e}")))?;
+    let upstream_status = upstream.status();
+    if !upstream_status.is_success() {
+        let body_excerpt = upstream
+            .text()
+            .await
+            .unwrap_or_default()
+            .chars()
+            .take(512)
+            .collect::<String>();
+        warn!(
+            target: "brarr_orchestrator::torznab",
+            decision_id = %uuid,
+            provider = %provider.name,
+            status = upstream_status.as_u16(),
+            body = %body_excerpt,
+            "upstream rejected download"
+        );
+        return Err(AppError::InvalidInput(format!(
+            "upstream {status} from {provider}: {body_excerpt}",
+            status = upstream_status.as_u16(),
+            provider = provider.name,
+        )));
+    }
+    let body_bytes = upstream
+        .bytes()
+        .await
+        .map_err(|e| AppError::InvalidInput(format!("upstream body read failed: {e}")))?;
+    let mut resp = (StatusCode::OK, body_bytes).into_response();
+    resp.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/x-bittorrent"),
+    );
+    Ok(resp)
 }
 
 async fn handle_torznab_download(
