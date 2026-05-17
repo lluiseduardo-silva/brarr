@@ -33,4 +33,4 @@ config.toml
 
 # Session checkpoints (handoff notes between Claude Code sessions)
 CHECKPOINT.md
-CHECKPOINT-*.md
+CHECKPOINT-*.mdtmp_*.py
