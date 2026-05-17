@@ -308,17 +308,26 @@ async fn handle_movie(
     let outcome = run_search(state, SearchKeys { tmdb, imdb }).await?;
     let limit_raw = parse_u32_param(q.limit.as_ref(), "limit")?;
     let limit = limit_raw.map_or(100, |v| v.clamp(1, 1_000)) as usize;
-    let releases: Vec<Release> = outcome
+    let items: Vec<FeedItem> = outcome
         .decisions
         .iter()
         .take(limit)
-        .filter_map(decision_to_release)
+        .filter_map(decision_to_feed_item)
         .collect();
 
-    Ok(xml_response(
-        StatusCode::OK,
-        render_feed(&releases, base_url)?,
-    ))
+    Ok(xml_response(StatusCode::OK, render_feed(&items, base_url)?))
+}
+
+/// Pair of (Release, provider kind) used by the feed renderer to pick
+/// the right `<enclosure type>` per item. Carried separately from
+/// `Release` itself because `brarr_core::Release` is provider-agnostic
+/// and we don't want to leak the orchestrator-side concept of "kind"
+/// into the core domain model.
+struct FeedItem {
+    release: Release,
+    /// Mirrors `DecisionRow::provider_kind`: `unit3d` / `newznab` /
+    /// `torznab` / `plugin` / `None` (legacy rows).
+    provider_kind: Option<String>,
 }
 
 /// Derive the public-facing base URL ("scheme://host") from the
@@ -378,6 +387,14 @@ fn parse_imdb(raw: Option<&str>) -> Result<Option<ImdbId>, AppError> {
 /// proxy" route can serve that URL by re-resolving the upstream tracker
 /// link. Until then Sonarr won't be able to actually grab the torrent,
 /// but the feed itself remains spec-compliant.
+fn decision_to_feed_item(row: &crate::db::decisions::DecisionRow) -> Option<FeedItem> {
+    let release = decision_to_release(row)?;
+    Some(FeedItem {
+        release,
+        provider_kind: row.provider_kind.clone(),
+    })
+}
+
 fn decision_to_release(row: &crate::db::decisions::DecisionRow) -> Option<Release> {
     let tracker = brarr_core::TrackerSource::new(
         row.provider_name.clone(),
@@ -496,7 +513,7 @@ fn render_caps() -> Result<Vec<u8>, AppError> {
 /// Render the RSS feed body. `base_url` is the absolute `scheme://host`
 /// prefix used to expand the per-item proxy download URL into a fully
 /// qualified link.
-fn render_feed_inner(items: &[Release], base_url: &str) -> Result<Vec<u8>, AppError> {
+fn render_feed_inner(items: &[FeedItem], base_url: &str) -> Result<Vec<u8>, AppError> {
     let mut writer = Writer::new(Cursor::new(Vec::with_capacity(2048)));
     writer
         .write_event(Event::Decl(BytesDecl::new("1.0", Some("UTF-8"), None)))
@@ -538,11 +555,6 @@ fn render_feed_inner(items: &[Release], base_url: &str) -> Result<Vec<u8>, AppEr
 
 #[cfg(test)]
 fn render_empty_feed() -> Result<Vec<u8>, AppError> {
-    // Kept under `#[cfg(test)]` so the regression test that asserts a
-    // zero-item RSS still parses survives, without leaving the helper
-    // dangling in the binary. Production paths emit the placeholder
-    // feed instead (Sonarr/Radarr can't add an indexer that returns
-    // 0 items on its test probe).
     render_feed_inner(&[], "http://127.0.0.1:3000")
 }
 
@@ -649,15 +661,25 @@ fn render_placeholder_feed(base_url: &str) -> Result<Vec<u8>, AppError> {
     Ok(writer.into_inner().into_inner())
 }
 
-fn render_feed(items: &[Release], base_url: &str) -> Result<Vec<u8>, AppError> {
+fn render_feed(items: &[FeedItem], base_url: &str) -> Result<Vec<u8>, AppError> {
     render_feed_inner(items, base_url)
 }
 
 fn write_item<W: std::io::Write>(
     w: &mut Writer<W>,
-    r: &Release,
+    item: &FeedItem,
     base_url: &str,
 ) -> std::io::Result<()> {
+    let r = &item.release;
+    // Newznab providers ship `.nzb` (Usenet); UNIT3D / Torznab / plugin
+    // providers ship `.torrent`. Sonarr / Radarr added as a Torznab
+    // indexer reject `application/x-nzb` items, and vice versa. The
+    // type discriminator lets one brarr instance serve both indexer
+    // types from the same `/torznab/api` endpoint.
+    let enclosure_type = match item.provider_kind.as_deref() {
+        Some(k) if k.eq_ignore_ascii_case("newznab") => "application/x-nzb",
+        _ => "application/x-bittorrent",
+    };
     let categories = categories_for(r);
     let primary_cat = categories.first().copied().unwrap_or(2000);
     // Always emit a brarr-side proxy URL — never the raw upstream link.
@@ -712,7 +734,7 @@ fn write_item<W: std::io::Write>(
             .with_attributes([
                 ("url", download_url.as_str()),
                 ("length", size_str.as_str()),
-                ("type", "application/x-bittorrent"),
+                ("type", enclosure_type),
             ])
             .write_empty()?;
 

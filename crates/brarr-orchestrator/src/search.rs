@@ -330,6 +330,7 @@ fn build_insert(
         kind: release.kind.clone(),
         download_url: release.urls.download.as_ref().map(url::Url::to_string),
         details_url: release.urls.details.as_ref().map(url::Url::to_string),
+        provider_kind: Some(provider.kind.clone()),
     }
 }
 

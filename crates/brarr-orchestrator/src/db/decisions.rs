@@ -52,6 +52,12 @@ pub struct DecisionRow {
     /// Details / comments page URL for the release on the provider.
     /// Surfaced as `<comments>` in the Torznab feed.
     pub details_url: Option<String>,
+    /// Provider kind snapshot (`unit3d` / `newznab` / `torznab` /
+    /// `plugin`). Used by the Torznab outbound feed to pick the
+    /// correct `<enclosure type>` per item (`application/x-nzb` for
+    /// Newznab, `application/x-bittorrent` elsewhere). Legacy rows
+    /// pre-dating the 20260516140000 migration have `None`.
+    pub provider_kind: Option<String>,
     /// When the engine produced the outcome.
     pub decided_at: OffsetDateTime,
 }
@@ -91,6 +97,8 @@ pub struct DecisionInsert {
     pub download_url: Option<String>,
     /// Upstream details / comments page URL.
     pub details_url: Option<String>,
+    /// Provider kind snapshot — see [`DecisionRow::provider_kind`].
+    pub provider_kind: Option<String>,
 }
 
 /// Insert one decision row, returning the persisted form.
@@ -111,8 +119,8 @@ pub async fn insert(pool: &Pool, ins: DecisionInsert) -> Result<DecisionRow, App
         "INSERT INTO decisions ( \
             id, search_id, provider_id, provider_name, release_name, release_id_remote, \
             score, rejected, tags_json, matched_json, seeders, leechers, size_bytes, \
-            resolution, kind, decided_at, download_url, details_url \
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            resolution, kind, decided_at, download_url, details_url, provider_kind \
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(id.to_string())
     .bind(ins.search_id.to_string())
@@ -132,6 +140,7 @@ pub async fn insert(pool: &Pool, ins: DecisionInsert) -> Result<DecisionRow, App
     .bind(now.unix_timestamp())
     .bind(&ins.download_url)
     .bind(&ins.details_url)
+    .bind(&ins.provider_kind)
     .execute(pool)
     .await?;
 
@@ -153,6 +162,7 @@ pub async fn insert(pool: &Pool, ins: DecisionInsert) -> Result<DecisionRow, App
         kind,
         download_url: ins.download_url,
         details_url: ins.details_url,
+        provider_kind: ins.provider_kind,
         decided_at: now,
     })
 }
@@ -166,7 +176,7 @@ pub async fn list_for_search(pool: &Pool, search_id: Uuid) -> Result<Vec<Decisio
     let rows = sqlx::query(
         "SELECT id, search_id, provider_id, provider_name, release_name, release_id_remote, \
                 score, rejected, tags_json, matched_json, seeders, leechers, size_bytes, \
-                resolution, kind, decided_at, download_url, details_url \
+                resolution, kind, decided_at, download_url, details_url, provider_kind \
          FROM decisions WHERE search_id = ? ORDER BY score DESC, seeders DESC",
     )
     .bind(search_id.to_string())
@@ -187,7 +197,7 @@ pub async fn get_by_id(pool: &Pool, id: Uuid) -> Result<DecisionRow, AppError> {
     let row_opt = sqlx::query(
         "SELECT id, search_id, provider_id, provider_name, release_name, release_id_remote, \
                 score, rejected, tags_json, matched_json, seeders, leechers, size_bytes, \
-                resolution, kind, decided_at, download_url, details_url \
+                resolution, kind, decided_at, download_url, details_url, provider_kind \
          FROM decisions WHERE id = ?",
     )
     .bind(id.to_string())
@@ -213,7 +223,7 @@ pub async fn recent(pool: &Pool, limit: u32) -> Result<Vec<DecisionRow>, AppErro
     let rows = sqlx::query(
         "SELECT id, search_id, provider_id, provider_name, release_name, release_id_remote, \
                 score, rejected, tags_json, matched_json, seeders, leechers, size_bytes, \
-                resolution, kind, decided_at, download_url, details_url \
+                resolution, kind, decided_at, download_url, details_url, provider_kind \
          FROM decisions ORDER BY decided_at DESC LIMIT ?",
     )
     .bind(i64::from(limit))
@@ -252,6 +262,7 @@ fn row_to_decision(row: &SqliteRow) -> Result<DecisionRow, AppError> {
 
     let download_url: Option<String> = row.try_get("download_url").ok().flatten();
     let details_url: Option<String> = row.try_get("details_url").ok().flatten();
+    let provider_kind: Option<String> = row.try_get("provider_kind").ok().flatten();
     Ok(DecisionRow {
         id,
         search_id,
@@ -270,6 +281,7 @@ fn row_to_decision(row: &SqliteRow) -> Result<DecisionRow, AppError> {
         kind: row.try_get("kind")?,
         download_url,
         details_url,
+        provider_kind,
         decided_at,
     })
 }
@@ -352,6 +364,7 @@ mod tests {
             kind: ReleaseKind::BluRay,
             download_url: Some("https://capybara/torrents/download/12345".into()),
             details_url: Some("https://capybara/torrents/12345".into()),
+            provider_kind: Some("unit3d".into()),
         }
     }
 
