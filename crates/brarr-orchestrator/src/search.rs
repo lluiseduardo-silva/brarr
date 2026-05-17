@@ -22,7 +22,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use brarr_core::{ImdbId, Release, TmdbId, TrackerProvider, TrackerSource};
+use brarr_core::{ImdbId, Release, TmdbId, TrackerProvider, TrackerSource, TvdbId};
 use brarr_plugin_host::{PluginConfig, WasmEpochTicker, WasmTrackerProvider};
 use brarr_tracker_newznab::NewznabClient;
 use brarr_tracker_unit3d::Unit3dClient;
@@ -39,8 +39,9 @@ use crate::db::{
 };
 use crate::{AppError, AppState};
 
-/// Set of external media ids a search can carry. At least one field
-/// should be `Some(_)` — fully-empty keys produce zero results.
+/// Set of external media ids a search can carry. At least one of
+/// `tmdb` / `imdb` / `tvdb` should be `Some(_)` — fully-empty keys
+/// produce zero results.
 #[derive(Debug, Clone, Default)]
 pub struct SearchKeys {
     /// TMDb id (movies / TV). Honored by UNIT3D and most plugins.
@@ -48,6 +49,17 @@ pub struct SearchKeys {
     /// IMDb id (numeric tt-id without prefix). Honored by Newznab
     /// movie-search.
     pub imdb: Option<ImdbId>,
+    /// TVDB series id. Honored by Newznab `tvsearch` axis. Required
+    /// for the TV path — without it `season`/`episode` are ignored.
+    pub tvdb: Option<TvdbId>,
+    /// Optional TV season filter. Only meaningful when `tvdb` is set.
+    /// `None` = match every season (series-wide search). Mirrors the
+    /// Newznab `tvsearch&season=N` query param.
+    pub season: Option<u16>,
+    /// Optional TV episode filter. Only meaningful when `tvdb` AND
+    /// `season` are set. `None` with a `season` = match every episode
+    /// in that season (useful for season-pack discovery).
+    pub episode: Option<u16>,
 }
 
 impl SearchKeys {
@@ -56,7 +68,7 @@ impl SearchKeys {
     pub fn from_tmdb(tmdb: TmdbId) -> Self {
         Self {
             tmdb: Some(tmdb),
-            imdb: None,
+            ..Self::default()
         }
     }
 
@@ -64,9 +76,26 @@ impl SearchKeys {
     #[must_use]
     pub fn from_imdb(imdb: ImdbId) -> Self {
         Self {
-            tmdb: None,
             imdb: Some(imdb),
+            ..Self::default()
         }
+    }
+
+    /// Convenience: build keys for a TV search.
+    #[must_use]
+    pub fn from_tvdb(tvdb: TvdbId, season: Option<u16>, episode: Option<u16>) -> Self {
+        Self {
+            tvdb: Some(tvdb),
+            season,
+            episode,
+            ..Self::default()
+        }
+    }
+
+    /// `true` when at least one search axis is populated.
+    #[must_use]
+    pub fn has_any(&self) -> bool {
+        self.tmdb.is_some() || self.imdb.is_some() || self.tvdb.is_some()
     }
 }
 
@@ -123,6 +152,9 @@ pub async fn run_search(state: &AppState, keys: SearchKeys) -> Result<SearchRunO
         search_id = %search.id,
         tmdb = ?keys.tmdb.map(TmdbId::get),
         imdb = ?keys.imdb.map(ImdbId::get),
+        tvdb = ?keys.tvdb.map(TvdbId::get),
+        season = ?keys.season,
+        episode = ?keys.episode,
         "search created"
     );
 
@@ -228,16 +260,29 @@ async fn fan_out(
     join_all(futures).await
 }
 
-/// Per-provider axis picker. Newznab/Torznab rows prefer IMDb; everything
-/// else prefers TMDb. Falls back to the other axis when the preferred
-/// one is missing from `keys`. Returns `Ok(vec![])` when no usable axis
-/// is available (so the provider shows up with zero hits instead of an
-/// error).
+/// Per-provider axis picker.
+///
+/// Priority order:
+///   1. **TV** — if `keys.tvdb` is set, always take that path
+///      regardless of provider kind. Newznab returns real results;
+///      UNIT3D and plugins fall through to their default empty impl
+///      (defer until TV search lands on UNIT3D).
+///   2. **Movie** — Newznab/Torznab prefer IMDb (canonical Newznab
+///      movie-search axis); UNIT3D + plugins prefer TMDb. Falls back
+///      to the other movie axis when the preferred one isn't supplied.
+///
+/// Returns `Ok(vec![])` when no axis is usable (so the provider
+/// shows up with zero hits instead of an error).
 async fn dispatch_search(
     pr: &ProviderRow,
     provider: &dyn TrackerProvider,
     keys: &SearchKeys,
 ) -> Result<Vec<Release>, brarr_core::ProviderError> {
+    if let Some(tvdb) = keys.tvdb {
+        return provider
+            .search_by_tvdb(tvdb, keys.season, keys.episode)
+            .await;
+    }
     let prefer_imdb =
         pr.kind.eq_ignore_ascii_case("newznab") || pr.kind.eq_ignore_ascii_case("torznab");
     if prefer_imdb && let Some(imdb) = keys.imdb {

@@ -175,7 +175,11 @@ fn build_search_keys(req: &SearchRequest) -> Result<SearchKeys, Status> {
             "SearchRequest must set tmdb_id or imdb_id",
         ));
     }
-    Ok(SearchKeys { tmdb, imdb })
+    Ok(SearchKeys {
+        tmdb,
+        imdb,
+        ..SearchKeys::default()
+    })
 }
 
 /// Bearer-token interceptor used by [`serve`]. Exposed for tests so

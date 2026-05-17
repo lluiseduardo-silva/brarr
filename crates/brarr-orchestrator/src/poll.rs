@@ -259,7 +259,11 @@ fn build_keys(m: &WantedMovie) -> Option<SearchKeys> {
     if imdb.is_none() && tmdb.is_none() {
         return None;
     }
-    Some(SearchKeys { tmdb, imdb })
+    Some(SearchKeys {
+        tmdb,
+        imdb,
+        ..SearchKeys::default()
+    })
 }
 
 fn parse_imdb(raw: &str) -> Option<ImdbId> {

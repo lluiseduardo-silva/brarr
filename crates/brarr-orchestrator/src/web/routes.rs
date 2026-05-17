@@ -795,8 +795,15 @@ async fn searches_create(
             "informe TMDb id ou IMDb id (tt-prefixado ou numérico)".to_string(),
         ));
     }
-    let outcome =
-        crate::search::run_search(&state, crate::search::SearchKeys { tmdb, imdb }).await?;
+    let outcome = crate::search::run_search(
+        &state,
+        crate::search::SearchKeys {
+            tmdb,
+            imdb,
+            ..crate::search::SearchKeys::default()
+        },
+    )
+    .await?;
     // Return 200 (not 3xx) so the browser doesn't auto-follow the
     // Location header before HTMX can read the response. HTMX picks up
     // `HX-Redirect` from a 2xx body and performs a client-side

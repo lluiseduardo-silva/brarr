@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use brarr_core::{
-    ImdbId, ProviderError, ProviderFuture, Release, TmdbId, TrackerProvider, TrackerSource,
+    ImdbId, ProviderError, ProviderFuture, Release, TmdbId, TrackerProvider, TrackerSource, TvdbId,
 };
 use reqwest::Client;
 use tracing::{info, warn};
@@ -201,6 +201,13 @@ pub struct PingReport {
 /// outbound Torznab endpoint advertises.
 const MOVIE_CATEGORIES: &str = "2000,2010,2020,2030,2040,2045,2050,2060";
 
+/// Newznab TV categories: `5000` TV root, `5030` SD, `5040` HD,
+/// `5045` UHD, `5050` Other, `5060` Sport, `5070` Anime, `5080` Doc.
+/// Same rationale as `MOVIE_CATEGORIES` — NZBGeek and a few other
+/// servers return zero items for an unfiltered `t=tvsearch` query, so
+/// we always include the full TV category tree.
+const TV_CATEGORIES: &str = "5000,5030,5040,5045,5050,5060,5070,5080";
+
 /// Maximum number of body characters emitted in the WARN-level
 /// diagnostic log when an indexer returns zero items. Truncated to
 /// avoid spamming logs when an indexer responds with a huge HTML
@@ -383,6 +390,36 @@ impl NewznabClient {
                 ("cat", MOVIE_CATEGORIES),
             ],
         )?;
+        self.fetch_and_parse(url).await
+    }
+
+    /// `GET /api?t=tvsearch&tvdbid=<id>[&season=<n>][&ep=<m>]&cat=<tv>&apikey=<k>`.
+    /// All three id/season/episode are independently optional under the
+    /// Newznab spec, with the convention that omitting season/episode
+    /// widens the match — `(id, None, None)` returns every episode the
+    /// indexer has for the series.
+    ///
+    /// # Errors
+    ///
+    /// See [`ClientError`].
+    pub async fn search_tv_by_tvdb(
+        &self,
+        tvdb: TvdbId,
+        season: Option<u16>,
+        episode: Option<u16>,
+    ) -> Result<Vec<Release>, ClientError> {
+        let tvdb_str = tvdb.get().to_string();
+        let season_str = season.map(|s| s.to_string());
+        let episode_str = episode.map(|e| e.to_string());
+        let mut params: Vec<(&str, &str)> =
+            vec![("tvdbid", tvdb_str.as_str()), ("cat", TV_CATEGORIES)];
+        if let Some(s) = season_str.as_deref() {
+            params.push(("season", s));
+        }
+        if let Some(e) = episode_str.as_deref() {
+            params.push(("ep", e));
+        }
+        let url = self.build_url("tvsearch", &params)?;
         self.fetch_and_parse(url).await
     }
 
@@ -570,6 +607,20 @@ impl TrackerProvider for NewznabClient {
         let name = self.tracker.name.clone();
         Box::pin(async move {
             self.search_movie_by_imdb(imdb)
+                .await
+                .map_err(|e| ProviderError::new(name, e.to_string()))
+        })
+    }
+
+    fn search_by_tvdb(
+        &self,
+        tvdb: TvdbId,
+        season: Option<u16>,
+        episode: Option<u16>,
+    ) -> ProviderFuture<'_, Result<Vec<Release>, ProviderError>> {
+        let name = self.tracker.name.clone();
+        Box::pin(async move {
+            self.search_tv_by_tvdb(tvdb, season, episode)
                 .await
                 .map_err(|e| ProviderError::new(name, e.to_string()))
         })

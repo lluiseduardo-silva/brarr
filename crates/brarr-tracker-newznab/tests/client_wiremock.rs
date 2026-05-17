@@ -116,6 +116,42 @@ async fn http_500_propagates_as_client_error() {
 }
 
 #[tokio::test]
+async fn tvsearch_hits_tvsearch_endpoint_with_tvdbid_season_ep() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(query_param("t", "tvsearch"))
+        .and(query_param("tvdbid", "12345"))
+        .and(query_param("season", "2"))
+        .and(query_param("ep", "5"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(MOVIE_FEED))
+        .mount(&server)
+        .await;
+    let client = NewznabClient::new(tracker_for(&server), "k").unwrap();
+    let releases = client
+        .search_by_tvdb(brarr_core::TvdbId::new(12345).unwrap(), Some(2), Some(5))
+        .await
+        .unwrap();
+    assert_eq!(releases.len(), 1);
+}
+
+#[tokio::test]
+async fn tvsearch_omits_season_and_ep_when_unspecified() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(query_param("t", "tvsearch"))
+        .and(query_param("tvdbid", "777"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(MOVIE_FEED))
+        .mount(&server)
+        .await;
+    let client = NewznabClient::new(tracker_for(&server), "k").unwrap();
+    let releases = client
+        .search_by_tvdb(brarr_core::TvdbId::new(777).unwrap(), None, None)
+        .await
+        .unwrap();
+    assert_eq!(releases.len(), 1);
+}
+
+#[tokio::test]
 async fn rejects_bad_apikey() {
     let url = Url::parse("https://api.example/").unwrap();
     let tracker = TrackerSource::new("x", url).unwrap();

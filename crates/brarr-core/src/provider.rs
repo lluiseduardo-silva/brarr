@@ -71,7 +71,7 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use crate::{ImdbId, Release, TmdbId};
+use crate::{ImdbId, Release, TmdbId, TvdbId};
 
 /// Heap-allocated boxed future returned by [`TrackerProvider`] methods.
 ///
@@ -100,6 +100,28 @@ pub trait TrackerProvider: Send + Sync {
     fn search_by_imdb(
         &self,
         _imdb: ImdbId,
+    ) -> ProviderFuture<'_, Result<Vec<Release>, ProviderError>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    /// Search for TV releases by `TVDB` id, optional `season`, and
+    /// optional `episode`. The three-tier shape mirrors what Newznab
+    /// `t=tvsearch` accepts (and what Sonarr sends): all three are
+    /// supported with the convention that omitting season/episode
+    /// widens the match.
+    ///
+    /// - `(id, None, None)` → all episodes of the series
+    /// - `(id, Some(N), None)` → entire season N (season packs + episodes)
+    /// - `(id, Some(N), Some(M))` → single episode
+    ///
+    /// Defaults to an empty result so providers that don't speak TV
+    /// (UNIT3D movie-only deployments, IMDb-only Newznabs, plugin ABI
+    /// v1) opt out silently.
+    fn search_by_tvdb(
+        &self,
+        _tvdb: TvdbId,
+        _season: Option<u16>,
+        _episode: Option<u16>,
     ) -> ProviderFuture<'_, Result<Vec<Release>, ProviderError>> {
         Box::pin(async { Ok(Vec::new()) })
     }

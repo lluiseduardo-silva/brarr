@@ -336,6 +336,19 @@ struct ApiQuery {
     /// both forms).
     #[serde(default)]
     imdbid: Option<String>,
+    /// `tvdbid=<numeric>` — Sonarr/the *arr stack always uses the TVDB
+    /// axis on `t=tvsearch`. Accepted as a string so empty probes
+    /// don't 400.
+    #[serde(default)]
+    tvdbid: Option<String>,
+    /// `season=N` companion for `tvdbid`. Optional; omitted = match
+    /// every season.
+    #[serde(default)]
+    season: Option<String>,
+    /// `ep=N` companion for `tvdbid` + `season`. Optional; omitted =
+    /// match every episode in the season (lets season packs surface).
+    #[serde(default)]
+    ep: Option<String>,
     /// Free-text query (no backend support yet).
     #[serde(default)]
     #[allow(
@@ -434,17 +447,7 @@ async fn handle_api_inner(
                 render_placeholder_feed(&base_url, protocol)?,
             ))
         }
-        "tvsearch" | "tv-search" => {
-            debug!(
-                target: "brarr_orchestrator::torznab",
-                protocol = ?protocol,
-                "t=tvsearch — no TV axis yet, returning sentinel placeholder"
-            );
-            Ok(xml_response(
-                StatusCode::OK,
-                render_placeholder_feed(&base_url, protocol)?,
-            ))
-        }
+        "tvsearch" | "tv-search" => handle_tvsearch(&state, &q, &base_url, protocol).await,
         other => {
             warn!(
                 target: "brarr_orchestrator::torznab",
@@ -491,13 +494,89 @@ async fn handle_movie(
         ));
     }
 
-    let outcome = run_search(state, SearchKeys { tmdb, imdb }).await?;
+    let outcome = run_search(
+        state,
+        SearchKeys {
+            tmdb,
+            imdb,
+            ..SearchKeys::default()
+        },
+    )
+    .await?;
     // Filter to only the decision rows that belong on this feed's
     // protocol axis. `total` reflects the post-filter count so the
     // `<newznab:response total=>` element matches what the client can
     // actually see — Sonarr / Radarr stop paginating once
     // `offset + items.len() >= total`, and they'll re-request forever
     // if `total` overcounts.
+    let matching: Vec<&crate::db::decisions::DecisionRow> = outcome
+        .decisions
+        .iter()
+        .filter(|d| protocol.matches_kind(d.provider_kind.as_deref()))
+        .collect();
+    let total = matching.len();
+    let limit_raw = parse_u32_param(q.limit.as_ref(), "limit")?;
+    let limit = limit_raw.map_or(100, |v| v.clamp(1, 1_000)) as usize;
+    let offset_raw = parse_u32_param(q.offset.as_ref(), "offset")?;
+    let offset = offset_raw.unwrap_or(0) as usize;
+    let items: Vec<FeedItem> = matching
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .filter_map(decision_to_feed_item)
+        .collect();
+
+    Ok(xml_response(
+        StatusCode::OK,
+        render_feed(&items, base_url, offset, total, protocol)?,
+    ))
+}
+
+async fn handle_tvsearch(
+    state: &AppState,
+    q: &ApiQuery,
+    base_url: &str,
+    protocol: Protocol,
+) -> Result<Response, AppError> {
+    let tvdb_raw = parse_u32_param(q.tvdbid.as_ref(), "tvdbid")?;
+    let tvdb = tvdb_raw
+        .filter(|&v| v > 0)
+        .map(brarr_core::TvdbId::new)
+        .transpose()
+        .map_err(|e| AppError::InvalidInput(format!("tvdbid: {e}")))?;
+    // Sonarr's "Test Indexer" probe hits `t=tvsearch` with no ids,
+    // mirroring Radarr's t=movie probe. Same sentinel placeholder
+    // strategy.
+    if tvdb.is_none() {
+        debug!(
+            target: "brarr_orchestrator::torznab",
+            protocol = ?protocol,
+            "t=tvsearch with no tvdbid — returning sentinel placeholder"
+        );
+        return Ok(xml_response(
+            StatusCode::OK,
+            render_placeholder_feed(base_url, protocol)?,
+        ));
+    }
+    let season = parse_u32_param(q.season.as_ref(), "season")?
+        .map(u16::try_from)
+        .transpose()
+        .map_err(|e| AppError::InvalidInput(format!("season out of u16: {e}")))?;
+    let episode = parse_u32_param(q.ep.as_ref(), "ep")?
+        .map(u16::try_from)
+        .transpose()
+        .map_err(|e| AppError::InvalidInput(format!("ep out of u16: {e}")))?;
+
+    let outcome = run_search(
+        state,
+        SearchKeys {
+            tvdb,
+            season,
+            episode,
+            ..SearchKeys::default()
+        },
+    )
+    .await?;
     let matching: Vec<&crate::db::decisions::DecisionRow> = outcome
         .decisions
         .iter()
@@ -667,7 +746,10 @@ fn render_caps() -> Result<Vec<u8>, AppError> {
                     .with_attributes([("available", "yes"), ("supportedParams", "q,imdbid,tmdbid")])
                     .write_empty()?;
                 sw.create_element("tv-search")
-                    .with_attributes([("available", "no"), ("supportedParams", "")])
+                    .with_attributes([
+                        ("available", "yes"),
+                        ("supportedParams", "q,tvdbid,season,ep"),
+                    ])
                     .write_empty()?;
                 sw.create_element("audio-search")
                     .with_attributes([("available", "no"), ("supportedParams", "")])
@@ -1144,7 +1226,7 @@ mod tests {
         let xml = String::from_utf8(bytes).unwrap();
         assert!(xml.contains(r#"<server title="brarr""#));
         assert!(xml.contains(r#"<movie-search available="yes""#));
-        assert!(xml.contains(r#"<tv-search available="no""#));
+        assert!(xml.contains(r#"<tv-search available="yes""#));
         assert!(xml.contains(r#"<category id="2000" name="Movies""#));
         assert!(xml.contains(r#"<subcat id="2040" name="HD""#));
         assert!(xml.contains(r#"<subcat id="2045" name="UHD""#));

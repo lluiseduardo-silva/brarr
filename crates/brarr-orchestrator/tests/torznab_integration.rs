@@ -105,10 +105,12 @@ async fn search_probe_returns_placeholder_feed() {
 }
 
 #[tokio::test]
-async fn tvsearch_returns_placeholder_feed() {
+async fn tvsearch_without_tvdbid_returns_placeholder_feed() {
+    // Sonarr "Test Indexer" probes `t=tvsearch` with no ids — must
+    // still return one sentinel item so the indexer save passes.
     let addr = spawn(AuthConfig::Disabled).await;
     let resp = client()
-        .get(format!("http://{addr}/torznab/api?t=tvsearch&tvdbid=1234"))
+        .get(format!("http://{addr}/torznab/api?t=tvsearch"))
         .send()
         .await
         .expect("send");
@@ -117,6 +119,24 @@ async fn tvsearch_returns_placeholder_feed() {
     assert!(body.contains("<rss"));
     assert!(body.contains("<item>"));
     assert!(body.contains("health-check"));
+}
+
+#[tokio::test]
+async fn tvsearch_with_tvdbid_runs_real_search() {
+    // No providers configured → real search returns empty feed (not
+    // the sentinel placeholder, which only fires for missing ids).
+    let addr = spawn(AuthConfig::Disabled).await;
+    let resp = client()
+        .get(format!(
+            "http://{addr}/torznab/api?t=tvsearch&tvdbid=12345&season=1&ep=2"
+        ))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("<rss"));
+    assert!(!body.contains("<item>"), "no providers → no items");
 }
 
 #[tokio::test]
