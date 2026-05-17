@@ -80,6 +80,21 @@ services:
       RUST_LOG: ${RUST_LOG:-info}
       RUST_BACKTRACE: ${RUST_BACKTRACE:-0}
 
+    # ─── Networks ─────────────────────────────────────────────────
+    # `default` is the auto-created brarr_default bridge (so the
+    # container can still talk to the outside world). `arrstack`
+    # joins an external network shared with your Sonarr / Radarr /
+    # etc. compose so brarr can reach them by container name:
+    #   BRARR config → Base URL: http://radarr:7878
+    #
+    # Override `BRARR_ARRSTACK_NETWORK` if your arr stack's network
+    # is named something other than `root_default` (run `docker
+    # network ls` to find it). Set to `false` in `.env` to skip the
+    # join entirely (e.g. if you run brarr standalone).
+    networks:
+      - default
+      - arrstack
+
     # ─── Health ───────────────────────────────────────────────────
     healthcheck:
       test: ["CMD", "wget", "--quiet", "--spider", "http://127.0.0.1:3000/healthz"]
@@ -102,3 +117,14 @@ volumes:
   # `docker volume rm brarr_brarr-data` to nuke state.
   brarr-data:
     name: ${BRARR_DATA_VOLUME:-brarr-data}
+
+networks:
+  # External network shared with the *arr stack so brarr can resolve
+  # `radarr`, `sonarr`, etc. by container name. The default points at
+  # `root_default` — the auto-generated network name docker compose
+  # uses when the parent compose project is named `root` (most common
+  # default when the compose file lives at /root/docker-compose.yml).
+  # Override via .env: `BRARR_ARRSTACK_NETWORK=mystack_default`.
+  arrstack:
+    external: true
+    name: ${BRARR_ARRSTACK_NETWORK:-root_default}
