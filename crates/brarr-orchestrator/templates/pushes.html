@@ -50,8 +50,23 @@
                     {% when None %}—
                     {% endmatch %}
                 </td>
-                <td class="px-3 py-2 text-xs text-slate-500 max-w-md truncate" title="{{ p.response_body }}">
-                    {{ p.response_body }}
+                <td class="px-3 py-2 text-xs max-w-md">
+                    {% if p.rejections.is_empty() %}
+                        {% if p.status == "ok" %}
+                        <span class="text-emerald-700 italic">*arr aceitou — grab disparado</span>
+                        {% else %}
+                        <span class="text-slate-500 italic truncate" title="{{ p.response_body }}">{{ p.response_body }}</span>
+                        {% endif %}
+                    {% else %}
+                    <details>
+                        <summary class="cursor-pointer text-red-700">{{ p.rejections.len() }} rejection{% if p.rejections.len() != 1 %}s{% endif %} do *arr</summary>
+                        <ul class="mt-1 ml-3 list-disc text-slate-700 space-y-1">
+                            {% for r in p.rejections %}
+                            <li>{{ r }}</li>
+                            {% endfor %}
+                        </ul>
+                    </details>
+                    {% endif %}
                 </td>
             </tr>
         {% endfor %}

@@ -656,6 +656,7 @@ fn push_history_view(row: crate::db::push_history::PushHistoryRow) -> PushHistor
         status: status_label.to_string(),
         http_status: row.http_status,
         response_body: row.response_body.unwrap_or_default(),
+        rejections: row.rejections.unwrap_or_default(),
     }
 }
 

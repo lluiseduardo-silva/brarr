@@ -77,9 +77,15 @@ pub struct PushHistoryRow {
     pub status: PushStatus,
     /// HTTP status when applicable. `None` for transport errors.
     pub http_status: Option<u16>,
-    /// Body slice from *arr (truncated to 1KiB upstream). `None` for
-    /// successful pushes.
+    /// Body slice from *arr (truncated to 8 KiB upstream).
     pub response_body: Option<String>,
+    /// Parsed `rejections` array extracted from `response_body` (one
+    /// entry per *arr-side rejection reason — quality profile, custom
+    /// format, queue dedup, etc.). Empty `Vec` means *arr accepted the
+    /// release cleanly; non-empty means HTTP 200 but no grab. `None`
+    /// means brarr couldn't parse the body (legacy rows, transport
+    /// errors, or *arr-side error pages).
+    pub rejections: Option<Vec<String>>,
 }
 
 /// Bundle of values used to insert one push history row.
@@ -100,6 +106,9 @@ pub struct NewPushHistory<'a> {
     pub http_status: Option<u16>,
     /// *arr-side response body (only useful on failure).
     pub response_body: Option<&'a str>,
+    /// Parsed `rejections` from `response_body` — see
+    /// [`PushHistoryRow::rejections`].
+    pub rejections: Option<Vec<String>>,
 }
 
 /// Insert one push history row.
@@ -110,11 +119,15 @@ pub struct NewPushHistory<'a> {
 pub async fn insert(pool: &Pool, new: NewPushHistory<'_>) -> Result<PushHistoryRow, AppError> {
     let id = Uuid::new_v4();
     let now = OffsetDateTime::now_utc();
+    let rejections_json = match new.rejections.as_ref() {
+        Some(v) => Some(serde_json::to_string(v)?),
+        None => None,
+    };
     sqlx::query(
         "INSERT INTO push_history ( \
             id, decision_id, arr_instance_id, arr_instance_name, arr_kind, \
-            pushed_at, status, http_status, response_body \
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            pushed_at, status, http_status, response_body, rejections_json \
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(id.to_string())
     .bind(new.decision_id.to_string())
@@ -125,6 +138,7 @@ pub async fn insert(pool: &Pool, new: NewPushHistory<'_>) -> Result<PushHistoryR
     .bind(new.status.label())
     .bind(new.http_status.map(i64::from))
     .bind(new.response_body)
+    .bind(rejections_json.as_deref())
     .execute(pool)
     .await?;
     Ok(PushHistoryRow {
@@ -137,6 +151,7 @@ pub async fn insert(pool: &Pool, new: NewPushHistory<'_>) -> Result<PushHistoryR
         status: new.status,
         http_status: new.http_status,
         response_body: new.response_body.map(String::from),
+        rejections: new.rejections,
     })
 }
 
@@ -154,7 +169,7 @@ pub async fn recent(pool: &Pool, limit: u32) -> Result<Vec<PushHistoryRow>, AppE
     };
     let rows = sqlx::query(
         "SELECT id, decision_id, arr_instance_id, arr_instance_name, arr_kind, \
-                pushed_at, status, http_status, response_body \
+                pushed_at, status, http_status, response_body, rejections_json \
          FROM push_history ORDER BY pushed_at DESC LIMIT ?",
     )
     .bind(i64::from(limit))
@@ -174,7 +189,7 @@ pub async fn list_for_decision(
 ) -> Result<Vec<PushHistoryRow>, AppError> {
     let rows = sqlx::query(
         "SELECT id, decision_id, arr_instance_id, arr_instance_name, arr_kind, \
-                pushed_at, status, http_status, response_body \
+                pushed_at, status, http_status, response_body, rejections_json \
          FROM push_history WHERE decision_id = ? ORDER BY pushed_at ASC",
     )
     .bind(decision_id.to_string())
@@ -237,6 +252,11 @@ fn row_to_push(row: &SqliteRow) -> Result<PushHistoryRow, AppError> {
     let status_str: String = row.try_get("status")?;
     let http_status_i64: Option<i64> = row.try_get("http_status")?;
     let http_status = http_status_i64.and_then(|s| u16::try_from(s).ok());
+    // `rejections_json` is NULL on legacy rows + transport-error pushes.
+    // Bad JSON silently degrades to None rather than failing the whole
+    // row — the operator can still read the raw `response_body`.
+    let rejections_json: Option<String> = row.try_get("rejections_json").ok().flatten();
+    let rejections = rejections_json.and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok());
     Ok(PushHistoryRow {
         id,
         decision_id,
@@ -247,6 +267,7 @@ fn row_to_push(row: &SqliteRow) -> Result<PushHistoryRow, AppError> {
         status: PushStatus::from_label(&status_str),
         http_status,
         response_body: row.try_get("response_body")?,
+        rejections,
     })
 }
 
@@ -333,6 +354,7 @@ mod tests {
                 status: PushStatus::Ok,
                 http_status: Some(200),
                 response_body: None,
+                rejections: None,
             },
         )
         .await
@@ -359,6 +381,7 @@ mod tests {
                 status: PushStatus::HttpError,
                 http_status: Some(400),
                 response_body: Some("Unknown movie"),
+                rejections: Some(vec!["Unknown movie".to_string()]),
             },
         )
         .await
@@ -376,6 +399,7 @@ mod tests {
                 status: PushStatus::Ok,
                 http_status: Some(200),
                 response_body: None,
+                rejections: None,
             },
         )
         .await
@@ -399,6 +423,7 @@ mod tests {
                     status,
                     http_status: Some(200),
                     response_body: None,
+                    rejections: None,
                 },
             )
             .await
@@ -425,6 +450,7 @@ mod tests {
                 status: PushStatus::Ok,
                 http_status: Some(200),
                 response_body: None,
+                rejections: None,
             },
         )
         .await
@@ -460,6 +486,7 @@ mod tests {
                 status: PushStatus::Ok,
                 http_status: Some(200),
                 response_body: None,
+                rejections: None,
             },
         )
         .await

@@ -87,6 +87,7 @@ pub async fn push_decision(
                     status: PushStatus::TransportError,
                     http_status: None,
                     response_body: Some(&format!("client builder: {e}")),
+                    rejections: None,
                 },
             )
             .await;
@@ -98,14 +99,16 @@ pub async fn push_decision(
             // *arr returns the parsed release + rejection array even on
             // 200. Non-empty `rejections` means "accepted the HTTP
             // request but won't grab" (e.g. wrong title, quality
-            // mismatch). Persist the body verbatim so the operator can
-            // see *why* on `/pushes`.
+            // mismatch). Parse the body so the audit page can render
+            // reasons as a clean list and the log line includes them.
+            let rejections = extract_rejections(&body);
             info!(
                 target: "brarr_orchestrator::push",
                 decision_id = %decision.id,
                 arr_id = %arr_instance.id,
                 arr_name = %arr_instance.name,
-                body_excerpt = %body.chars().take(120).collect::<String>(),
+                rejected = rejections.as_ref().is_some_and(|v| !v.is_empty()),
+                rejection_count = rejections.as_ref().map_or(0, Vec::len),
                 "push accepted"
             );
             let body_opt = if body.is_empty() {
@@ -123,6 +126,7 @@ pub async fn push_decision(
                     status: PushStatus::Ok,
                     http_status: Some(200),
                     response_body: body_opt,
+                    rejections,
                 },
             )
             .await
@@ -135,6 +139,7 @@ pub async fn push_decision(
                 http_status = status,
                 "push rejected by *arr"
             );
+            let rejections = extract_rejections(&body);
             push_history::insert(
                 state.pool(),
                 NewPushHistory {
@@ -145,6 +150,7 @@ pub async fn push_decision(
                     status: PushStatus::HttpError,
                     http_status: Some(status),
                     response_body: Some(&body),
+                    rejections,
                 },
             )
             .await
@@ -167,6 +173,7 @@ pub async fn push_decision(
                     status: PushStatus::TransportError,
                     http_status: None,
                     response_body: Some(&e.to_string()),
+                    rejections: None,
                 },
             )
             .await
@@ -219,6 +226,46 @@ fn build_payload(row: &DecisionRow, public_base_url: &str) -> PushReleasePayload
         seeders,
         leechers,
     }
+}
+
+/// Mine the `rejections` array out of a *arr push response body.
+///
+/// *arr returns one of:
+/// - `[]` — push accepted, no rejections, grab fired.
+/// - `[ { ..., "rejections": ["reason 1", "reason 2"] } ]` — release
+///   was parsed but blocked downstream (quality profile, custom
+///   format, queue dedup, etc.). The audit page renders these as a
+///   clean bullet list.
+/// - Free-form text on 4xx/5xx — returns `None`, caller falls back
+///   to the raw `response_body`.
+///
+/// Returns:
+/// - `Some(vec![])` when the body parsed as an array of release
+///   objects but no `rejections` field surfaced — confirms *arr
+///   accepted cleanly.
+/// - `Some(vec!["...", "..."])` when at least one release object
+///   carried a `rejections` array.
+/// - `None` when the body isn't parseable as JSON or has a shape
+///   brarr doesn't recognize — the operator can still read the
+///   raw `response_body` column.
+fn extract_rejections(body: &str) -> Option<Vec<String>> {
+    if body.trim().is_empty() {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    let releases = v.as_array()?;
+    let mut out: Vec<String> = Vec::new();
+    for release in releases {
+        let Some(rejections) = release.get("rejections").and_then(|r| r.as_array()) else {
+            continue;
+        };
+        for r in rejections {
+            if let Some(s) = r.as_str() {
+                out.push(s.to_string());
+            }
+        }
+    }
+    Some(out)
 }
 
 /// Resolve the externally-reachable origin (`scheme://host[:port]`)
@@ -357,6 +404,49 @@ mod tests {
         let row = decision_row(Some("unit3d"));
         let p = build_payload(&row, "http://h");
         assert_eq!(p.publish_date.unix_timestamp(), 1_700_000_000);
+    }
+
+    #[test]
+    fn extract_rejections_returns_empty_vec_for_clean_accept() {
+        // `[]` = *arr accepted with no rejections; the only legit way
+        // to know "grab actually fired" from the push response alone.
+        let r = extract_rejections("[]").unwrap();
+        assert!(r.is_empty());
+    }
+
+    #[test]
+    fn extract_rejections_pulls_reasons_out_of_release_objects() {
+        let body = r#"[
+            {
+              "title": "foo",
+              "rejections": [
+                "Custom Formats X have score 0 below profile minimum 1",
+                "Release in queue and Quality Profile does not allow upgrades"
+              ]
+            }
+        ]"#;
+        let r = extract_rejections(body).unwrap();
+        assert_eq!(r.len(), 2);
+        assert!(r[0].contains("Custom Formats"));
+        assert!(r[1].contains("queue"));
+    }
+
+    #[test]
+    fn extract_rejections_returns_none_for_malformed_body() {
+        assert!(extract_rejections("").is_none());
+        assert!(extract_rejections("not json").is_none());
+        // Object instead of array — *arr error pages sometimes look
+        // like this.
+        assert!(extract_rejections(r#"{"message":"bad"}"#).is_none());
+    }
+
+    #[test]
+    fn extract_rejections_handles_release_without_rejections_field() {
+        // Spec-compliant clean response: each release object has no
+        // `rejections` key at all.
+        let body = r#"[{"title":"foo"}]"#;
+        let r = extract_rejections(body).unwrap();
+        assert!(r.is_empty());
     }
 
     #[test]

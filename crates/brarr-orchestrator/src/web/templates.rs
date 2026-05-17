@@ -155,8 +155,14 @@ pub struct PushHistoryView {
     pub status: String,
     /// HTTP status if applicable.
     pub http_status: Option<u16>,
-    /// *arr-side rejection message verbatim (1KiB cap).
+    /// *arr-side response body verbatim (8 KiB cap). Mostly for
+    /// debugging when the parsed rejections list is empty but the
+    /// grab still failed.
     pub response_body: String,
+    /// Parsed `rejections` field from the response body. Empty Vec =
+    /// *arr accepted cleanly (grab fired); non-empty = HTTP 200 but no
+    /// grab (operator must fix *arr profile / custom formats / etc.).
+    pub rejections: Vec<String>,
 }
 
 /// Releases (decisions) history view at `/releases`.
