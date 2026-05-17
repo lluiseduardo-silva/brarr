@@ -18,7 +18,7 @@ edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 authors = ["brarr contributors"]
-repository = "https://github.com/motogshit/brarr"
+repository = "https://github.com/lluiseduardo-silva/brarr"
 
 # Lints rust globais — herdados por todos os crates via `[lints] workspace = true`.
 [workspace.lints.rust]
