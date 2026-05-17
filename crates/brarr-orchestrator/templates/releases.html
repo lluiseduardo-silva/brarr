@@ -20,6 +20,9 @@
                 <th class="px-3 py-2">Tags</th>
                 <th class="px-3 py-2">Regras casadas</th>
                 <th class="px-3 py-2">Status</th>
+                {% if !arr_instances.is_empty() %}
+                <th class="px-3 py-2">Push</th>
+                {% endif %}
             </tr>
         </thead>
         <tbody>
@@ -41,6 +44,20 @@
                     <span class="badge bg-emerald-100 text-emerald-800">mantido</span>
                     {% endif %}
                 </td>
+                {% if !arr_instances.is_empty() %}
+                <td class="px-3 py-2 space-x-1 whitespace-nowrap">
+                    {% for a in arr_instances %}
+                    <button hx-post="/decisions/{{ d.id }}/push/{{ a.id }}"
+                            hx-target="#push-{{ d.id }}-{{ a.id }}"
+                            hx-swap="outerHTML"
+                            class="text-xs text-blue-700 hover:underline"
+                            title="Push para {{ a.name }} ({{ a.kind }})">
+                        → {{ a.name }}
+                    </button>
+                    <span id="push-{{ d.id }}-{{ a.id }}" class="text-xs text-slate-400 italic"></span>
+                    {% endfor %}
+                </td>
+                {% endif %}
             </tr>
         {% endfor %}
         </tbody>

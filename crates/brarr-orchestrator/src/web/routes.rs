@@ -34,7 +34,7 @@ use tracing::info;
 use uuid::Uuid;
 
 use crate::auth::{AuthConfig, SESSION_COOKIE};
-use crate::db::{arr_instances, decisions, providers, searches};
+use crate::db::{arr_instances, decisions, providers, push_history, searches};
 #[allow(
     unused_imports,
     reason = "re-exported for downstream tests that still call it"
@@ -44,7 +44,7 @@ use crate::web::render::html;
 use crate::web::templates::{
     ArrInstanceView, ArrInstancesListPartial, ArrInstancesTemplate, DashboardTemplate,
     DecisionView, LoginTemplate, ProviderView, ProvidersListPartial, ProvidersTemplate,
-    RecentSearchView, ReleasesTemplate, SearchDetailTemplate,
+    PushHistoryView, PushesTemplate, RecentSearchView, ReleasesTemplate, SearchDetailTemplate,
 };
 use crate::{AppError, AppState};
 use brarr_core::TmdbId;
@@ -66,6 +66,8 @@ pub fn router(state: AppState, static_dir: &std::path::Path) -> Router {
         )
         .route("/arr-instances/{id}", delete(arr_instances_delete))
         .route("/arr-instances/{id}/test", post(arr_instances_test))
+        .route("/decisions/{id}/push/{arr_id}", post(decisions_push))
+        .route("/pushes", get(pushes_index))
         .route("/releases", get(releases_index))
         .route("/searches", post(searches_create))
         .route("/searches/{id}", get(search_detail))
@@ -522,6 +524,82 @@ fn render_arr_ping_badge(arr_id: &str, b: &PingBadge) -> String {
     format!(r#"<span id="arr-ping-{aid}" class="badge {bg} {fg}" title="{detail}">{label}</span>"#)
 }
 
+/// `POST /decisions/{id}/push/{arr_id}` — fire-and-record a manual
+/// push of one decision to one *arr instance. Returns a small HTML
+/// fragment Sonarr-style (status badge) for HTMX to drop into the row.
+async fn decisions_push(
+    State(state): State<AppState>,
+    Path((decision_id, arr_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let decision_uuid = Uuid::parse_str(&decision_id)
+        .map_err(|e| AppError::InvalidInput(format!("invalid decision id: {e}")))?;
+    let arr_uuid = Uuid::parse_str(&arr_id)
+        .map_err(|e| AppError::InvalidInput(format!("invalid arr_instance id: {e}")))?;
+    let decision = decisions::get_by_id(state.pool(), decision_uuid).await?;
+    let arr_row = arr_instances::get_by_id(state.pool(), arr_uuid).await?;
+    let base_url = crate::push::derive_request_base(&headers);
+    let row = crate::push::push_decision(&state, &decision, &arr_row, &base_url).await?;
+    let html_fragment = render_push_badge(&decision.id.to_string(), &arr_row.id.to_string(), &row);
+    let mut resp = (StatusCode::OK, html_fragment).into_response();
+    resp.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    Ok(resp)
+}
+
+fn render_push_badge(
+    decision_id: &str,
+    arr_id: &str,
+    row: &crate::db::push_history::PushHistoryRow,
+) -> String {
+    let (bg, fg, label) = match row.status {
+        crate::db::push_history::PushStatus::Ok => ("bg-emerald-100", "text-emerald-800", "ok"),
+        crate::db::push_history::PushStatus::HttpError => ("bg-red-100", "text-red-800", "http"),
+        crate::db::push_history::PushStatus::TransportError => {
+            ("bg-amber-100", "text-amber-800", "net")
+        }
+    };
+    let detail = row.response_body.as_deref().unwrap_or("pushed");
+    let detail = crate::web::templates::escape(detail);
+    let did = crate::web::templates::escape(decision_id);
+    let aid = crate::web::templates::escape(arr_id);
+    let http_status = row
+        .http_status
+        .map_or_else(String::new, |s| format!(" {s}"));
+    format!(
+        r#"<span id="push-{did}-{aid}" class="badge {bg} {fg}" title="{detail}">{label}{http_status}</span>"#
+    )
+}
+
+async fn pushes_index(State(state): State<AppState>) -> Result<Response, AppError> {
+    let rows = push_history::recent(state.pool(), 100).await?;
+    let pushes = rows.into_iter().map(push_history_view).collect();
+    html(&PushesTemplate { pushes })
+}
+
+fn push_history_view(row: crate::db::push_history::PushHistoryRow) -> PushHistoryView {
+    let status_label = match row.status {
+        crate::db::push_history::PushStatus::Ok => "ok",
+        crate::db::push_history::PushStatus::HttpError => "http_error",
+        crate::db::push_history::PushStatus::TransportError => "transport_error",
+    };
+    PushHistoryView {
+        id: row.id.to_string(),
+        decision_id: row.decision_id.to_string(),
+        arr_instance_name: row.arr_instance_name,
+        arr_kind: row.arr_kind.label().to_string(),
+        pushed_at: row
+            .pushed_at
+            .format(&Iso8601::DEFAULT)
+            .unwrap_or_else(|_| String::from("?")),
+        status: status_label.to_string(),
+        http_status: row.http_status,
+        response_body: row.response_body.unwrap_or_default(),
+    }
+}
+
 fn arr_instance_view(row: crate::db::arr_instances::ArrInstanceRow) -> ArrInstanceView {
     ArrInstanceView {
         id: row.id.to_string(),
@@ -621,7 +699,16 @@ fn render_ping_badge(provider_id: &str, b: &PingBadge) -> String {
 async fn releases_index(State(state): State<AppState>) -> Result<Response, AppError> {
     let rows = decisions::recent(state.pool(), 50).await?;
     let decisions = rows.into_iter().map(decision_view).collect();
-    html(&ReleasesTemplate { decisions })
+    // Only show buttons for *arrs that are currently enabled. Disabled
+    // rows still exist in the DB (drain mode) but pushing through them
+    // would silently no-op the operator's click — we'd rather hide
+    // them than confuse.
+    let arr_rows = arr_instances::list_enabled(state.pool()).await?;
+    let arr_instances = arr_rows.into_iter().map(arr_instance_view).collect();
+    html(&ReleasesTemplate {
+        decisions,
+        arr_instances,
+    })
 }
 
 /// Multi-id form: at least one of `tmdb_id` / `imdb_id` must be set.

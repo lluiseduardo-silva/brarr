@@ -129,12 +129,45 @@ pub struct ArrInstancesListPartial {
     pub instances: Vec<ArrInstanceView>,
 }
 
+/// `/pushes` view — recent push attempts to any configured *arr.
+#[derive(Debug, Template)]
+#[template(path = "pushes.html")]
+pub struct PushesTemplate {
+    /// Most recent rows from `push_history`, newest first.
+    pub pushes: Vec<PushHistoryView>,
+}
+
+/// Single row in the push history page.
+#[derive(Debug)]
+pub struct PushHistoryView {
+    /// Stringified push UUID.
+    pub id: String,
+    /// Stringified decision UUID (links back to `/searches/{search_id}`
+    /// via the decision row's lineage).
+    pub decision_id: String,
+    /// *arr display name snapshot at push time.
+    pub arr_instance_name: String,
+    /// `"sonarr"` / `"radarr"`.
+    pub arr_kind: String,
+    /// ISO-8601 timestamp.
+    pub pushed_at: String,
+    /// `"ok"` / `"http_error"` / `"transport_error"`.
+    pub status: String,
+    /// HTTP status if applicable.
+    pub http_status: Option<u16>,
+    /// *arr-side rejection message verbatim (1KiB cap).
+    pub response_body: String,
+}
+
 /// Releases (decisions) history view at `/releases`.
 #[derive(Debug, Template)]
 #[template(path = "releases.html")]
 pub struct ReleasesTemplate {
     /// Most recent decision rows.
     pub decisions: Vec<DecisionView>,
+    /// Every enabled *arr instance, rendered as a per-row "push" button
+    /// so the operator can manually fire one decision at one *arr.
+    pub arr_instances: Vec<ArrInstanceView>,
 }
 
 /// Login form view at `/login`.

@@ -53,5 +53,8 @@ tonic-build = "0.14.5"
 tonic-prost-build = "0.14.5"
 
 [dev-dependencies]
+brarr-arr = { path = "../brarr-arr" }
+brarr-core = { path = "../brarr-core" }
 reqwest = { version = "0.13.3", default-features = false, features = ["default-tls", "form", "json"] }
+url = "2.5.8"
 wat = "1.249.0"

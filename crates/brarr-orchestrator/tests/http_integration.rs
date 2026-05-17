@@ -341,3 +341,112 @@ async fn arr_instance_delete_unknown_returns_404() {
         .expect("send");
     assert_eq!(resp.status(), 404);
 }
+
+#[tokio::test]
+async fn pushes_index_renders_empty_state() {
+    let (addr, _state) = spawn().await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("http://{addr}/pushes"))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("Histórico de push"));
+    assert!(body.contains("Nenhum push registrado"));
+}
+
+#[tokio::test]
+async fn decisions_push_records_transport_failure_against_dead_arr() {
+    // No live *arr is reachable from the test harness, so the push
+    // call necessarily fails — but brarr should still persist a
+    // `push_history` row marked transport_error rather than 5xx-ing
+    // the request itself. Validates the "always record, never crash"
+    // contract.
+    use brarr_core::{ReleaseKind, Resolution};
+    use brarr_orchestrator::db::{arr_instances, decisions, searches};
+
+    let (addr, state) = spawn().await;
+    let pool = state.pool();
+
+    // Set up a decision row + a (fake) arr_instance pointing at a
+    // host that will refuse connections.
+    let search = searches::create(
+        pool,
+        searches::SearchRequestJson {
+            tmdb_id: Some(603),
+            imdb_id: None,
+        },
+    )
+    .await
+    .unwrap();
+    let decision = decisions::insert(
+        pool,
+        decisions::DecisionInsert {
+            search_id: search.id,
+            provider_id: None,
+            provider_name: "p".into(),
+            release_name: "Matrix.1999.1080p-FOO".into(),
+            release_id_remote: 1,
+            score: 800,
+            rejected: false,
+            tags: vec![],
+            matched_rules: vec![],
+            seeders: 1,
+            leechers: 0,
+            size_bytes: 1,
+            resolution: Resolution::P1080,
+            kind: ReleaseKind::WebDl,
+            download_url: None,
+            details_url: None,
+            provider_kind: Some("unit3d".into()),
+            published_at: None,
+        },
+    )
+    .await
+    .unwrap();
+    // Pick a host:port that can't possibly accept connections.
+    let arr = arr_instances::insert(
+        pool,
+        arr_instances::NewArrInstance {
+            name: "dead",
+            kind: brarr_arr::ArrKind::Radarr,
+            base_url: &url::Url::parse("http://127.0.0.1:1/").unwrap(),
+            api_key: "x",
+            push_threshold: None,
+            enabled: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!(
+            "http://{addr}/decisions/{}/push/{}",
+            decision.id, arr.id
+        ))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+    // Badge for a transport failure ("net" label).
+    assert!(
+        body.contains("net") || body.contains("http"),
+        "badge should reflect failure, body = {body}"
+    );
+
+    // History page should now show one row.
+    let resp = client
+        .get(format!("http://{addr}/pushes"))
+        .send()
+        .await
+        .expect("send");
+    let body = resp.text().await.unwrap();
+    assert!(
+        body.contains("dead"),
+        "push history should mention the *arr name, body = {body}"
+    );
+}
