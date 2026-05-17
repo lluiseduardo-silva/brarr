@@ -29,6 +29,16 @@
 #     brarr:latest
 
 # ------------------------------------------------------------------
+# Global ARGs — declared before any FROM so each stage's FROM line
+# can reference them. Buildx scopes ARGs declared *after* a FROM to
+# that single stage, so re-declaring them here at the top is the only
+# way to use them in subsequent FROMs (or in different stages).
+# ------------------------------------------------------------------
+ARG TAILWIND_VERSION=v4.1.16
+ARG RUST_VERSION=1.95
+ARG APP_UID=10001
+
+# ------------------------------------------------------------------
 # Stage 1a — compile the Tailwind v4 bundle.
 #
 # Uses the upstream standalone binary (no Node), pinned by checksum
@@ -36,13 +46,15 @@
 # /css/app.css and is copied into the runtime image alongside the
 # other static assets.
 # ------------------------------------------------------------------
-ARG TAILWIND_VERSION=v4.1.16
 FROM debian:bookworm-slim AS css-builder
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
 
+# Re-import the global ARGs we need inside this stage. ARGs only
+# inherit into a stage's RUN/ENV instructions when re-declared here.
+ARG TAILWIND_VERSION
 ARG TARGETARCH
 WORKDIR /css
 
@@ -69,7 +81,6 @@ RUN tailwindcss --input /css/styles/input.css --output /css/app.css --minify
 # ------------------------------------------------------------------
 # Stage 1b — build the workspace in release mode.
 # ------------------------------------------------------------------
-ARG RUST_VERSION=1.95
 FROM rust:${RUST_VERSION}-slim-bookworm AS builder
 
 # Build dependencies:
@@ -118,7 +129,9 @@ RUN apt-get update \
         wget \
     && rm -rf /var/lib/apt/lists/*
 
-ARG APP_UID=10001
+# Re-import the global ARG inside this stage so the `${APP_UID}` token
+# in the RUN below expands to the build-arg value (or its default).
+ARG APP_UID
 RUN groupadd --system --gid ${APP_UID} brarr \
     && useradd --system --uid ${APP_UID} --gid ${APP_UID} \
         --home-dir /data --shell /usr/sbin/nologin brarr \
