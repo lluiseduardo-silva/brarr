@@ -92,6 +92,43 @@ pub struct ProvidersListPartial {
     pub providers: Vec<ProviderView>,
 }
 
+/// `/arr-instances` view — admin CRUD for Sonarr/Radarr endpoints
+/// brarr can push releases to.
+#[derive(Debug, Template)]
+#[template(path = "arr_instances.html")]
+pub struct ArrInstancesTemplate {
+    /// All configured *arr endpoints.
+    pub instances: Vec<ArrInstanceView>,
+}
+
+/// Single row in the *arr admin table.
+#[derive(Debug)]
+pub struct ArrInstanceView {
+    /// Stringified UUID.
+    pub id: String,
+    /// Operator-chosen display name.
+    pub name: String,
+    /// `"sonarr"` / `"radarr"`.
+    pub kind: String,
+    /// Base URL of the *arr instance.
+    pub base_url: String,
+    /// Minimum decision score required to trigger an auto-push.
+    pub push_threshold: u32,
+    /// `true` if this row is currently eligible for push.
+    pub enabled: bool,
+    /// Creation timestamp (ISO-8601).
+    pub created_at: String,
+}
+
+/// HTMX partial returned after `POST /arr-instances` so the list cell
+/// can refresh without a full page reload.
+#[derive(Debug, Template)]
+#[template(path = "partials/arr_instances_list.html")]
+pub struct ArrInstancesListPartial {
+    /// All configured *arr endpoints.
+    pub instances: Vec<ArrInstanceView>,
+}
+
 /// Releases (decisions) history view at `/releases`.
 #[derive(Debug, Template)]
 #[template(path = "releases.html")]

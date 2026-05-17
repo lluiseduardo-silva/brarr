@@ -1,0 +1,55 @@
+<section id="arr-instances-list" class="bg-white rounded-lg shadow overflow-x-auto">
+    {% if instances.is_empty() %}
+    <p class="p-4 text-slate-500 italic">Nenhum *arr cadastrado. Adicione um Radarr/Sonarr acima pra ativar push automático.</p>
+    {% else %}
+    <table class="w-full text-sm">
+        <thead class="bg-slate-100 text-left">
+            <tr>
+                <th class="px-3 py-2">Nome</th>
+                <th class="px-3 py-2">Tipo</th>
+                <th class="px-3 py-2">Base URL</th>
+                <th class="px-3 py-2">Score mín.</th>
+                <th class="px-3 py-2">Ativo</th>
+                <th class="px-3 py-2">Status</th>
+                <th class="px-3 py-2"></th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for a in instances %}
+            <tr class="border-t" id="arr-instance-{{ a.id }}">
+                <td class="px-3 py-2 font-medium">{{ a.name }}</td>
+                <td class="px-3 py-2 text-xs uppercase tracking-wide">{{ a.kind }}</td>
+                <td class="px-3 py-2"><a href="{{ a.base_url }}" class="text-blue-600 hover:underline" target="_blank" rel="noopener">{{ a.base_url }}</a></td>
+                <td class="px-3 py-2 font-mono text-xs">{{ a.push_threshold }}</td>
+                <td class="px-3 py-2">
+                    {% if a.enabled %}
+                    <span class="badge bg-emerald-100 text-emerald-800">on</span>
+                    {% else %}
+                    <span class="badge bg-slate-200 text-slate-600">off</span>
+                    {% endif %}
+                </td>
+                <td class="px-3 py-2">
+                    <span id="arr-ping-{{ a.id }}" class="text-xs text-slate-400 italic">não testado</span>
+                </td>
+                <td class="px-3 py-2 text-right space-x-2">
+                    <button hx-post="/arr-instances/{{ a.id }}/test"
+                            hx-target="#arr-ping-{{ a.id }}"
+                            hx-swap="outerHTML"
+                            hx-indicator="#arr-ping-{{ a.id }}"
+                            class="text-emerald-700 hover:underline text-xs">
+                        testar
+                    </button>
+                    <button hx-delete="/arr-instances/{{ a.id }}"
+                            hx-target="#arr-instance-{{ a.id }}"
+                            hx-swap="outerHTML"
+                            hx-confirm="Remover este *arr?"
+                            class="text-red-600 hover:underline text-xs">
+                        remover
+                    </button>
+                </td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+</section>

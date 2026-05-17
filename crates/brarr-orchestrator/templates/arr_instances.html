@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block title %}*arr — brarr{% endblock %}
+{% block content %}
+<h1 class="text-2xl font-bold mb-1">*arr endpoints</h1>
+<p class="text-sm text-slate-600 mb-4">
+    Sonarr / Radarr para onde brarr empurra releases que cruzam o
+    threshold de score. Modelo autobrr: brarr decide, *arr só baixa.
+</p>
+
+<section class="bg-white rounded-lg shadow p-4 mb-6">
+    <h2 class="text-lg font-semibold mb-2">Adicionar instância</h2>
+    <form hx-post="/arr-instances"
+          hx-target="#arr-instances-list"
+          hx-swap="outerHTML"
+          hx-on::after-request="this.reset()"
+          class="grid grid-cols-1 md:grid-cols-6 gap-3 items-end">
+        <label class="text-xs uppercase tracking-wide text-slate-500">
+            Nome
+            <input name="name" required class="w-full mt-1 border rounded px-2 py-1 text-sm" placeholder="radarr-main">
+        </label>
+        <label class="text-xs uppercase tracking-wide text-slate-500">
+            Tipo
+            <select name="kind" required class="w-full mt-1 border rounded px-2 py-1 text-sm bg-white">
+                <option value="radarr">Radarr (filmes)</option>
+                <option value="sonarr">Sonarr (séries)</option>
+            </select>
+        </label>
+        <label class="text-xs uppercase tracking-wide text-slate-500">
+            Base URL
+            <input name="base_url" required type="url" class="w-full mt-1 border rounded px-2 py-1 text-sm" placeholder="http://10.0.1.246:7878/">
+        </label>
+        <label class="text-xs uppercase tracking-wide text-slate-500">
+            API key
+            <input name="api_key" required type="password" class="w-full mt-1 border rounded px-2 py-1 text-sm">
+        </label>
+        <label class="text-xs uppercase tracking-wide text-slate-500">
+            Score mínimo
+            <input name="push_threshold" type="number" min="0" max="1000" value="700" class="w-full mt-1 border rounded px-2 py-1 text-sm">
+        </label>
+        <button type="submit" class="bg-amber-500 hover:bg-amber-600 text-white text-sm font-semibold px-3 py-2 rounded">
+            Salvar
+        </button>
+    </form>
+    <p class="text-xs text-slate-500 mt-2">
+        <strong>Score mínimo</strong> (0..1000): só releases com score
+        ≥ esse valor disparam push. Default 700 ≈ "PT-BR confirmado +
+        1080p". Use 0 pra empurrar tudo (debug).
+    </p>
+    <p class="text-xs text-slate-400 mt-1">
+        Base URL = raiz do *arr (ex. <code>http://radarr:7878/</code>).
+        API key = <em>Settings → General → Security → API Key</em> na UI do *arr.
+    </p>
+</section>
+
+{% include "partials/arr_instances_list.html" %}
+
+{% endblock %}

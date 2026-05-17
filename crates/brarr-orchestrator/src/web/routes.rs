@@ -34,7 +34,7 @@ use tracing::info;
 use uuid::Uuid;
 
 use crate::auth::{AuthConfig, SESSION_COOKIE};
-use crate::db::{decisions, providers, searches};
+use crate::db::{arr_instances, decisions, providers, searches};
 #[allow(
     unused_imports,
     reason = "re-exported for downstream tests that still call it"
@@ -42,8 +42,9 @@ use crate::db::{decisions, providers, searches};
 use crate::search::run_tmdb_search;
 use crate::web::render::html;
 use crate::web::templates::{
-    DashboardTemplate, DecisionView, LoginTemplate, ProviderView, ProvidersListPartial,
-    ProvidersTemplate, RecentSearchView, ReleasesTemplate, SearchDetailTemplate,
+    ArrInstanceView, ArrInstancesListPartial, ArrInstancesTemplate, DashboardTemplate,
+    DecisionView, LoginTemplate, ProviderView, ProvidersListPartial, ProvidersTemplate,
+    RecentSearchView, ReleasesTemplate, SearchDetailTemplate,
 };
 use crate::{AppError, AppState};
 use brarr_core::TmdbId;
@@ -59,6 +60,12 @@ pub fn router(state: AppState, static_dir: &std::path::Path) -> Router {
         .route("/providers/{id}", delete(providers_delete))
         .route("/providers/{id}/test", post(providers_test))
         .route("/providers/{id}/probe", get(providers_probe))
+        .route(
+            "/arr-instances",
+            get(arr_instances_index).post(arr_instances_create),
+        )
+        .route("/arr-instances/{id}", delete(arr_instances_delete))
+        .route("/arr-instances/{id}/test", post(arr_instances_test))
         .route("/releases", get(releases_index))
         .route("/searches", post(searches_create))
         .route("/searches/{id}", get(search_detail))
@@ -392,6 +399,142 @@ async fn providers_test(
         HeaderValue::from_static("text/html; charset=utf-8"),
     );
     Ok(resp)
+}
+
+async fn arr_instances_index(State(state): State<AppState>) -> Result<Response, AppError> {
+    let rows = arr_instances::list_all(state.pool()).await?;
+    let instances = rows.into_iter().map(arr_instance_view).collect();
+    html(&ArrInstancesTemplate { instances })
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateArrInstanceForm {
+    name: String,
+    kind: String,
+    base_url: String,
+    api_key: String,
+    #[serde(default)]
+    push_threshold: Option<String>,
+}
+
+async fn arr_instances_create(
+    State(state): State<AppState>,
+    Form(form): Form<CreateArrInstanceForm>,
+) -> Result<Response, AppError> {
+    let kind = match form.kind.trim().to_ascii_lowercase().as_str() {
+        "sonarr" => brarr_arr::ArrKind::Sonarr,
+        "radarr" => brarr_arr::ArrKind::Radarr,
+        other => {
+            return Err(AppError::InvalidInput(format!(
+                "kind must be sonarr or radarr, got {other:?}"
+            )));
+        }
+    };
+    let url = url::Url::parse(form.base_url.trim())
+        .map_err(|e| AppError::InvalidInput(format!("invalid base_url: {e}")))?;
+    let push_threshold = form
+        .push_threshold
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::parse::<u32>)
+        .transpose()
+        .map_err(|e| AppError::InvalidInput(format!("push_threshold must be 0..=1000: {e}")))?;
+
+    arr_instances::insert(
+        state.pool(),
+        arr_instances::NewArrInstance {
+            name: form.name.trim(),
+            kind,
+            base_url: &url,
+            api_key: form.api_key.trim(),
+            push_threshold,
+            enabled: Some(true),
+        },
+    )
+    .await?;
+
+    let rows = arr_instances::list_all(state.pool()).await?;
+    let instances = rows.into_iter().map(arr_instance_view).collect();
+    html(&ArrInstancesListPartial { instances })
+}
+
+async fn arr_instances_delete(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, AppError> {
+    let uuid = Uuid::parse_str(&id)
+        .map_err(|e| AppError::InvalidInput(format!("invalid arr_instance id: {e}")))?;
+    let removed = arr_instances::delete_by_id(state.pool(), uuid).await?;
+    if !removed {
+        return Err(AppError::NotFound(format!("arr_instance {uuid}")));
+    }
+    Ok((StatusCode::OK, "").into_response())
+}
+
+/// `POST /arr-instances/{id}/test` — hits the *arr's `/system/status`
+/// endpoint with the configured apikey and returns a status badge.
+async fn arr_instances_test(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, AppError> {
+    let uuid = Uuid::parse_str(&id)
+        .map_err(|e| AppError::InvalidInput(format!("invalid arr_instance id: {e}")))?;
+    let row = arr_instances::get_by_id(state.pool(), uuid).await?;
+    let inst = row.to_arr_instance();
+    let badge = match brarr_arr::ArrClient::new(inst) {
+        Ok(client) => match client.ping().await {
+            Ok(status) => PingBadge {
+                ok: true,
+                label: format!("{} v{}", status.app_name, status.version),
+                detail: "ok".to_string(),
+            },
+            Err(e) => PingBadge {
+                ok: false,
+                label: "erro".to_string(),
+                detail: format!("{e}"),
+            },
+        },
+        Err(e) => PingBadge {
+            ok: false,
+            label: "config".to_string(),
+            detail: format!("client build failed: {e}"),
+        },
+    };
+    let html_fragment = render_arr_ping_badge(&row.id.to_string(), &badge);
+    let mut resp = (StatusCode::OK, html_fragment).into_response();
+    resp.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    Ok(resp)
+}
+
+fn render_arr_ping_badge(arr_id: &str, b: &PingBadge) -> String {
+    let (bg, fg) = if b.ok {
+        ("bg-emerald-100", "text-emerald-800")
+    } else {
+        ("bg-red-100", "text-red-800")
+    };
+    let detail = crate::web::templates::escape(&b.detail);
+    let label = crate::web::templates::escape(&b.label);
+    let aid = crate::web::templates::escape(arr_id);
+    format!(r#"<span id="arr-ping-{aid}" class="badge {bg} {fg}" title="{detail}">{label}</span>"#)
+}
+
+fn arr_instance_view(row: crate::db::arr_instances::ArrInstanceRow) -> ArrInstanceView {
+    ArrInstanceView {
+        id: row.id.to_string(),
+        name: row.name,
+        kind: row.kind.label().to_string(),
+        base_url: row.base_url.to_string(),
+        push_threshold: row.push_threshold,
+        enabled: row.enabled,
+        created_at: row
+            .created_at
+            .format(&Iso8601::DEFAULT)
+            .unwrap_or_else(|_| String::from("?")),
+    }
 }
 
 /// Outcome of a single provider ping, normalized across provider kinds

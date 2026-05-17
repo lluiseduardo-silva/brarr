@@ -222,3 +222,122 @@ async fn invalid_base_url_in_form_returns_400() {
         .expect("send");
     assert_eq!(resp.status(), 400);
 }
+
+#[tokio::test]
+async fn arr_instances_index_renders_empty_state() {
+    let (addr, _state) = spawn().await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("http://{addr}/arr-instances"))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("Adicionar instância"));
+    assert!(body.contains("Nenhum *arr cadastrado"));
+}
+
+#[tokio::test]
+async fn create_then_delete_arr_instance_roundtrip() {
+    let (addr, _state) = spawn().await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("http://{addr}/arr-instances"))
+        .form(&[
+            ("name", "radarr-main"),
+            ("kind", "radarr"),
+            ("base_url", "http://radarr.local:7878/"),
+            ("api_key", "test-key"),
+            ("push_threshold", "650"),
+        ])
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("radarr-main"));
+    assert!(body.contains("650"), "threshold should show, body: {body}");
+
+    // GET /arr-instances should now show it.
+    let resp = client
+        .get(format!("http://{addr}/arr-instances"))
+        .send()
+        .await
+        .expect("send");
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("radarr-main"));
+
+    // Pull the row id out of `id="arr-instance-<uuid>"`.
+    let marker = "id=\"arr-instance-";
+    let pos = body.find(marker).expect("arr-instance row marker");
+    let rest = &body[pos + marker.len()..];
+    let end = rest.find('"').expect("closing quote");
+    let id = &rest[..end];
+
+    let resp = client
+        .delete(format!("http://{addr}/arr-instances/{id}"))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 200);
+
+    let resp = client
+        .get(format!("http://{addr}/arr-instances"))
+        .send()
+        .await
+        .expect("send");
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("Nenhum *arr cadastrado"));
+}
+
+#[tokio::test]
+async fn arr_instance_create_rejects_invalid_kind() {
+    let (addr, _state) = spawn().await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{addr}/arr-instances"))
+        .form(&[
+            ("name", "wrong"),
+            ("kind", "lidarr"),
+            ("base_url", "http://x/"),
+            ("api_key", "k"),
+        ])
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 400);
+}
+
+#[tokio::test]
+async fn arr_instance_create_rejects_invalid_base_url() {
+    let (addr, _state) = spawn().await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{addr}/arr-instances"))
+        .form(&[
+            ("name", "x"),
+            ("kind", "radarr"),
+            ("base_url", "not a url"),
+            ("api_key", "k"),
+        ])
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 400);
+}
+
+#[tokio::test]
+async fn arr_instance_delete_unknown_returns_404() {
+    let (addr, _state) = spawn().await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .delete(format!(
+            "http://{addr}/arr-instances/00000000-0000-4000-8000-000000000000"
+        ))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 404);
+}
