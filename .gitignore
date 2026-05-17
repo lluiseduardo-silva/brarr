@@ -36,6 +36,9 @@ CHECKPOINT.md
 CHECKPOINT-*.md
 tmp_*.py
 
+# Claude Code per-project config (preview server launch, etc.)
+.claude/
+
 # Tailwind standalone binary (per-platform; install via scripts/install-tailwind.{sh,ps1})
 /tools/
 
