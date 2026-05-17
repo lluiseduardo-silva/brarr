@@ -20,7 +20,22 @@
                 <td class="px-3 py-2 font-medium">{{ a.name }}</td>
                 <td class="px-3 py-2 text-xs uppercase tracking-wide">{{ a.kind }}</td>
                 <td class="px-3 py-2"><a href="{{ a.base_url }}" class="text-blue-600 hover:underline" target="_blank" rel="noopener">{{ a.base_url }}</a></td>
-                <td class="px-3 py-2 font-mono text-xs">{{ a.push_threshold }}</td>
+                <td class="px-3 py-2">
+                    <form hx-post="/arr-instances/{{ a.id }}/threshold"
+                          hx-target="#arr-instances-list"
+                          hx-swap="outerHTML"
+                          class="flex items-center gap-1">
+                        <input name="push_threshold"
+                               type="number"
+                               min="0"
+                               max="1000"
+                               value="{{ a.push_threshold }}"
+                               class="w-16 border rounded px-1 py-0.5 text-xs font-mono">
+                        <button type="submit"
+                                class="text-xs text-blue-700 hover:underline"
+                                title="Salvar novo threshold">✓</button>
+                    </form>
+                </td>
                 <td class="px-3 py-2">
                     {% if a.enabled %}
                     <span class="badge bg-emerald-100 text-emerald-800">on</span>

@@ -86,7 +86,11 @@ pub async fn insert(pool: &Pool, new: NewArrInstance<'_>) -> Result<ArrInstanceR
             "arr instance name cannot be empty".into(),
         ));
     }
-    let threshold = new.push_threshold.unwrap_or(700);
+    // Default 150 ≈ "PT-BR audio confirmado + 1 bonus de qualidade
+    // ou ~10 seeders". Baseline scoring tops out around 230 (PT-BR
+    // audio=100 + sub=50 + 2160p=20 + HDR=10 + seeders cap=50), então
+    // qualquer threshold acima disso na prática silencia o push.
+    let threshold = new.push_threshold.unwrap_or(150);
     if threshold > 1000 {
         return Err(AppError::InvalidInput(format!(
             "push_threshold must be 0..=1000, got {threshold}"
@@ -171,6 +175,34 @@ pub async fn get_by_id(pool: &Pool, id: Uuid) -> Result<ArrInstanceRow, AppError
     }
 }
 
+/// Update the `push_threshold` field of one row in-place.
+///
+/// # Errors
+///
+/// - [`AppError::InvalidInput`] when `threshold > 1000`.
+/// - [`AppError::NotFound`] when no row matches the id.
+/// - [`AppError::Database`] on SQL failure.
+pub async fn update_threshold(
+    pool: &Pool,
+    id: Uuid,
+    threshold: u32,
+) -> Result<ArrInstanceRow, AppError> {
+    if threshold > 1000 {
+        return Err(AppError::InvalidInput(format!(
+            "push_threshold must be 0..=1000, got {threshold}"
+        )));
+    }
+    let res = sqlx::query("UPDATE arr_instances SET push_threshold = ? WHERE id = ?")
+        .bind(i64::from(threshold))
+        .bind(id.to_string())
+        .execute(pool)
+        .await?;
+    if res.rows_affected() == 0 {
+        return Err(AppError::NotFound(format!("arr_instance {id}")));
+    }
+    get_by_id(pool, id).await
+}
+
 /// Delete a row by id. Returns `true` if a row was removed.
 ///
 /// # Errors
@@ -246,7 +278,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(row.kind, ArrKind::Radarr);
-        assert_eq!(row.push_threshold, 700);
+        assert_eq!(row.push_threshold, 150);
         assert!(row.enabled);
 
         let all = list_all(&pool).await.unwrap();
@@ -318,6 +350,40 @@ mod tests {
     async fn get_by_id_404s_when_missing() {
         let pool = open_memory().await.unwrap();
         let err = get_by_id(&pool, Uuid::new_v4()).await.unwrap_err();
+        assert!(matches!(err, AppError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn update_threshold_persists_new_value() {
+        let pool = open_memory().await.unwrap();
+        let url = Url::parse("https://x/").unwrap();
+        let row = insert(&pool, ni("t", ArrKind::Radarr, &url, "k"))
+            .await
+            .unwrap();
+        assert_eq!(row.push_threshold, 150);
+        let updated = update_threshold(&pool, row.id, 200).await.unwrap();
+        assert_eq!(updated.push_threshold, 200);
+        let fetched = get_by_id(&pool, row.id).await.unwrap();
+        assert_eq!(fetched.push_threshold, 200);
+    }
+
+    #[tokio::test]
+    async fn update_threshold_rejects_above_1000() {
+        let pool = open_memory().await.unwrap();
+        let url = Url::parse("https://x/").unwrap();
+        let row = insert(&pool, ni("t", ArrKind::Radarr, &url, "k"))
+            .await
+            .unwrap();
+        let err = update_threshold(&pool, row.id, 1500).await.unwrap_err();
+        assert!(matches!(err, AppError::InvalidInput(_)));
+    }
+
+    #[tokio::test]
+    async fn update_threshold_404s_on_unknown_id() {
+        let pool = open_memory().await.unwrap();
+        let err = update_threshold(&pool, Uuid::new_v4(), 200)
+            .await
+            .unwrap_err();
         assert!(matches!(err, AppError::NotFound(_)));
     }
 

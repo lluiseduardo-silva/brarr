@@ -67,6 +67,10 @@ pub fn router(state: AppState, static_dir: &std::path::Path) -> Router {
         .route("/arr-instances/{id}", delete(arr_instances_delete))
         .route("/arr-instances/{id}/test", post(arr_instances_test))
         .route("/arr-instances/{id}/poll-now", post(arr_instances_poll_now))
+        .route(
+            "/arr-instances/{id}/threshold",
+            post(arr_instances_update_threshold),
+        )
         .route("/decisions/{id}/push/{arr_id}", post(decisions_push))
         .route("/pushes", get(pushes_index))
         .route("/releases", get(releases_index))
@@ -511,6 +515,32 @@ async fn arr_instances_test(
         HeaderValue::from_static("text/html; charset=utf-8"),
     );
     Ok(resp)
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateThresholdForm {
+    push_threshold: String,
+}
+
+/// `POST /arr-instances/{id}/threshold` — update push_threshold in
+/// place. Refreshes the entire list partial (cheap) so the new value
+/// shows everywhere.
+async fn arr_instances_update_threshold(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Form(form): Form<UpdateThresholdForm>,
+) -> Result<Response, AppError> {
+    let uuid = Uuid::parse_str(&id)
+        .map_err(|e| AppError::InvalidInput(format!("invalid arr_instance id: {e}")))?;
+    let threshold: u32 = form
+        .push_threshold
+        .trim()
+        .parse()
+        .map_err(|e| AppError::InvalidInput(format!("threshold must be 0..=1000: {e}")))?;
+    arr_instances::update_threshold(state.pool(), uuid, threshold).await?;
+    let rows = arr_instances::list_all(state.pool()).await?;
+    let instances = rows.into_iter().map(arr_instance_view).collect();
+    html(&ArrInstancesListPartial { instances })
 }
 
 /// `POST /arr-instances/{id}/poll-now` — manual trigger of one

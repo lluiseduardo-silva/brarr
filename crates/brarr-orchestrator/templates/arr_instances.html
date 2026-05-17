@@ -35,7 +35,7 @@
         </label>
         <label class="text-xs uppercase tracking-wide text-slate-500">
             Score mínimo
-            <input name="push_threshold" type="number" min="0" max="1000" value="700" class="w-full mt-1 border rounded px-2 py-1 text-sm">
+            <input name="push_threshold" type="number" min="0" max="1000" value="150" class="w-full mt-1 border rounded px-2 py-1 text-sm">
         </label>
         <button type="submit" class="bg-amber-500 hover:bg-amber-600 text-white text-sm font-semibold px-3 py-2 rounded">
             Salvar
@@ -43,8 +43,10 @@
     </form>
     <p class="text-xs text-slate-500 mt-2">
         <strong>Score mínimo</strong> (0..1000): só releases com score
-        ≥ esse valor disparam push. Default 700 ≈ "PT-BR confirmado +
-        1080p". Use 0 pra empurrar tudo (debug).
+        ≥ esse valor disparam push. Default <strong>150</strong> ≈ "PT-BR
+        audio confirmado + 1 bônus (1080p ou seeders ≥ 50)". Baseline
+        scoring topa em ~230 (PT-BR audio 100 + PT-BR sub 50 + 2160p 20 +
+        HDR 10 + seeders cap 50). Use 0 pra empurrar tudo (debug).
     </p>
     <p class="text-xs text-slate-400 mt-1">
         Base URL = raiz do *arr (ex. <code>http://radarr:7878/</code>).
