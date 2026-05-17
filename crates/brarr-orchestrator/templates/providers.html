@@ -2,22 +2,13 @@
 {% block title %}Providers — brarr{% endblock %}
 {% block content %}
 
-{# Page title + Adicionar CTA. #}
-<div class="flex items-center justify-between gap-4 mb-6">
-    <div>
-        <h1 class="font-semibold text-[28px] leading-9 text-fg-primary">Providers</h1>
-        <p class="text-base text-fg-secondary mt-1">
-            {{ providers.len() }} configurados — trackers UNIT3D, indexers Newznab/Torznab, plugins WASM.
-        </p>
-    </div>
-    <a href="#new-provider"
-       class="brand-gradient flex items-center gap-2 px-5 h-11 rounded-lg text-white text-base font-semibold whitespace-nowrap"
-       style="box-shadow: 0 8px 20px var(--color-glow);">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round">
-            <path d="M12 5v14M5 12h14"/>
-        </svg>
-        Adicionar provider
-    </a>
+{# Page title. The "Adicionar provider" form lives directly below the
+   scoring hint card, so a top CTA jump-link is just visual noise. #}
+<div class="mb-6">
+    <h1 class="font-semibold text-[28px] leading-9 text-fg-primary">Providers</h1>
+    <p class="text-base text-fg-secondary mt-1">
+        {{ providers.len() }} configurados — trackers UNIT3D, indexers Newznab/Torznab, plugins WASM.
+    </p>
 </div>
 
 {# Hint card — explains the scoring engine + ships ready-to-paste

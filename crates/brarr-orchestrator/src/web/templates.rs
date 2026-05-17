@@ -80,6 +80,15 @@ pub struct DecisionView {
     pub seeders: u32,
     /// Human-friendly size (e.g. `1.23 GiB`).
     pub size_human: String,
+    /// Single uppercase letter for the header provider badge —
+    /// `provider_name`'s first ASCII alphanumeric, uppercased, or `?`
+    /// when the name is blank / starts with punctuation.
+    pub provider_initial: String,
+    /// Approximate age of the decision relative to now, in pt-BR
+    /// (`"há 23 dias"`, `"há 2 horas"`, `"agora"`). Empty string when
+    /// the decision timestamp is in the future (clock skew) or
+    /// otherwise unprintable.
+    pub age: String,
 }
 
 /// Providers index view at `/providers`.

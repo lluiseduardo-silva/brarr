@@ -282,6 +282,22 @@
   }
   .nav-link[data-active="true"]::after { width: 28px; }
 
+  /* Releases page filter chip. Idle is muted; active swaps to the
+     accent-soft / accent-solid combo used elsewhere for "selected
+     filter". Driven by data-active="1" toggled in releases.js. */
+  .filter-btn {
+    background: var(--color-bg-muted);
+    color: var(--color-fg-secondary);
+    border: 1px solid transparent;
+    transition: background-color 120ms ease-out, color 120ms ease-out, border-color 120ms ease-out;
+  }
+  .filter-btn:hover { color: var(--color-fg-primary); }
+  .filter-btn[data-active="1"] {
+    background: var(--color-accent-soft);
+    color: var(--color-accent-soft-fg);
+    border-color: var(--color-accent-solid);
+  }
+
   /* Card with the brand 2-pixel gradient hairline pinned to its top
      edge. Apply to any rounded card to inherit the design-system
      "signature". */

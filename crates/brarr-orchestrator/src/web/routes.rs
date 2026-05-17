@@ -1417,6 +1417,8 @@ fn decision_view(d: crate::db::decisions::DecisionRow) -> DecisionView {
     let matched_rules = d.matched_rules.join(", ");
     let audio_chips = audio_chips_from_languages(&d.audio_languages, &d.subtitle_languages);
     let subtitle_chips = subtitle_chips_from_languages(&d.subtitle_languages);
+    let provider_initial = first_alpha_initial(&d.provider_name);
+    let age = humanize_age(d.decided_at);
     DecisionView {
         id: d.id.to_string(),
         provider_name: d.provider_name,
@@ -1432,7 +1434,57 @@ fn decision_view(d: crate::db::decisions::DecisionRow) -> DecisionView {
         kind: d.kind,
         seeders: d.seeders,
         size_human: humanize_bytes(d.size_bytes),
+        provider_initial,
+        age,
     }
+}
+
+/// First ASCII alphanumeric of `s`, uppercased. Falls back to `?` for
+/// blank or punctuation-only names so the header chip always has a
+/// visible mark. Non-ASCII letters get normalised to `?` rather than
+/// risking a multi-codepoint badge that breaks the fixed-size circle.
+fn first_alpha_initial(s: &str) -> String {
+    for ch in s.chars() {
+        if ch.is_ascii_alphanumeric() {
+            return ch.to_ascii_uppercase().to_string();
+        }
+    }
+    "?".to_string()
+}
+
+/// Format a decision timestamp as `"há N {unidade}"` in pt-BR — the
+/// release card subtitle scans best when the operator can see at a
+/// glance whether a row is hours or days old. Anything beyond a year
+/// is rounded down to years; anything in the future (clock skew)
+/// returns an empty string so the template can hide the line entirely.
+fn humanize_age(decided_at: OffsetDateTime) -> String {
+    let now = OffsetDateTime::now_utc();
+    if decided_at > now {
+        return String::new();
+    }
+    let elapsed = now - decided_at;
+    let secs = elapsed.whole_seconds();
+    if secs < 60 {
+        return "agora".to_string();
+    }
+    let minutes = secs / 60;
+    if minutes < 60 {
+        return format!("há {minutes} min");
+    }
+    let hours = minutes / 60;
+    if hours < 24 {
+        return format!("há {hours} {}", if hours == 1 { "hora" } else { "horas" });
+    }
+    let days = hours / 24;
+    if days < 30 {
+        return format!("há {days} {}", if days == 1 { "dia" } else { "dias" });
+    }
+    let months = days / 30;
+    if months < 12 {
+        return format!("há {months} {}", if months == 1 { "mês" } else { "meses" });
+    }
+    let years = months / 12;
+    format!("há {years} {}", if years == 1 { "ano" } else { "anos" })
 }
 
 /// Build explicit audio chips from the persisted enrichment snapshot.

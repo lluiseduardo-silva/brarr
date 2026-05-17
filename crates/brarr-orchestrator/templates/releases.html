@@ -9,8 +9,11 @@
     </p>
 </div>
 
-{# Filter bar — chips são cosméticos por ora; backend de filtragem
-   chega no follow-up (precisa cursor + index em decisions.score). #}
+{# Filter bar — purely client-side. Cards carry data-state +
+   data-score; releases.js toggles `hidden` per filter and re-sorts
+   the grid. Free-text search input stays disabled (backend-driven
+   filtering across the full history needs a cursor + index — out of
+   scope for this UI pass). #}
 <div class="flex flex-wrap items-center gap-3 px-3 py-3 mb-4 rounded-lg bg-bg-surface border border-border-default">
     <div class="flex items-center gap-2 px-3 h-9 rounded-md bg-bg-canvas border border-border-default flex-1 min-w-[240px] max-w-[360px]">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" class="text-fg-muted">
@@ -19,14 +22,17 @@
         <input type="text" placeholder="Filtrar por release, provider…" disabled
                class="flex-1 bg-transparent text-sm text-fg-muted placeholder:text-fg-muted focus:outline-none">
     </div>
-    <button class="px-3 py-1.5 rounded-md text-xs font-semibold bg-accent-soft text-accent-soft-fg border border-accent-solid" type="button">Todos</button>
-    <button class="px-3 py-1.5 rounded-md text-xs font-semibold bg-bg-muted text-fg-secondary" type="button">Mantidos</button>
-    <button class="px-3 py-1.5 rounded-md text-xs font-semibold bg-bg-muted text-fg-secondary" type="button">Rejeitados</button>
-    <button class="px-3 py-1.5 rounded-md text-xs font-semibold bg-bg-muted text-fg-secondary" type="button">Score ≥ 500</button>
-    <button class="ml-auto inline-flex items-center gap-1.5 px-3 h-9 rounded-md bg-bg-canvas border border-border-default text-xs font-medium text-fg-primary" type="button">
+    <button data-filter="all" data-active="1" class="filter-btn px-3 py-1.5 rounded-md text-xs font-semibold cursor-pointer" type="button">Todos</button>
+    <button data-filter="kept" class="filter-btn px-3 py-1.5 rounded-md text-xs font-semibold cursor-pointer" type="button">Mantidos</button>
+    <button data-filter="rejected" class="filter-btn px-3 py-1.5 rounded-md text-xs font-semibold cursor-pointer" type="button">Rejeitados</button>
+    <label class="ml-auto inline-flex items-center gap-2 px-3 h-9 rounded-md bg-bg-canvas border border-border-default text-xs font-medium text-fg-primary cursor-pointer">
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18M6 12h12M10 18h4"/></svg>
-        Ordenar
-    </button>
+        <span>Ordenar:</span>
+        <select data-sort class="bg-transparent text-xs font-semibold text-fg-primary focus:outline-none cursor-pointer">
+            <option value="score-desc">maior score</option>
+            <option value="score-asc">menor score</option>
+        </select>
+    </label>
 </div>
 
 {% if decisions.is_empty() %}
@@ -56,11 +62,16 @@
 {# Card grid — 2 columns on md+ (cards 280px tall each). No more
    horizontal scroll: wide release names truncate inside each card
    instead of pushing the table out of the viewport. #}
-<div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+<div class="grid grid-cols-1 md:grid-cols-2 gap-4" data-releases-grid>
 {% for d in decisions %}
     {% include "partials/release_card.html" %}
 {% endfor %}
 </div>
+<p data-releases-empty class="hidden text-center text-sm italic text-fg-muted py-8">
+    Nenhum release casa com o filtro atual.
+</p>
 {% endif %}
+
+<script src="/static/releases.js" defer></script>
 
 {% endblock %}
