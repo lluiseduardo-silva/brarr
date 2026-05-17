@@ -7,9 +7,12 @@
 //! de toda a conversão abortar.
 
 use brarr_core::{
-    ImdbId, MalId, Release, ReleaseError, ReleaseKind, Resolution, TmdbId, TrackerSource, TvdbId,
+    ImdbId, MalId, OffsetDateTime, Release, ReleaseError, ReleaseKind, Resolution, TmdbId,
+    TrackerSource, TvdbId,
 };
 use brarr_mediainfo::parse;
+use time::PrimitiveDateTime;
+use time::macros::format_description;
 use url::Url;
 
 use crate::dto::Unit3dTorrent;
@@ -89,8 +92,49 @@ impl Unit3dTorrent {
             .and_then(|raw| parse(raw).ok())
             .map(|parsed| parsed.to_enrichment());
 
+        // `created_at` é o timestamp do upload no tracker — alimenta
+        // o `<pubDate>` do feed Torznab pra que Sonarr/Radarr mostrem
+        // a idade real do upload em vez de "Age: 0 minutes". Parse
+        // best-effort: se o formato variar, deixa `None`.
+        release.published_at = attr.created_at.as_deref().and_then(parse_unit3d_timestamp);
+
         Ok(release)
     }
+}
+
+/// Parse uma string ISO 8601 emitida pelo UNIT3D em
+/// [`OffsetDateTime`].
+///
+/// Formas vistas nos fixtures:
+/// - `"2024-04-06T23:28:08.000000Z"` (shadow / capybara)
+/// - `"2024-01-11T13:33:46.000000Z"` (vnlls / locadora)
+///
+/// Algumas builds de UNIT3D ainda emitem a forma "space"
+/// (`"2024-04-06 23:28:08"`) em endpoints específicos; a função tenta
+/// ambos antes de desistir.
+fn parse_unit3d_timestamp(raw: &str) -> Option<OffsetDateTime> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    // ISO 8601 com microssegundos + sufixo `Z` (UTC). `[offset_hour
+    // sign:mandatory]` cobriria `+00:00`, mas UNIT3D ancora em `Z`,
+    // então casamos o literal direto.
+    let iso_z = format_description!("[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond]Z");
+    if let Ok(dt) = PrimitiveDateTime::parse(trimmed, iso_z) {
+        return Some(dt.assume_utc());
+    }
+    // Variante sem subsegundos: `"2024-04-06T23:28:08Z"`.
+    let iso_z_no_sub = format_description!("[year]-[month]-[day]T[hour]:[minute]:[second]Z");
+    if let Ok(dt) = PrimitiveDateTime::parse(trimmed, iso_z_no_sub) {
+        return Some(dt.assume_utc());
+    }
+    // Variante com espaço (sem `T` e sem `Z`).
+    let space = format_description!("[year]-[month]-[day] [hour]:[minute]:[second]");
+    if let Ok(dt) = PrimitiveDateTime::parse(trimmed, space) {
+        return Some(dt.assume_utc());
+    }
+    None
 }
 
 /// Parseia um `Option<&str>` em `Option<Url>`. String vazia vira `None`.
@@ -252,6 +296,36 @@ mod tests {
         let release = dto.into_release(capybara()).expect("convert");
         assert_eq!(release.kind, ReleaseKind::Other("CAM".to_string()));
         assert_eq!(release.resolution, Resolution::Other("480p".to_string()));
+    }
+
+    #[test]
+    fn shadow_published_at_parses_iso8601_with_microseconds() {
+        // shadow.json fixture: `"created_at": "2024-04-06T23:28:08.000000Z"`.
+        let raw = fixture("shadow.json");
+        let dto: Unit3dTorrent = serde_json::from_str(&raw).expect("deserialize");
+        let release = dto.into_release(capybara()).expect("convert");
+        let ts = release.published_at.expect("created_at parsed");
+        // 2024-04-06 23:28:08 UTC = 1712446088
+        assert_eq!(ts.unix_timestamp(), 1_712_446_088);
+    }
+
+    #[test]
+    fn missing_created_at_yields_none_published_at() {
+        let json = r#"
+        {
+          "type": "torrent",
+          "id": "42",
+          "attributes": {
+            "name": "x",
+            "type": "WEB-DL",
+            "resolution": "1080p",
+            "size": 1,
+            "seeders": 0, "leechers": 0, "times_completed": 0
+          }
+        }"#;
+        let dto: Unit3dTorrent = serde_json::from_str(json).expect("deserialize");
+        let release = dto.into_release(capybara()).expect("convert");
+        assert!(release.published_at.is_none());
     }
 
     #[test]

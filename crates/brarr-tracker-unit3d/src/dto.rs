@@ -90,6 +90,14 @@ pub(crate) struct Unit3dAttributes {
     /// Link magnet.
     #[serde(default)]
     pub magnet_link: Option<String>,
+
+    /// Timestamp de upload no tracker. UNIT3D serializa em ISO 8601
+    /// (`"2024-01-15T12:34:56.000000Z"` ou `"2024-01-15 12:34:56"`).
+    /// Mapeado para [`brarr_core::Release::published_at`] e usado pelo
+    /// feed Torznab como `<pubDate>` para que Sonarr/Radarr mostrem a
+    /// idade real do upload.
+    #[serde(default)]
+    pub created_at: Option<String>,
 }
 
 /// Desserializador para `release_year` que aceita número, string ou null.

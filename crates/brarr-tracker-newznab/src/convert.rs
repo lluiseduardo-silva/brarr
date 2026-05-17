@@ -3,9 +3,10 @@
 //! detail than `Release` needs.
 
 use brarr_core::{
-    ExternalIds, ImdbId, Language, MalId, Release, ReleaseEnrichment, ReleaseError, ReleaseKind,
-    ReleaseUrls, Resolution, TmdbId, TrackerSource, TvdbId,
+    ExternalIds, ImdbId, Language, MalId, OffsetDateTime, Release, ReleaseEnrichment, ReleaseError,
+    ReleaseKind, ReleaseUrls, Resolution, TmdbId, TrackerSource, TvdbId,
 };
+use time::format_description::well_known::Rfc2822;
 use url::Url;
 
 use crate::dto::RawItem;
@@ -28,7 +29,48 @@ pub fn item_to_release(item: &RawItem, tracker: TrackerSource) -> Result<Release
     release.external_ids = pick_external_ids(item);
     release.urls = pick_urls(item);
     release.enrichment = Some(build_enrichment(item));
+    release.published_at = pick_published_at(item);
     Ok(release)
+}
+
+/// Pick a publication timestamp for the release.
+///
+/// Preference order — most reliable first:
+///   1. `<newznab:attr name="usenetdate">` — Unix seconds, set by the
+///      indexer when the actual Usenet post was made. Newznab spec field
+///      and the canonical source for real "age" in Sonarr/Radarr.
+///   2. `<pubDate>` RFC 2822 element — set by every indexer but some
+///      lazily emit `now()`, which kills the age signal.
+///
+/// Returns `None` when neither parses. The Torznab outbound feed falls
+/// back to `now()` in that case (same behaviour as before).
+fn pick_published_at(item: &RawItem) -> Option<OffsetDateTime> {
+    if let Some(raw) = item.attr("usenetdate") {
+        if let Some(ts) = parse_pubdate_value(raw) {
+            return Some(ts);
+        }
+    }
+    if let Some(raw) = item.pub_date.as_deref() {
+        if let Some(ts) = parse_pubdate_value(raw) {
+            return Some(ts);
+        }
+    }
+    None
+}
+
+/// Accept either Unix seconds (`usenetdate` shape on most indexers) or
+/// an RFC 2822 string (`pubDate` shape).
+fn parse_pubdate_value(raw: &str) -> Option<OffsetDateTime> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Ok(seconds) = trimmed.parse::<i64>() {
+        if let Ok(ts) = OffsetDateTime::from_unix_timestamp(seconds) {
+            return Some(ts);
+        }
+    }
+    OffsetDateTime::parse(trimmed, &Rfc2822).ok()
 }
 
 /// Newznab `guid` is usually a URL or opaque hash. We prefer something
@@ -519,6 +561,68 @@ mod tests {
         let feed = parse_feed(body).unwrap();
         let r = item_to_release(&feed.items[0], tracker()).unwrap();
         assert_eq!(r.external_ids.imdb.map(ImdbId::get), Some(9_999_001));
+    }
+
+    #[test]
+    fn published_at_picks_usenetdate_unix_seconds() {
+        // NZBGeek and most Newznab indexers ship `usenetdate` as a
+        // string-encoded Unix timestamp. The Torznab outbound feed
+        // surfaces this as `<pubDate>` so Sonarr/Radarr can compute
+        // real release age.
+        let body = r#"<?xml version="1.0"?>
+<rss xmlns:newznab="http://www.newznab.com/DTD/2010/feeds/attributes/">
+  <channel>
+    <item>
+      <title>x</title>
+      <guid>g</guid>
+      <enclosure url="https://api.example/a?id=1" length="1"/>
+      <newznab:attr name="usenetdate" value="1700000000"/>
+    </item>
+  </channel>
+</rss>"#;
+        let feed = parse_feed(body).unwrap();
+        let r = item_to_release(&feed.items[0], tracker()).unwrap();
+        let ts = r.published_at.unwrap();
+        assert_eq!(ts.unix_timestamp(), 1_700_000_000);
+    }
+
+    #[test]
+    fn published_at_falls_back_to_pubdate_rfc2822() {
+        // Indexers without a `usenetdate` attr still emit the RSS
+        // `<pubDate>` per item. Convert.rs should fall back to it.
+        let body = r#"<?xml version="1.0"?>
+<rss xmlns:newznab="http://www.newznab.com/DTD/2010/feeds/attributes/">
+  <channel>
+    <item>
+      <title>x</title>
+      <guid>g</guid>
+      <pubDate>Wed, 15 Nov 2023 12:34:56 +0000</pubDate>
+      <enclosure url="https://api.example/a?id=1" length="1"/>
+    </item>
+  </channel>
+</rss>"#;
+        let feed = parse_feed(body).unwrap();
+        let r = item_to_release(&feed.items[0], tracker()).unwrap();
+        let ts = r.published_at.unwrap();
+        // 2023-11-15 12:34:56 UTC = 1700051696
+        assert_eq!(ts.unix_timestamp(), 1_700_051_696);
+    }
+
+    #[test]
+    fn published_at_is_none_when_provider_omits_both() {
+        let body = r#"<?xml version="1.0"?>
+<rss xmlns:newznab="http://www.newznab.com/DTD/2010/feeds/attributes/">
+  <channel>
+    <item>
+      <title>x</title>
+      <guid>g</guid>
+      <enclosure url="https://api.example/a?id=1" length="1"/>
+    </item>
+  </channel>
+</rss>"#;
+        let feed = parse_feed(body).unwrap();
+        let r = item_to_release(&feed.items[0], tracker()).unwrap();
+        assert!(r.published_at.is_none());
     }
 
     #[test]

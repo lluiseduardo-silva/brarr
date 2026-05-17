@@ -9,6 +9,7 @@ repository.workspace = true
 
 [dependencies]
 thiserror = "2.0.18"
+time = { version = "0.3.45", features = ["formatting", "parsing", "macros"] }
 url = "2.5.8"
 
 [lints]

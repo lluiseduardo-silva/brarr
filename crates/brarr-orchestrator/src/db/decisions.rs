@@ -58,6 +58,12 @@ pub struct DecisionRow {
     /// Newznab, `application/x-bittorrent` elsewhere). Legacy rows
     /// pre-dating the 20260516140000 migration have `None`.
     pub provider_kind: Option<String>,
+    /// Upstream upload timestamp captured at search time. Mapped to the
+    /// Torznab feed's `<pubDate>` so Sonarr/Radarr can show the real
+    /// age of each release instead of "Age: 0 minutes". Legacy rows
+    /// pre-dating the 20260517120000 migration have `None`; the feed
+    /// renderer falls back to `now()` in that case.
+    pub published_at: Option<OffsetDateTime>,
     /// When the engine produced the outcome.
     pub decided_at: OffsetDateTime,
 }
@@ -99,6 +105,8 @@ pub struct DecisionInsert {
     pub details_url: Option<String>,
     /// Provider kind snapshot — see [`DecisionRow::provider_kind`].
     pub provider_kind: Option<String>,
+    /// Upstream upload timestamp — see [`DecisionRow::published_at`].
+    pub published_at: Option<OffsetDateTime>,
 }
 
 /// Insert one decision row, returning the persisted form.
@@ -119,8 +127,9 @@ pub async fn insert(pool: &Pool, ins: DecisionInsert) -> Result<DecisionRow, App
         "INSERT INTO decisions ( \
             id, search_id, provider_id, provider_name, release_name, release_id_remote, \
             score, rejected, tags_json, matched_json, seeders, leechers, size_bytes, \
-            resolution, kind, decided_at, download_url, details_url, provider_kind \
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            resolution, kind, decided_at, download_url, details_url, provider_kind, \
+            published_at \
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(id.to_string())
     .bind(ins.search_id.to_string())
@@ -141,6 +150,7 @@ pub async fn insert(pool: &Pool, ins: DecisionInsert) -> Result<DecisionRow, App
     .bind(&ins.download_url)
     .bind(&ins.details_url)
     .bind(&ins.provider_kind)
+    .bind(ins.published_at.map(OffsetDateTime::unix_timestamp))
     .execute(pool)
     .await?;
 
@@ -163,6 +173,7 @@ pub async fn insert(pool: &Pool, ins: DecisionInsert) -> Result<DecisionRow, App
         download_url: ins.download_url,
         details_url: ins.details_url,
         provider_kind: ins.provider_kind,
+        published_at: ins.published_at,
         decided_at: now,
     })
 }
@@ -176,7 +187,8 @@ pub async fn list_for_search(pool: &Pool, search_id: Uuid) -> Result<Vec<Decisio
     let rows = sqlx::query(
         "SELECT id, search_id, provider_id, provider_name, release_name, release_id_remote, \
                 score, rejected, tags_json, matched_json, seeders, leechers, size_bytes, \
-                resolution, kind, decided_at, download_url, details_url, provider_kind \
+                resolution, kind, decided_at, download_url, details_url, provider_kind, \
+                published_at \
          FROM decisions WHERE search_id = ? ORDER BY score DESC, seeders DESC",
     )
     .bind(search_id.to_string())
@@ -197,7 +209,8 @@ pub async fn get_by_id(pool: &Pool, id: Uuid) -> Result<DecisionRow, AppError> {
     let row_opt = sqlx::query(
         "SELECT id, search_id, provider_id, provider_name, release_name, release_id_remote, \
                 score, rejected, tags_json, matched_json, seeders, leechers, size_bytes, \
-                resolution, kind, decided_at, download_url, details_url, provider_kind \
+                resolution, kind, decided_at, download_url, details_url, provider_kind, \
+                published_at \
          FROM decisions WHERE id = ?",
     )
     .bind(id.to_string())
@@ -223,7 +236,8 @@ pub async fn recent(pool: &Pool, limit: u32) -> Result<Vec<DecisionRow>, AppErro
     let rows = sqlx::query(
         "SELECT id, search_id, provider_id, provider_name, release_name, release_id_remote, \
                 score, rejected, tags_json, matched_json, seeders, leechers, size_bytes, \
-                resolution, kind, decided_at, download_url, details_url, provider_kind \
+                resolution, kind, decided_at, download_url, details_url, provider_kind, \
+                published_at \
          FROM decisions ORDER BY decided_at DESC LIMIT ?",
     )
     .bind(i64::from(limit))
@@ -263,6 +277,15 @@ fn row_to_decision(row: &SqliteRow) -> Result<DecisionRow, AppError> {
     let download_url: Option<String> = row.try_get("download_url").ok().flatten();
     let details_url: Option<String> = row.try_get("details_url").ok().flatten();
     let provider_kind: Option<String> = row.try_get("provider_kind").ok().flatten();
+    // Legacy rows pre-dating the 20260517120000 migration keep NULL —
+    // `try_get` returns `Ok(None)` then. Bad UNIX timestamps (shouldn't
+    // happen but defend against malformed test fixtures) silently drop
+    // to None instead of failing the whole row.
+    let published_at: Option<OffsetDateTime> = row
+        .try_get::<Option<i64>, _>("published_at")
+        .ok()
+        .flatten()
+        .and_then(|ts| OffsetDateTime::from_unix_timestamp(ts).ok());
     Ok(DecisionRow {
         id,
         search_id,
@@ -282,6 +305,7 @@ fn row_to_decision(row: &SqliteRow) -> Result<DecisionRow, AppError> {
         download_url,
         details_url,
         provider_kind,
+        published_at,
         decided_at,
     })
 }
@@ -365,6 +389,7 @@ mod tests {
             download_url: Some("https://capybara/torrents/download/12345".into()),
             details_url: Some("https://capybara/torrents/12345".into()),
             provider_kind: Some("unit3d".into()),
+            published_at: None,
         }
     }
 

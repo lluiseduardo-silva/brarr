@@ -42,6 +42,12 @@ pub struct RawItem {
     pub category: Option<String>,
     /// `<comments>` page URL.
     pub details_url: Option<String>,
+    /// `<pubDate>` element value, verbatim — RFC 822 / RFC 2822 by spec.
+    /// Indexers honor it inconsistently; some leave it `now()`, others
+    /// reflect the upstream upload time. The converter prefers the
+    /// `usenetdate` torznab:attr when present (more reliable) and falls
+    /// back to this field.
+    pub pub_date: Option<String>,
     /// All `<newznab:attr name="X" value="Y"/>` entries, grouped by name.
     /// Some attrs can repeat (multiple `audio`, multiple `subs`); a Vec
     /// preserves that without forcing the caller to split strings.
@@ -175,6 +181,7 @@ enum TextTarget {
     Comments,
     Category,
     Size,
+    PubDate,
 }
 
 fn handle_start(
@@ -194,6 +201,9 @@ fn handle_start(
         "comments" => *text_target = Some(TextTarget::Comments),
         "category" => *text_target = Some(TextTarget::Category),
         "size" => *text_target = Some(TextTarget::Size),
+        // Match the Newznab-spec capitalization `pubDate`. RSS 2.0
+        // ratifies that exact casing.
+        "pubDate" | "pubdate" => *text_target = Some(TextTarget::PubDate),
         _ => *text_target = None,
     }
 }
@@ -271,6 +281,7 @@ fn apply_text(item: &mut RawItem, target: TextTarget, text: String) {
                 }
             }
         }
+        TextTarget::PubDate => item.pub_date = Some(text),
     }
 }
 

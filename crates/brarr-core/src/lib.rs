@@ -33,4 +33,7 @@ pub use language::Language;
 pub use provider::{ProviderError, ProviderFuture, TrackerProvider};
 pub use release::{ExternalIds, Release, ReleaseError, ReleaseKind, ReleaseUrls, Resolution};
 pub use score::{DecisionScore, ScoreOutOfRange};
+/// Re-exported so provider/orchestrator crates can stamp [`Release::published_at`]
+/// without taking their own direct `time` dependency.
+pub use time::OffsetDateTime;
 pub use tracker::{TrackerSource, TrackerSourceError};

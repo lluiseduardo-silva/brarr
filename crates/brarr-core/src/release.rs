@@ -2,6 +2,7 @@
 //! ([`ExternalIds`], [`ReleaseUrls`]) — a representação de domínio de
 //! um torrent encontrado num tracker.
 
+use time::OffsetDateTime;
 use url::Url;
 
 use crate::enrichment::ReleaseEnrichment;
@@ -49,6 +50,13 @@ pub struct Release {
     /// tracker o fornece. `None` quando o tracker não inclui ou o
     /// parser falhou.
     pub enrichment: Option<ReleaseEnrichment>,
+    /// Quando o tracker publicou o release (não a data da obra — esse
+    /// fica em [`Release::year`]). Mapeia de `usenetdate`/`pubDate` no
+    /// Newznab e `created_at` no UNIT3D. `None` quando o tracker não
+    /// expôs o campo. Usado pelo feed Torznab outbound como `<pubDate>`
+    /// para que clientes *arr enxerguem a idade real do upload em vez
+    /// de "Age: 0 minutes".
+    pub published_at: Option<OffsetDateTime>,
 }
 
 /// Erros de construção de [`Release`].
@@ -101,6 +109,7 @@ impl Release {
             external_ids: ExternalIds::default(),
             urls: ReleaseUrls::default(),
             enrichment: None,
+            published_at: None,
         })
     }
 }

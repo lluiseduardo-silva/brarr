@@ -57,10 +57,11 @@ use axum::http::{HeaderValue, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::get;
-use brarr_core::{ImdbId, Release, ReleaseKind, Resolution, TmdbId};
+use brarr_core::{ImdbId, OffsetDateTime, Release, ReleaseKind, Resolution, TmdbId};
 use quick_xml::Writer;
 use quick_xml::events::{BytesDecl, BytesText, Event};
 use serde::Deserialize;
+use time::format_description::well_known::Rfc2822;
 use tracing::{debug, warn};
 use uuid::Uuid;
 
@@ -183,13 +184,13 @@ struct ApiQuery {
     /// same empty-value reason as `tmdbid`.
     #[serde(default)]
     limit: Option<String>,
-    /// Offset hint from Sonarr. Unused today (paging would re-issue the
-    /// whole search anyway).
+    /// Offset hint from Sonarr (`offset=100&limit=100`). Honored — we
+    /// emit `<newznab:response offset=X total=N>` and skip the first
+    /// `offset` items so Sonarr stops paginating once it sees
+    /// `offset + items.len() >= total`. Without this the *arr clients
+    /// re-issue the same search up to 10 times (offset 0..900) per
+    /// Interactive Search, wasting ~10x the upstream calls.
     #[serde(default)]
-    #[allow(
-        dead_code,
-        reason = "Sonarr paginates client-side once it has the feed"
-    )]
     offset: Option<String>,
     /// Category filter from Sonarr (`cat=2000,2040`). Ignored — we
     /// advertise the subset we support and Sonarr filters client-side.
@@ -308,14 +309,21 @@ async fn handle_movie(
     let outcome = run_search(state, SearchKeys { tmdb, imdb }).await?;
     let limit_raw = parse_u32_param(q.limit.as_ref(), "limit")?;
     let limit = limit_raw.map_or(100, |v| v.clamp(1, 1_000)) as usize;
+    let offset_raw = parse_u32_param(q.offset.as_ref(), "offset")?;
+    let offset = offset_raw.unwrap_or(0) as usize;
+    let total = outcome.decisions.len();
     let items: Vec<FeedItem> = outcome
         .decisions
         .iter()
+        .skip(offset)
         .take(limit)
         .filter_map(decision_to_feed_item)
         .collect();
 
-    Ok(xml_response(StatusCode::OK, render_feed(&items, base_url)?))
+    Ok(xml_response(
+        StatusCode::OK,
+        render_feed(&items, base_url, offset, total)?,
+    ))
 }
 
 /// Pair of (Release, provider kind) used by the feed renderer to pick
@@ -328,6 +336,11 @@ struct FeedItem {
     /// Mirrors `DecisionRow::provider_kind`: `unit3d` / `newznab` /
     /// `torznab` / `plugin` / `None` (legacy rows).
     provider_kind: Option<String>,
+    /// Upstream upload timestamp captured at search time. `None` for
+    /// legacy rows pre-dating the 20260517120000 migration or when the
+    /// provider didn't expose it — in that case `write_item` falls back
+    /// to `now()`, matching pre-pubDate behaviour.
+    published_at: Option<OffsetDateTime>,
 }
 
 /// Derive the public-facing base URL ("scheme://host") from the
@@ -392,6 +405,7 @@ fn decision_to_feed_item(row: &crate::db::decisions::DecisionRow) -> Option<Feed
     Some(FeedItem {
         release,
         provider_kind: row.provider_kind.clone(),
+        published_at: row.published_at,
     })
 }
 
@@ -512,8 +526,17 @@ fn render_caps() -> Result<Vec<u8>, AppError> {
 
 /// Render the RSS feed body. `base_url` is the absolute `scheme://host`
 /// prefix used to expand the per-item proxy download URL into a fully
-/// qualified link.
-fn render_feed_inner(items: &[FeedItem], base_url: &str) -> Result<Vec<u8>, AppError> {
+/// qualified link. `offset` and `total` populate the
+/// `<newznab:response offset=X total=N/>` header — Sonarr / Radarr stop
+/// paginating an Interactive Search once `offset + items.len() >= total`,
+/// so emitting these caps the call count at one per indexer instead of
+/// the default 10 (offset 0, 100, 200, … 900).
+fn render_feed_inner(
+    items: &[FeedItem],
+    base_url: &str,
+    offset: usize,
+    total: usize,
+) -> Result<Vec<u8>, AppError> {
     let mut writer = Writer::new(Cursor::new(Vec::with_capacity(2048)));
     writer
         .write_event(Event::Decl(BytesDecl::new("1.0", Some("UTF-8"), None)))
@@ -531,9 +554,20 @@ fn render_feed_inner(items: &[FeedItem], base_url: &str) -> Result<Vec<u8>, AppE
         .write_event(Event::Start(rss.borrow()))
         .map_err(xml_err)?;
 
+    let offset_str = offset.to_string();
+    let total_str = total.to_string();
     writer
         .create_element("channel")
         .write_inner_content(|cw| {
+            // `<newznab:response>` MUST come before any `<item>`; Sonarr
+            // / Radarr's RSS parser reads it streaming and stops looking
+            // once it hits the first item.
+            cw.create_element("newznab:response")
+                .with_attributes([
+                    ("offset", offset_str.as_str()),
+                    ("total", total_str.as_str()),
+                ])
+                .write_empty()?;
             cw.create_element("title")
                 .write_text_content(BytesText::new("brarr"))?;
             cw.create_element("description")
@@ -555,7 +589,7 @@ fn render_feed_inner(items: &[FeedItem], base_url: &str) -> Result<Vec<u8>, AppE
 
 #[cfg(test)]
 fn render_empty_feed() -> Result<Vec<u8>, AppError> {
-    render_feed_inner(&[], "http://127.0.0.1:3000")
+    render_feed_inner(&[], "http://127.0.0.1:3000", 0, 0)
 }
 
 /// Build an RSS feed with a single sentinel item so Sonarr / Radarr's
@@ -661,8 +695,13 @@ fn render_placeholder_feed(base_url: &str) -> Result<Vec<u8>, AppError> {
     Ok(writer.into_inner().into_inner())
 }
 
-fn render_feed(items: &[FeedItem], base_url: &str) -> Result<Vec<u8>, AppError> {
-    render_feed_inner(items, base_url)
+fn render_feed(
+    items: &[FeedItem],
+    base_url: &str,
+    offset: usize,
+    total: usize,
+) -> Result<Vec<u8>, AppError> {
+    render_feed_inner(items, base_url, offset, total)
 }
 
 fn write_item<W: std::io::Write>(
@@ -705,13 +744,17 @@ fn write_item<W: std::io::Write>(
         .as_ref()
         .map_or_else(|| download_url.clone(), url::Url::to_string);
 
-    // Sonarr/Radarr's RSS parser silently drops items without a
-    // valid `<pubDate>` and `<description>`. We don't have a real
-    // upload timestamp from every provider, so we emit "now" — the
-    // sort order Sonarr/Radarr applies to results uses size + score
-    // anyway, not pubDate. The description echoes the title so the
+    // Real upload timestamp when the provider exposed it
+    // (UNIT3D `created_at`, Newznab `usenetdate`/`pubDate`); falls back
+    // to `now()` so the RSS parser always sees a valid pubDate. The
+    // fallback is what kills the age signal in Sonarr/Radarr ("Age: 0
+    // minutes"), so providers that pipe through `published_at` finally
+    // surface the real upload age. Description echoes the title so the
     // grabber's "preview" tooltip shows something useful.
-    let pub_date = current_rfc822();
+    let pub_date = item
+        .published_at
+        .and_then(|ts| ts.format(&Rfc2822).ok())
+        .unwrap_or_else(current_rfc822);
     w.create_element("item").write_inner_content(|iw| {
         iw.create_element("title")
             .write_text_content(BytesText::new(&r.title))?;
@@ -916,6 +959,89 @@ mod tests {
         assert!(xml.contains("<channel>"));
         assert!(xml.contains("<title>brarr</title>"));
         assert!(!xml.contains("<item>"));
+    }
+
+    fn sample_feed_item(id: &str, published_at: Option<OffsetDateTime>) -> FeedItem {
+        let tracker =
+            brarr_core::TrackerSource::new("t", url::Url::parse("https://x/").unwrap()).unwrap();
+        let mut release = Release::new(
+            id,
+            tracker,
+            format!("Title {id} 1080p WEB-DL"),
+            ReleaseKind::WebDl,
+            Resolution::P1080,
+            1024,
+        )
+        .unwrap();
+        release.published_at = published_at;
+        FeedItem {
+            release,
+            provider_kind: Some("newznab".into()),
+            published_at,
+        }
+    }
+
+    #[test]
+    fn feed_emits_newznab_response_offset_and_total() {
+        let items = vec![sample_feed_item("1", None)];
+        let bytes = render_feed(&items, "http://h:3000", 100, 110).unwrap();
+        let xml = String::from_utf8(bytes).unwrap();
+        assert!(
+            xml.contains(r#"<newznab:response offset="100" total="110""#),
+            "missing newznab:response, got: {xml}"
+        );
+        // Spec: the response header must precede any <item>.
+        let header_pos = xml.find("<newznab:response").unwrap();
+        let item_pos = xml.find("<item>").unwrap();
+        assert!(
+            header_pos < item_pos,
+            "newznab:response must come before <item>"
+        );
+    }
+
+    #[test]
+    fn feed_uses_published_at_when_provided() {
+        // 2023-11-15 12:34:56 UTC
+        let ts = OffsetDateTime::from_unix_timestamp(1_700_051_696).unwrap();
+        let items = vec![sample_feed_item("1", Some(ts))];
+        let bytes = render_feed(&items, "http://h:3000", 0, 1).unwrap();
+        let xml = String::from_utf8(bytes).unwrap();
+        assert!(
+            xml.contains("<pubDate>Wed, 15 Nov 2023 12:34:56 +0000</pubDate>"),
+            "expected real pubDate, got: {xml}"
+        );
+    }
+
+    #[test]
+    fn feed_falls_back_to_now_when_published_at_missing() {
+        let items = vec![sample_feed_item("1", None)];
+        let bytes = render_feed(&items, "http://h:3000", 0, 1).unwrap();
+        let xml = String::from_utf8(bytes).unwrap();
+        // Just confirm a pubDate element shows up — the value is "now"
+        // and we don't pin a specific timestamp.
+        assert!(
+            xml.contains("<pubDate>"),
+            "expected fallback pubDate, got: {xml}"
+        );
+    }
+
+    #[test]
+    fn parse_u32_param_treats_empty_and_garbage() {
+        assert_eq!(parse_u32_param(None, "offset").unwrap(), None);
+        assert_eq!(
+            parse_u32_param(Some(&String::new()), "offset").unwrap(),
+            None,
+        );
+        assert_eq!(
+            parse_u32_param(Some(&"   ".to_string()), "offset").unwrap(),
+            None,
+        );
+        assert_eq!(
+            parse_u32_param(Some(&"42".to_string()), "offset").unwrap(),
+            Some(42),
+        );
+        let err = parse_u32_param(Some(&"abc".to_string()), "offset").unwrap_err();
+        assert!(matches!(err, AppError::InvalidInput(_)));
     }
 
     #[test]
