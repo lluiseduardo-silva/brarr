@@ -192,6 +192,35 @@ pub struct SystemStatus {
     pub version: String,
 }
 
+/// Slice of one Radarr `/api/v3/movie` row that brarr's poller needs
+/// to drive a search. Radarr returns ~60 fields per movie; we keep
+/// the ones that map directly to brarr's search axis (`TMDb` / `IMDb`)
+/// plus a couple of book-keeping flags so the poller can skip
+/// already-grabbed entries cheaply.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WantedMovie {
+    /// Radarr-side numeric id (used to dedup poll runs).
+    pub id: u64,
+    /// Movie title (logging only — brarr searches by id).
+    pub title: String,
+    /// `TMDb` id. `0` means "not linked" — Radarr stores zero rather
+    /// than null on movies the user added by `IMDb` only.
+    pub tmdb_id: u32,
+    /// `IMDb` id with the `tt` prefix (e.g. `"tt0133093"`). Empty when
+    /// Radarr couldn't resolve one.
+    #[serde(default)]
+    pub imdb_id: String,
+    /// Whether the user actually wants Radarr to keep grabbing this
+    /// title. Disabled rows are skipped.
+    #[serde(default)]
+    pub monitored: bool,
+    /// `true` if Radarr already has a file on disk for this movie.
+    /// The poller skips these.
+    #[serde(default)]
+    pub has_file: bool,
+}
+
 /// HTTP client for one *arr instance. Cheap to clone (wraps a shared
 /// `reqwest::Client` Arc internally). One instance per *arr in the
 /// orchestrator pool.
@@ -284,6 +313,65 @@ impl ArrClient {
                 name = %self.instance.name,
                 status = status.as_u16(),
                 "ping returned non-2xx"
+            );
+            return Err(ArrError::Http {
+                kind: self.instance.kind,
+                status: status.as_u16(),
+                body: truncate_body(&body),
+            });
+        }
+        serde_json::from_str(&body).map_err(|source| ArrError::Decode {
+            kind: self.instance.kind,
+            source,
+        })
+    }
+
+    /// `GET /api/v3/movie` — fetch every movie configured in this
+    /// Radarr instance. Brarr's poller filters to `monitored=true`
+    /// and `has_file=false` to drive search. Returns the raw list;
+    /// caller decides which entries warrant a search.
+    ///
+    /// Only meaningful for [`ArrKind::Radarr`]. Calling this against
+    /// a Sonarr instance returns an [`ArrError::Http`] (Sonarr's
+    /// `/api/v3/movie` is a 404) — callers should branch on
+    /// [`ArrInstance::kind`] before invoking.
+    ///
+    /// # Errors
+    ///
+    /// - [`ArrError::Transport`] on network failure.
+    /// - [`ArrError::Http`] on non-2xx (401 bad apikey, 404 wrong flavour).
+    /// - [`ArrError::Decode`] if the JSON body doesn't shape like
+    ///   `Vec<WantedMovie>`.
+    pub async fn monitored_movies(&self) -> Result<Vec<WantedMovie>, ArrError> {
+        let url = self.endpoint("movie")?;
+        debug!(
+            target: "brarr_arr",
+            kind = self.instance.kind.label(),
+            name = %self.instance.name,
+            url = %url,
+            "fetch monitored movies"
+        );
+        let resp = self
+            .http
+            .get(url)
+            .header("X-Api-Key", &self.instance.api_key)
+            .send()
+            .await
+            .map_err(|source| ArrError::Transport {
+                kind: self.instance.kind,
+                source,
+            })?;
+        let status = resp.status();
+        let body = resp.text().await.map_err(|source| ArrError::Transport {
+            kind: self.instance.kind,
+            source,
+        })?;
+        if !status.is_success() {
+            warn!(
+                target: "brarr_arr",
+                kind = self.instance.kind.label(),
+                status = status.as_u16(),
+                "monitored_movies returned non-2xx"
             );
             return Err(ArrError::Http {
                 kind: self.instance.kind,

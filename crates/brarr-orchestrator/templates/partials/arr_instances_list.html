@@ -39,6 +39,17 @@
                             class="text-emerald-700 hover:underline text-xs">
                         testar
                     </button>
+                    {% if a.kind == "radarr" %}
+                    <button hx-post="/arr-instances/{{ a.id }}/poll-now"
+                            hx-target="#arr-ping-{{ a.id }}"
+                            hx-swap="outerHTML"
+                            hx-indicator="#arr-ping-{{ a.id }}"
+                            hx-confirm="Rodar um ciclo de poll agora? Pode levar minutos."
+                            class="text-blue-700 hover:underline text-xs"
+                            title="Varre wanted movies + dispara push automático">
+                        rodar agora
+                    </button>
+                    {% endif %}
                     <button hx-delete="/arr-instances/{{ a.id }}"
                             hx-target="#arr-instance-{{ a.id }}"
                             hx-swap="outerHTML"

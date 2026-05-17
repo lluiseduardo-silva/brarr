@@ -146,6 +146,61 @@ async fn push_release_succeeds_when_arr_responds_with_empty_array() {
 }
 
 #[tokio::test]
+async fn monitored_movies_returns_parsed_list() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v3/movie"))
+        .and(header("X-Api-Key", API_KEY))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            {
+                "id": 1,
+                "title": "The Matrix",
+                "tmdbId": 603,
+                "imdbId": "tt0133093",
+                "monitored": true,
+                "hasFile": false
+            },
+            {
+                "id": 2,
+                "title": "Inception",
+                "tmdbId": 27205,
+                "imdbId": "tt1375666",
+                "monitored": true,
+                "hasFile": true
+            }
+        ])))
+        .mount(&server)
+        .await;
+
+    let c = client(&server, ArrKind::Radarr);
+    let movies = c.monitored_movies().await.unwrap();
+    assert_eq!(movies.len(), 2);
+    assert_eq!(movies[0].title, "The Matrix");
+    assert_eq!(movies[0].tmdb_id, 603);
+    assert_eq!(movies[0].imdb_id, "tt0133093");
+    assert!(movies[0].monitored);
+    assert!(!movies[0].has_file);
+    assert!(movies[1].has_file);
+}
+
+#[tokio::test]
+async fn monitored_movies_propagates_http_404() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v3/movie"))
+        .respond_with(ResponseTemplate::new(404).set_body_string("not found"))
+        .mount(&server)
+        .await;
+
+    let c = client(&server, ArrKind::Sonarr);
+    let err = c.monitored_movies().await.unwrap_err();
+    match err {
+        ArrError::Http { status, .. } => assert_eq!(status, 404),
+        other => panic!("expected Http 404, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn push_release_supports_usenet_protocol_value() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))

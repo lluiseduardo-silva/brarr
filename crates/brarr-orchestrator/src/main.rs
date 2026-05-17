@@ -13,6 +13,8 @@
 //! | `BRARR_GRPC_ADDR`              | `127.0.0.1:50051`            | bind address for the gRPC service    |
 //! | `BRARR_STATIC_DIR`             | `crates/brarr-orchestrator/static` | static asset directory         |
 //! | `BRARR_AUTH_TOKEN`             | _(unset, auth disabled)_     | shared admin token for UI + gRPC     |
+//! | `BRARR_PUBLIC_URL`             | _(derived from request)_     | external origin for *arr push URLs   |
+//! | `BRARR_ARR_POLL_INTERVAL_SECS` | `1800`                       | autobrr-style auto-push cadence      |
 //! | `RUST_LOG`                     | `info`                       | tracing-subscriber env filter        |
 
 #![allow(clippy::print_stdout, reason = "user-facing startup banner is fine")]
@@ -22,7 +24,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use brarr_decision_service::Engine;
-use brarr_orchestrator::{AppState, AuthConfig, db, grpc, web};
+use brarr_orchestrator::{AppState, AuthConfig, db, grpc, poll, web};
 use tracing::warn;
 use tracing_subscriber::EnvFilter;
 
@@ -66,15 +68,27 @@ async fn main() -> Result<()> {
             "DISABLED (dev mode)"
         }
     );
+    let poll_interval = poll::interval_from_env();
+    println!(
+        "  poll  → every {}s (set BRARR_ARR_POLL_INTERVAL_SECS to tune)",
+        poll_interval.as_secs()
+    );
     println!("  press Ctrl-C to stop");
 
     let web_state = state.clone();
     let grpc_state = state.clone();
+    let poll_state = state.clone();
     let static_dir_clone = static_dir.clone();
 
     let web_task =
         tokio::spawn(async move { web::serve(web_state, http_addr, &static_dir_clone).await });
     let grpc_task = tokio::spawn(async move { grpc::serve(grpc_state, grpc_addr).await });
+    // Long-lived poller. The handle is kept on the stack but never
+    // joined explicitly — the task is aborted when the binary exits
+    // (the runtime drops it as part of shutdown). Operationally we
+    // don't want it to terminate the binary if the loop happens to
+    // panic, so it's a fire-and-forget spawn.
+    let _poll_handle = poll::spawn(poll_state, poll_interval);
 
     tokio::select! {
         res = web_task => res.context("web task panicked")?.context("web server")?,

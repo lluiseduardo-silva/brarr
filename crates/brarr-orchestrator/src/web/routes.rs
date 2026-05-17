@@ -66,6 +66,7 @@ pub fn router(state: AppState, static_dir: &std::path::Path) -> Router {
         )
         .route("/arr-instances/{id}", delete(arr_instances_delete))
         .route("/arr-instances/{id}/test", post(arr_instances_test))
+        .route("/arr-instances/{id}/poll-now", post(arr_instances_poll_now))
         .route("/decisions/{id}/push/{arr_id}", post(decisions_push))
         .route("/pushes", get(pushes_index))
         .route("/releases", get(releases_index))
@@ -504,6 +505,34 @@ async fn arr_instances_test(
         },
     };
     let html_fragment = render_arr_ping_badge(&row.id.to_string(), &badge);
+    let mut resp = (StatusCode::OK, html_fragment).into_response();
+    resp.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    Ok(resp)
+}
+
+/// `POST /arr-instances/{id}/poll-now` — manual trigger of one
+/// poll cycle for a single *arr (mirrors the scheduled poller's
+/// per-instance pass). Returns a small HTML fragment with the
+/// counts so HTMX can swap it into the row.
+async fn arr_instances_poll_now(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, AppError> {
+    let uuid = Uuid::parse_str(&id)
+        .map_err(|e| AppError::InvalidInput(format!("invalid arr_instance id: {e}")))?;
+    let row = arr_instances::get_by_id(state.pool(), uuid).await?;
+    let summary = crate::poll::run_once_for_instance(&state, &row).await?;
+    let html_fragment = format!(
+        r#"<span id="arr-ping-{aid}" class="badge bg-blue-100 text-blue-800" title="searched {searched} of {considered} monitored movies; pushed {pushed}; {errors} search errors">{pushed} push / {searched} buscas</span>"#,
+        aid = crate::web::templates::escape(&row.id.to_string()),
+        searched = summary.searched,
+        considered = summary.considered,
+        pushed = summary.pushed,
+        errors = summary.search_errors,
+    );
     let mut resp = (StatusCode::OK, html_fragment).into_response();
     resp.headers_mut().insert(
         header::CONTENT_TYPE,
