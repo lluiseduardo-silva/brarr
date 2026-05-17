@@ -1,0 +1,104 @@
+# brarr — production-ready compose file.
+#
+# Pulls the prebuilt image from GitHub Container Registry instead of
+# building locally. For a local dev build, use docker-compose.dev.yml
+# (mounts the workspace + rebuilds on every up). For a build-from-
+# source production run, use docker-compose.prod.yml.
+#
+# Quick start:
+#   1. Copy .env.example to .env and fill BRARR_AUTH_TOKEN at minimum.
+#   2. docker compose pull
+#   3. docker compose up -d
+#   4. Open http://<host>:3000
+#
+# Stop:
+#   docker compose down
+#
+# Update:
+#   docker compose pull && docker compose up -d
+#
+# Logs:
+#   docker compose logs -f orchestrator
+
+services:
+  orchestrator:
+    image: ghcr.io/lluiseduardo-silva/brarr:${BRARR_IMAGE_TAG:-latest}
+    container_name: brarr
+    restart: unless-stopped
+
+    # ─── Network ──────────────────────────────────────────────────
+    # Bind to 0.0.0.0 inside the container; the `ports:` mapping
+    # below controls what the host actually exposes. Default binds
+    # the admin UI and gRPC to all host interfaces — restrict to
+    # 127.0.0.1 by editing `ports:` if you front-proxy via Caddy /
+    # nginx on the same host.
+    ports:
+      - "${BRARR_HTTP_HOST_PORT:-3000}:3000"
+      - "${BRARR_GRPC_HOST_PORT:-50051}:50051"
+
+    # ─── Persistent state ─────────────────────────────────────────
+    # /data       — sqlite DB (BRARR_DB_PATH=/data/brarr.db).
+    # /plugins    — WASM tracker plugins referenced by provider rows.
+    volumes:
+      - brarr-data:/data
+      - ${BRARR_PLUGINS_DIR:-./plugins}:/plugins:ro
+
+    # ─── Configuration ────────────────────────────────────────────
+    # Every BRARR_* env reads from `.env` next to this file. Defaults
+    # match the production-sensible values baked into the image; set
+    # only what you need to override.
+    environment:
+      # REQUIRED — opaque admin token. Without it the orchestrator
+      # logs a warning at startup and runs in "dev mode" with auth
+      # disabled. Generate with: `openssl rand -hex 32`.
+      BRARR_AUTH_TOKEN: ${BRARR_AUTH_TOKEN:?BRARR_AUTH_TOKEN is required — generate with `openssl rand -hex 32`}
+
+      # Bind addresses (inside the container — change `ports:` above
+      # to alter what's reachable from the host).
+      BRARR_HTTP_ADDR: ${BRARR_HTTP_ADDR:-0.0.0.0:3000}
+      BRARR_GRPC_ADDR: ${BRARR_GRPC_ADDR:-0.0.0.0:50051}
+
+      # Filesystem layout — defaults assume the image's `/data` and
+      # `/static` mountpoints; override only if you mount differently.
+      BRARR_DB_PATH: ${BRARR_DB_PATH:-/data/brarr.db}
+      BRARR_STATIC_DIR: ${BRARR_STATIC_DIR:-/static}
+
+      # Public-facing base URL the orchestrator stamps into
+      # `<enclosure url>` entries on its Torznab outbound feed (so
+      # Sonarr / Radarr can fetch the proxied release through brarr).
+      # Set this to whatever URL your reverse proxy exposes.
+      # Default is the bare local bind; for prod behind a domain set
+      # `BRARR_PUBLIC_URL=https://brarr.example/`.
+      BRARR_PUBLIC_URL: ${BRARR_PUBLIC_URL:-http://127.0.0.1:3000}
+
+      # Auto-poll cycle against `*arr/wanted` lists. 1800s = 30 min,
+      # matches Sonarr's default RSS sync cadence. Set to a higher
+      # value if your trackers rate-limit aggressively.
+      BRARR_ARR_POLL_INTERVAL_SECS: ${BRARR_ARR_POLL_INTERVAL_SECS:-1800}
+
+      # Logging.
+      RUST_LOG: ${RUST_LOG:-info}
+      RUST_BACKTRACE: ${RUST_BACKTRACE:-0}
+
+    # ─── Health ───────────────────────────────────────────────────
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "http://127.0.0.1:3000/healthz"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 15s
+
+    # ─── Logging driver caps ─────────────────────────────────────
+    # Prevent the container log from filling the host disk when the
+    # orchestrator gets chatty (debug mode against many providers).
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+volumes:
+  # Named volume so the DB survives `docker compose down`. Use
+  # `docker volume rm brarr_brarr-data` to nuke state.
+  brarr-data:
+    name: ${BRARR_DATA_VOLUME:-brarr-data}
