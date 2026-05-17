@@ -225,14 +225,25 @@ pub struct WantedMovie {
 /// Brarr's poller iterates this to drive per-episode TV searches.
 ///
 /// The endpoint paginates by default (`pageSize=10`); brarr uses
-/// `pageSize=200` to keep the loop short on libraries with thousands
-/// of missing episodes.
+/// `pageSize=200` and passes `includeSeries=true` so each row carries
+/// its nested series object — Sonarr v4 omits it by default and
+/// brarr's poller has no other path to the TVDB id without a second
+/// API call.
+///
+/// Some Sonarr versions still omit `series` even with the include flag.
+/// [`ArrClient::wanted_episodes`] handles that by fetching the series
+/// list once and joining by `series_id` in-memory.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WantedEpisode {
     /// Sonarr-side episode id (debug + dedup).
     pub id: u64,
+    /// FK to the parent series row. Used to backfill [`Self::series`]
+    /// when the inline projection isn't present.
+    #[serde(default)]
+    pub series_id: u64,
     /// Episode title (logging only — brarr searches by tvdb+season+ep).
+    #[serde(default)]
     pub title: String,
     /// Season number (1-based per Sonarr convention).
     pub season_number: u16,
@@ -247,9 +258,11 @@ pub struct WantedEpisode {
     /// shifting the endpoint semantics.
     #[serde(default)]
     pub has_file: bool,
-    /// Nested series data — the only place the `tvdbId` brarr needs
-    /// surfaces on the missing endpoint.
-    pub series: WantedEpisodeSeries,
+    /// Nested series data. Optional because Sonarr v4 omits it by
+    /// default — [`ArrClient::wanted_episodes`] backfills via a
+    /// separate `/api/v3/series` fetch when missing.
+    #[serde(default)]
+    pub series: Option<WantedEpisodeSeries>,
 }
 
 /// Minimal series projection embedded inside [`WantedEpisode`].
@@ -482,6 +495,10 @@ impl ArrClient {
                 qp.append_pair("pageSize", &PAGE_SIZE.to_string());
                 qp.append_pair("sortKey", "airDateUtc");
                 qp.append_pair("sortDirection", "descending");
+                // Sonarr v4 omits the nested `series` projection by
+                // default. Asking for it explicitly lets us avoid a
+                // second `/api/v3/series` round trip on every poll.
+                qp.append_pair("includeSeries", "true");
             }
             debug!(
                 target: "brarr_arr",
@@ -537,7 +554,67 @@ impl ArrClient {
             }
             page += 1;
         }
+
+        // Backfill series for rows where Sonarr v4 ignored
+        // `includeSeries=true` (older 4.x builds quietly drop the
+        // flag). Fetch the full series list once and join by id —
+        // one extra request beats N round-trips for an N-episode
+        // poll.
+        let needs_backfill = all.iter().any(|e| e.series.is_none() && e.series_id > 0);
+        if needs_backfill {
+            debug!(
+                target: "brarr_arr",
+                name = %self.instance.name,
+                "some episodes missing nested series; fetching series list for backfill"
+            );
+            let series_list = self.list_series().await?;
+            let by_id: std::collections::HashMap<u64, WantedEpisodeSeries> =
+                series_list.into_iter().map(|s| (s.id, s)).collect();
+            for ep in &mut all {
+                if ep.series.is_none() {
+                    ep.series = by_id.get(&ep.series_id).cloned();
+                }
+            }
+        }
         Ok(all)
+    }
+
+    /// `GET /api/v3/series` — full series list. Cheap call (one JSON
+    /// page) used to backfill the nested `series` projection on
+    /// [`WantedEpisode`] rows when Sonarr v4 omits it from
+    /// `/wanted/missing`.
+    ///
+    /// # Errors
+    ///
+    /// Same shape as [`Self::wanted_episodes`].
+    async fn list_series(&self) -> Result<Vec<WantedEpisodeSeries>, ArrError> {
+        let url = self.endpoint("series")?;
+        let resp = self
+            .http
+            .get(url)
+            .header("X-Api-Key", &self.instance.api_key)
+            .send()
+            .await
+            .map_err(|source| ArrError::Transport {
+                kind: self.instance.kind,
+                source,
+            })?;
+        let status = resp.status();
+        let body = resp.text().await.map_err(|source| ArrError::Transport {
+            kind: self.instance.kind,
+            source,
+        })?;
+        if !status.is_success() {
+            return Err(ArrError::Http {
+                kind: self.instance.kind,
+                status: status.as_u16(),
+                body: truncate_body(&body),
+            });
+        }
+        serde_json::from_str(&body).map_err(|source| ArrError::Decode {
+            kind: self.instance.kind,
+            source,
+        })
     }
 
     /// `POST /api/v3/release/push` — inject a release for *arr to

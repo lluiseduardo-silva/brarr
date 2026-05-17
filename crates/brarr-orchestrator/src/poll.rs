@@ -307,7 +307,7 @@ async fn run_once_sonarr(state: &AppState, arr: &ArrInstanceRow) -> Result<PollS
                 summary.search_errors += 1;
                 warn!(
                     target: "brarr_orchestrator::poll",
-                    series = %ep.series.title,
+                    series = %ep.series.as_ref().map_or("?", |s| s.title.as_str()),
                     season = ep.season_number,
                     episode = ep.episode_number,
                     error = %e,
@@ -342,13 +342,14 @@ fn is_pollable_episode(e: &WantedEpisode) -> bool {
 }
 
 /// Build [`SearchKeys`] for a Sonarr wanted episode. Returns `None`
-/// when the series isn't TVDB-linked (`tvdb_id == 0`); brarr's TV
-/// search is TVDB-only today.
+/// when the series row is missing (Sonarr v4 didn't backfill it) or
+/// not TVDB-linked (`tvdb_id == 0`); brarr's TV search is TVDB-only.
 fn build_keys_for_episode(e: &WantedEpisode) -> Option<SearchKeys> {
-    if e.series.tvdb_id == 0 {
+    let series = e.series.as_ref()?;
+    if series.tvdb_id == 0 {
         return None;
     }
-    let tvdb = TvdbId::new(e.series.tvdb_id).ok()?;
+    let tvdb = TvdbId::new(series.tvdb_id).ok()?;
     Some(SearchKeys::from_tvdb(
         tvdb,
         Some(e.season_number),
@@ -463,18 +464,29 @@ mod tests {
     fn ep(monitored: bool, has_file: bool, tvdb: u32, season: u16, episode: u16) -> WantedEpisode {
         WantedEpisode {
             id: 1,
+            series_id: 10,
             title: "ep".into(),
             season_number: season,
             episode_number: episode,
             monitored,
             has_file,
-            series: brarr_arr::WantedEpisodeSeries {
+            series: Some(brarr_arr::WantedEpisodeSeries {
                 id: 10,
                 title: "show".into(),
                 tvdb_id: tvdb,
                 monitored: true,
-            },
+            }),
         }
+    }
+
+    #[test]
+    fn build_keys_for_episode_returns_none_when_series_missing() {
+        // Sonarr v4 sometimes omits the nested series projection even
+        // with `includeSeries=true`. After the client-side backfill,
+        // genuinely-missing rows still surface as None — poller skips.
+        let mut e = ep(true, false, 12345, 1, 1);
+        e.series = None;
+        assert!(build_keys_for_episode(&e).is_none());
     }
 
     #[test]

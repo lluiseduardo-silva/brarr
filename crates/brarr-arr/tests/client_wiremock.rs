@@ -248,9 +248,45 @@ async fn wanted_episodes_single_page_returns_parsed_list() {
     let c = client(&server, ArrKind::Sonarr);
     let eps = c.wanted_episodes().await.unwrap();
     assert_eq!(eps.len(), 2);
-    assert_eq!(eps[0].series.tvdb_id, 12345);
+    assert_eq!(eps[0].series.as_ref().unwrap().tvdb_id, 12345);
     assert_eq!(eps[0].season_number, 1);
     assert_eq!(eps[0].episode_number, 1);
+}
+
+#[tokio::test]
+async fn wanted_episodes_backfills_series_from_separate_endpoint() {
+    // Sonarr v4 sometimes returns `/wanted/missing` rows with no
+    // nested `series` projection even when `includeSeries=true` is
+    // passed. The client must follow up with `/api/v3/series` and
+    // join by series_id to recover the tvdb id.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v3/wanted/missing"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "page": 1, "pageSize": 200, "totalRecords": 1,
+            "records": [
+                {
+                    "id": 1, "seriesId": 42, "title": "Pilot",
+                    "seasonNumber": 1, "episodeNumber": 1,
+                    "monitored": true, "hasFile": false
+                }
+            ]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v3/series"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            { "id": 42, "title": "Joined Show", "tvdbId": 999, "monitored": true }
+        ])))
+        .mount(&server)
+        .await;
+    let c = client(&server, ArrKind::Sonarr);
+    let eps = c.wanted_episodes().await.unwrap();
+    assert_eq!(eps.len(), 1);
+    let s = eps[0].series.as_ref().expect("backfilled");
+    assert_eq!(s.tvdb_id, 999);
+    assert_eq!(s.title, "Joined Show");
 }
 
 #[tokio::test]
