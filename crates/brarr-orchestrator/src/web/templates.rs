@@ -308,6 +308,33 @@ pub struct ProfileView {
 #[template(path = "partials/new_profile_modal.html")]
 pub struct NewProfileModalPartial;
 
+/// Quality-profile editor view at `/profiles/{id}/edit`.
+#[derive(Debug, Template)]
+#[template(path = "profile_editor.html")]
+pub struct ProfileEditorTemplate {
+    /// Stringified UUID.
+    pub id: String,
+    /// Operator-facing name. Editable.
+    pub name: String,
+    /// Optional description. Editable.
+    pub description: String,
+    /// Threshold integer 0..=1000.
+    pub push_threshold: u32,
+    /// `true` for preset rows — surfaced as a banner so the operator
+    /// knows tweaking a preset is supported but not the intended path.
+    pub is_preset: bool,
+    /// Rule list serialised to pretty JSON. The textarea binding round-
+    /// trips through this field — operator-side typos surface as PUT
+    /// validation errors.
+    pub rules_json: String,
+    /// Optional error banner shown after a failed PUT (validation /
+    /// JSON parse / DB error).
+    pub error_message: Option<String>,
+    /// HTML-rendered breakdown returned by the preview endpoint. Empty
+    /// on first render; populated by the HTMX preview swap target.
+    pub preview_html: String,
+}
+
 /// Single-search view at `/searches/{id}`.
 #[derive(Debug, Template)]
 #[template(path = "search_detail.html")]

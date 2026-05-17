@@ -45,9 +45,9 @@ use crate::web::render::html;
 use crate::web::templates::{
     ArrInstanceView, ArrInstancesListPartial, ArrInstancesTemplate, DashboardTemplate,
     DecisionView, ErrorTemplate, LoginTemplate, NewProfileModalPartial, NewSearchModalPartial,
-    ProfileView, ProfilesTemplate, ProviderView, ProvidersListPartial, ProvidersTemplate,
-    PushGroupView, PushHistoryView, PushesTemplate, RecentSearchView, ReleasesTemplate,
-    SearchDetailTemplate,
+    ProfileEditorTemplate, ProfileView, ProfilesTemplate, ProviderView, ProvidersListPartial,
+    ProvidersTemplate, PushGroupView, PushHistoryView, PushesTemplate, RecentSearchView,
+    ReleasesTemplate, SearchDetailTemplate,
 };
 use crate::{AppError, AppState};
 use brarr_core::TmdbId;
@@ -79,7 +79,11 @@ pub fn router(state: AppState, static_dir: &std::path::Path) -> Router {
         .route("/pushes", get(pushes_index))
         .route("/profiles", get(profiles_index).post(profiles_create))
         .route("/profiles/new", get(profiles_new_modal))
-        .route("/profiles/{id}", delete(profiles_delete))
+        .route(
+            "/profiles/{id}",
+            delete(profiles_delete).put(profiles_update),
+        )
+        .route("/profiles/{id}/edit", get(profiles_edit))
         .route("/releases", get(releases_index))
         .route("/searches", post(searches_create))
         .route("/searches/new", get(new_search_modal))
@@ -1107,6 +1111,85 @@ async fn profiles_delete(
     // Empty body — HTMX swaps the row's #profile-{id} card out, which
     // visually removes the card without a full page reload.
     Ok(Response::new(axum::body::Body::empty()))
+}
+
+/// `GET /profiles/{id}/edit` — full-page editor (no HTMX modal). Shows
+/// identity + threshold + rule JSON textarea so an operator can tweak
+/// scoring without leaving the admin UI.
+async fn profiles_edit(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, AppError> {
+    let uuid = Uuid::parse_str(&id)
+        .map_err(|e| AppError::InvalidInput(format!("invalid profile id: {e}")))?;
+    let row = quality_profiles::get_by_id(state.pool(), uuid).await?;
+    let rules_json = serde_json::to_string_pretty(&row.rules)?;
+    html(&ProfileEditorTemplate {
+        id: row.id.to_string(),
+        name: row.name,
+        description: row.description.unwrap_or_default(),
+        push_threshold: row.push_threshold,
+        is_preset: row.is_preset,
+        rules_json,
+        error_message: None,
+        preview_html: "Clique avaliar pra ver o score que o engine produziria.".to_string(),
+    })
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateProfileForm {
+    name: String,
+    description: Option<String>,
+    push_threshold: u32,
+    rules_json: String,
+}
+
+/// `PUT /profiles/{id}` — persist editor changes. Validates the rule
+/// JSON against the `RuleSet` schema before the DB write so a typo
+/// surfaces as a banner instead of corrupting the row.
+async fn profiles_update(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Form(form): Form<UpdateProfileForm>,
+) -> Result<Response, AppError> {
+    let uuid = Uuid::parse_str(&id)
+        .map_err(|e| AppError::InvalidInput(format!("invalid profile id: {e}")))?;
+    // Parse-validate the JSON first so we don't half-commit the row
+    // when the rule list is malformed.
+    let rules: brarr_decision_service::RuleSet = match serde_json::from_str(&form.rules_json) {
+        Ok(r) => r,
+        Err(e) => {
+            let row = quality_profiles::get_by_id(state.pool(), uuid).await?;
+            return html(&ProfileEditorTemplate {
+                id: row.id.to_string(),
+                name: form.name,
+                description: form.description.unwrap_or_default(),
+                push_threshold: form.push_threshold,
+                is_preset: row.is_preset,
+                rules_json: form.rules_json,
+                error_message: Some(format!("JSON inválido: {e}")),
+                preview_html: String::new(),
+            });
+        }
+    };
+    let description = form
+        .description
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    quality_profiles::update_basics(
+        state.pool(),
+        uuid,
+        form.name.trim(),
+        description,
+        form.push_threshold,
+    )
+    .await?;
+    quality_profiles::update_rules(state.pool(), uuid, &rules).await?;
+    let mut resp = Response::new(axum::body::Body::empty());
+    resp.headers_mut()
+        .insert("HX-Redirect", HeaderValue::from_static("/profiles"));
+    Ok(resp)
 }
 
 async fn search_detail(

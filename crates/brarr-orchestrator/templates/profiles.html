@@ -72,12 +72,10 @@
     <div class="h-px bg-border-default -mx-5 mb-4"></div>
 
     <div class="flex items-center justify-end gap-1.5">
-        <button type="button"
-                disabled
-                title="Editor visual chega na próxima fase"
-                class="px-2.5 h-7 rounded-md text-xs font-medium bg-bg-muted text-fg-muted cursor-not-allowed opacity-60">
+        <a href="/profiles/{{ p.id }}/edit"
+           class="px-2.5 h-7 inline-flex items-center rounded-md text-xs font-medium bg-bg-canvas border border-border-strong text-fg-primary hover:bg-bg-muted">
             editar
-        </button>
+        </a>
         <button hx-delete="/profiles/{{ p.id }}"
                 hx-target="#profile-{{ p.id }}"
                 hx-swap="outerHTML"

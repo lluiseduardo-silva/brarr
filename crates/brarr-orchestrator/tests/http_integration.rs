@@ -343,6 +343,110 @@ async fn arr_instance_delete_unknown_returns_404() {
 }
 
 #[tokio::test]
+async fn profile_editor_renders_for_preset() {
+    let (addr, state) = spawn().await;
+    let presets = db::quality_profiles::list_all(state.pool()).await.unwrap();
+    let preset = presets.iter().find(|p| p.is_preset).expect("seeded preset");
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("http://{addr}/profiles/{}/edit", preset.id))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("Editar profile"));
+    assert!(
+        body.contains("rules_json"),
+        "editor should include the rules textarea"
+    );
+    assert!(
+        body.contains(&preset.name),
+        "editor should pre-fill the profile name"
+    );
+}
+
+#[tokio::test]
+async fn profile_update_persists_new_rule_list() {
+    let (addr, state) = spawn().await;
+    let row = db::quality_profiles::insert(
+        state.pool(),
+        db::quality_profiles::NewQualityProfile {
+            name: "edit-roundtrip",
+            description: None,
+            push_threshold: 100,
+        },
+    )
+    .await
+    .unwrap();
+    let new_rules = r#"{"rule":[{"name":"only-pt","when":{"audio":"pt-br"},"add_score":42,"tag":null,"reject":false}]}"#;
+    let form = [
+        ("name", "edit-roundtrip"),
+        ("description", ""),
+        ("push_threshold", "200"),
+        ("rules_json", new_rules),
+    ];
+    let client = reqwest::Client::new();
+    let resp = client
+        .put(format!("http://{addr}/profiles/{}", row.id))
+        .form(&form)
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 200);
+    assert!(
+        resp.headers().get("hx-redirect").is_some(),
+        "successful PUT must emit HX-Redirect so HTMX reloads /profiles"
+    );
+
+    let reread = db::quality_profiles::get_by_id(state.pool(), row.id)
+        .await
+        .unwrap();
+    assert_eq!(reread.push_threshold, 200);
+    assert_eq!(reread.rules.rules.len(), 1);
+    assert_eq!(reread.rules.rules[0].add_score, 42);
+}
+
+#[tokio::test]
+async fn profile_update_with_bad_json_returns_editor_with_error_banner() {
+    let (addr, state) = spawn().await;
+    let row = db::quality_profiles::insert(
+        state.pool(),
+        db::quality_profiles::NewQualityProfile {
+            name: "bad-json",
+            description: None,
+            push_threshold: 100,
+        },
+    )
+    .await
+    .unwrap();
+    let form = [
+        ("name", "bad-json"),
+        ("description", ""),
+        ("push_threshold", "100"),
+        ("rules_json", "{ this is not valid json"),
+    ];
+    let client = reqwest::Client::new();
+    let resp = client
+        .put(format!("http://{addr}/profiles/{}", row.id))
+        .form(&form)
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+    assert!(
+        body.contains("JSON inválido"),
+        "editor should re-render with parse error banner, body = {body}"
+    );
+    // Untouched DB row.
+    let reread = db::quality_profiles::get_by_id(state.pool(), row.id)
+        .await
+        .unwrap();
+    assert!(reread.rules.rules.is_empty());
+}
+
+#[tokio::test]
 async fn pushes_index_renders_empty_state() {
     let (addr, _state) = spawn().await;
     let client = reqwest::Client::new();
