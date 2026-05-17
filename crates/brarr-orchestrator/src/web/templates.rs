@@ -62,6 +62,16 @@ pub struct DecisionView {
     /// `kind` is one of `"pt"` | `"accent"` | `"warning"` | `"neutral"`
     /// — purely a UI hint, not a domain enum.
     pub rule_chips: Vec<(String, String)>,
+    /// Explicit language chips derived from the persisted
+    /// `audio_languages` snapshot — `("PT-BR áudio", "pt")`,
+    /// `("Dublado", "accent")`, etc. Independent of `rule_chips`: rule
+    /// chips show *why* the score is what it is; these show *what the
+    /// release actually has* regardless of which rules ran. `kind`
+    /// uses the same vocabulary as `rule_chips`.
+    pub audio_chips: Vec<(String, String)>,
+    /// Subtitle counterpart to [`Self::audio_chips`] —
+    /// `("PT-BR legenda", "pt")`, `("Legendado", "accent")`, etc.
+    pub subtitle_chips: Vec<(String, String)>,
     /// Resolution label.
     pub resolution: String,
     /// Kind label.

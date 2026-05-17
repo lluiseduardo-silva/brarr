@@ -16,7 +16,7 @@
 #}
 <article class="card-hairline bg-bg-surface border border-border-default rounded-xl overflow-hidden
                 {% if d.rejected %}!bg-danger-soft{% endif %}"
-         style="height: 280px;">
+         style="min-height: 280px;">
     <div class="h-full flex flex-col p-[18px] pt-[16px] gap-2.5">
 
         {# ─── HEADER ─── #}
@@ -34,6 +34,36 @@
                 <span class="text-[11px] font-semibold text-fg-secondary">{{ d.kind }}</span>
             </span>
         </header>
+
+        {# ─── LANGUAGE CHIPS ─── 28h fixo. Empty when MediaInfo snapshot
+           wasn't captured for the release — caller relies on rule chips
+           below in that case. #}
+        {% if !d.audio_chips.is_empty() || !d.subtitle_chips.is_empty() %}
+        <div class="h-7 flex items-center gap-1.5 overflow-hidden">
+            {% for chip in d.audio_chips %}
+                {% if chip.1 == "pt" %}
+                <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-semibold bg-success-soft text-success-soft-fg whitespace-nowrap">
+                    <span class="w-1.5 h-1.5 rounded-full bg-success-solid"></span>{{ chip.0 }}
+                </span>
+                {% else if chip.1 == "accent" %}
+                <span class="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-semibold bg-accent-soft text-accent-soft-fg whitespace-nowrap">{{ chip.0 }}</span>
+                {% else if chip.1 == "warning" %}
+                <span class="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-semibold bg-warning-soft text-warning-soft-fg whitespace-nowrap">{{ chip.0 }}</span>
+                {% else %}
+                <span class="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-semibold bg-bg-muted text-fg-secondary whitespace-nowrap">{{ chip.0 }}</span>
+                {% endif %}
+            {% endfor %}
+            {% for chip in d.subtitle_chips %}
+                {% if chip.1 == "pt" %}
+                <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-semibold bg-success-soft text-success-soft-fg whitespace-nowrap">
+                    <span class="w-1.5 h-1.5 rounded-full bg-success-solid"></span>{{ chip.0 }}
+                </span>
+                {% else %}
+                <span class="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-semibold bg-bg-muted text-fg-secondary whitespace-nowrap">{{ chip.0 }}</span>
+                {% endif %}
+            {% endfor %}
+        </div>
+        {% endif %}
 
         {# ─── RULE CHIPS ─── 28h fixo + overflow clip. #}
         <div class="h-7 flex items-center gap-1.5 overflow-hidden">

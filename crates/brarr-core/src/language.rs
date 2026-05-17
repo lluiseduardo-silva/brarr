@@ -14,7 +14,13 @@
 /// [`Language::Other`] preservando a string original do campo
 /// `Language` — caso a feature precise, basta adicionar uma variante
 /// nova aqui em vez de espalhar `match` em consumidores.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+///
+/// `Serialize` / `Deserialize` são derivadas com `tag = "kind"`: o
+/// orchestrator persiste vetores de `Language` nas colunas
+/// `decisions.audio_langs_json` e `subtitle_langs_json` para depois
+/// renderizar chips explícitos (`PT-BR áudio`, `Dublado`, etc) na UI.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", content = "value")]
 pub enum Language {
     /// Português brasileiro. Reconhecido a partir de:
     /// - `Language: Portuguese (BR)`

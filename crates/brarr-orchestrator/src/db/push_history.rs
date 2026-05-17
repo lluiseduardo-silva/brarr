@@ -227,7 +227,10 @@ pub async fn success_rate(pool: &Pool) -> Result<(u64, u64), AppError> {
     .await?;
     let total: i64 = row.try_get("total").unwrap_or(0);
     let ok: i64 = row.try_get("ok").unwrap_or(0);
-    Ok((u64::try_from(total).unwrap_or(0), u64::try_from(ok).unwrap_or(0)))
+    Ok((
+        u64::try_from(total).unwrap_or(0),
+        u64::try_from(ok).unwrap_or(0),
+    ))
 }
 
 /// All push attempts for a given decision, oldest first.
@@ -418,6 +421,8 @@ mod tests {
                 details_url: None,
                 provider_kind: Some("unit3d".into()),
                 published_at: None,
+                audio_languages: Vec::new(),
+                subtitle_languages: Vec::new(),
             },
         )
         .await

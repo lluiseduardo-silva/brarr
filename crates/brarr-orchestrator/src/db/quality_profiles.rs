@@ -140,9 +140,8 @@ pub async fn delete_by_id(pool: &Pool, id: Uuid) -> Result<bool, AppError> {
 
 fn row_to_profile(row: &SqliteRow) -> Result<QualityProfileRow, AppError> {
     let id_str: String = row.try_get("id")?;
-    let id = Uuid::parse_str(&id_str).map_err(|e| {
-        AppError::InvalidInput(format!("invalid uuid in quality_profiles.id: {e}"))
-    })?;
+    let id = Uuid::parse_str(&id_str)
+        .map_err(|e| AppError::InvalidInput(format!("invalid uuid in quality_profiles.id: {e}")))?;
     let threshold_i64: i64 = row.try_get("push_threshold")?;
     let push_threshold = u32::try_from(threshold_i64).unwrap_or(0);
     let is_preset_i64: i64 = row.try_get("is_preset")?;

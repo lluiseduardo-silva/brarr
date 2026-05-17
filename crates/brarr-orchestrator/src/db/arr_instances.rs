@@ -251,7 +251,9 @@ fn row_to_instance(row: &SqliteRow) -> Result<ArrInstanceRow, AppError> {
         .as_deref()
         .map(Uuid::parse_str)
         .transpose()
-        .map_err(|e| AppError::InvalidInput(format!("invalid uuid in arr_instances.profile_id: {e}")))?;
+        .map_err(|e| {
+            AppError::InvalidInput(format!("invalid uuid in arr_instances.profile_id: {e}"))
+        })?;
     let enabled_i64: i64 = row.try_get("enabled")?;
     let created_unix: i64 = row.try_get("created_at")?;
     let created_at = OffsetDateTime::from_unix_timestamp(created_unix)

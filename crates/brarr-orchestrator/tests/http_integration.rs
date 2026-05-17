@@ -402,6 +402,8 @@ async fn decisions_push_records_transport_failure_against_dead_arr() {
             details_url: None,
             provider_kind: Some("unit3d".into()),
             published_at: None,
+            audio_languages: Vec::new(),
+            subtitle_languages: Vec::new(),
         },
     )
     .await

@@ -34,6 +34,7 @@ use tracing::info;
 use uuid::Uuid;
 
 use crate::auth::{AuthConfig, SESSION_COOKIE};
+use crate::db::quality_profiles;
 use crate::db::{arr_instances, decisions, providers, push_history, searches};
 #[allow(
     unused_imports,
@@ -41,7 +42,6 @@ use crate::db::{arr_instances, decisions, providers, push_history, searches};
 )]
 use crate::search::run_tmdb_search;
 use crate::web::render::html;
-use crate::db::quality_profiles;
 use crate::web::templates::{
     ArrInstanceView, ArrInstancesListPartial, ArrInstancesTemplate, DashboardTemplate,
     DecisionView, ErrorTemplate, LoginTemplate, NewProfileModalPartial, NewSearchModalPartial,
@@ -441,8 +441,10 @@ async fn providers_test(
 async fn arr_instances_index(State(state): State<AppState>) -> Result<Response, AppError> {
     let rows = arr_instances::list_all(state.pool()).await?;
     let profile_rows = quality_profiles::list_all(state.pool()).await?;
-    let profile_by_id: std::collections::HashMap<Uuid, &crate::db::quality_profiles::QualityProfileRow> =
-        profile_rows.iter().map(|p| (p.id, p)).collect();
+    let profile_by_id: std::collections::HashMap<
+        Uuid,
+        &crate::db::quality_profiles::QualityProfileRow,
+    > = profile_rows.iter().map(|p| (p.id, p)).collect();
     let instances = rows
         .iter()
         .map(|r| arr_instance_view_with_profile(r, &profile_by_id))
@@ -457,7 +459,10 @@ async fn arr_instances_index(State(state): State<AppState>) -> Result<Response, 
             is_preset: p.is_preset,
         })
         .collect();
-    html(&ArrInstancesTemplate { instances, profiles })
+    html(&ArrInstancesTemplate {
+        instances,
+        profiles,
+    })
 }
 
 fn arr_instance_view_with_profile(
@@ -1011,9 +1016,11 @@ fn parse_optional_u16(raw: Option<&str>, label: &str) -> Result<Option<u16>, App
     let Some(s) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
         return Ok(None);
     };
-    s.parse::<u16>()
-        .map(Some)
-        .map_err(|_| AppError::InvalidInput(format!("{label} deve ser numérico (0..=65535), recebi {s:?}")))
+    s.parse::<u16>().map(Some).map_err(|_| {
+        AppError::InvalidInput(format!(
+            "{label} deve ser numérico (0..=65535), recebi {s:?}"
+        ))
+    })
 }
 
 /// Returns the Nova Busca modal partial — swapped into the
@@ -1159,6 +1166,8 @@ fn decision_view(d: crate::db::decisions::DecisionRow) -> DecisionView {
         .map(|name| (name.clone(), classify_rule_chip(name).to_string()))
         .collect();
     let matched_rules = d.matched_rules.join(", ");
+    let audio_chips = audio_chips_from_languages(&d.audio_languages, &d.subtitle_languages);
+    let subtitle_chips = subtitle_chips_from_languages(&d.subtitle_languages);
     DecisionView {
         id: d.id.to_string(),
         provider_name: d.provider_name,
@@ -1168,11 +1177,100 @@ fn decision_view(d: crate::db::decisions::DecisionRow) -> DecisionView {
         tags: d.tags.join(", "),
         matched_rules,
         rule_chips,
+        audio_chips,
+        subtitle_chips,
         resolution: d.resolution,
         kind: d.kind,
         seeders: d.seeders,
         size_human: humanize_bytes(d.size_bytes),
     }
+}
+
+/// Build explicit audio chips from the persisted enrichment snapshot.
+///
+/// Renders independent of the rule engine: even profiles with zero
+/// Portuguese rules still surface a `PT-BR áudio` chip when the
+/// release ships it. Ordering matches the audio track order in the
+/// MediaInfo dump, with duplicates de-duplicated and an extra
+/// `Dublado` / `Multi-áudio` / `JP áudio + leg PT` annotation appended
+/// based on the combined audio + subtitle shape so anime, dubs, and
+/// multi-language rips read at a glance.
+fn audio_chips_from_languages(
+    audio: &[brarr_core::Language],
+    subtitle: &[brarr_core::Language],
+) -> Vec<(String, String)> {
+    use brarr_core::Language;
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for lang in audio {
+        if !seen.insert(lang.clone()) {
+            continue;
+        }
+        let chip = match lang {
+            Language::PtBr => Some(("PT-BR áudio".to_string(), "pt".to_string())),
+            Language::PtPt => Some(("PT-PT áudio".to_string(), "pt".to_string())),
+            Language::Pt => Some(("PT áudio".to_string(), "pt".to_string())),
+            Language::En => Some(("EN áudio".to_string(), "neutral".to_string())),
+            Language::Other(name) => Some((format!("{name} áudio"), "neutral".to_string())),
+        };
+        if let Some(c) = chip {
+            out.push(c);
+        }
+    }
+    // Composite annotations — appended last so explicit per-language
+    // chips read first.
+    let has_pt_audio = audio.iter().any(Language::is_portuguese);
+    let has_pt_subtitle = subtitle.iter().any(Language::is_portuguese);
+    let has_non_pt_audio = audio
+        .iter()
+        .any(|l| matches!(l, Language::En | Language::Other(_)));
+    if has_pt_audio && has_non_pt_audio {
+        out.push(("Dublado".to_string(), "accent".to_string()));
+    }
+    // Anime case: non-PT audio (typically Japanese) + PT subtitle and no
+    // PT audio at all → reads as legendado.
+    if !has_pt_audio && has_non_pt_audio && has_pt_subtitle {
+        out.push(("Legendado".to_string(), "accent".to_string()));
+    }
+    let unique_non_pt = {
+        let mut s = std::collections::HashSet::new();
+        for l in audio {
+            if !l.is_portuguese() {
+                s.insert(l.clone());
+            }
+        }
+        s.len()
+    };
+    if unique_non_pt >= 2 {
+        out.push(("Multi-áudio".to_string(), "warning".to_string()));
+    }
+    out
+}
+
+/// Build explicit subtitle chips. Same idea as
+/// [`audio_chips_from_languages`] but a track without Portuguese audio
+/// already carries the `Legendado` accent on the audio row, so subtitle
+/// chips stay purely descriptive.
+fn subtitle_chips_from_languages(subtitle: &[brarr_core::Language]) -> Vec<(String, String)> {
+    use brarr_core::Language;
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for lang in subtitle {
+        if !seen.insert(lang.clone()) {
+            continue;
+        }
+        let chip = match lang {
+            Language::PtBr => Some(("PT-BR legenda".to_string(), "pt".to_string())),
+            Language::PtPt => Some(("PT-PT legenda".to_string(), "pt".to_string())),
+            Language::Pt => Some(("PT legenda".to_string(), "pt".to_string())),
+            Language::En => Some(("EN legenda".to_string(), "neutral".to_string())),
+            Language::Other(name) => Some((format!("{name} legenda"), "neutral".to_string())),
+        };
+        if let Some(c) = chip {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// Map a rule name to the chip colour kind the release card uses.
@@ -1224,5 +1322,87 @@ fn humanize_bytes(b: u64) -> String {
         format!("{b} B")
     } else {
         format!("{value:.2} {}", UNITS[unit])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::{audio_chips_from_languages, subtitle_chips_from_languages};
+    use brarr_core::Language;
+
+    #[test]
+    fn pt_br_audio_renders_as_green_pt_chip() {
+        let chips = audio_chips_from_languages(&[Language::PtBr], &[]);
+        assert_eq!(chips, vec![("PT-BR áudio".to_string(), "pt".to_string())]);
+    }
+
+    #[test]
+    fn pt_br_audio_plus_english_audio_appends_dublado() {
+        let chips = audio_chips_from_languages(&[Language::PtBr, Language::En], &[]);
+        assert_eq!(
+            chips,
+            vec![
+                ("PT-BR áudio".to_string(), "pt".to_string()),
+                ("EN áudio".to_string(), "neutral".to_string()),
+                ("Dublado".to_string(), "accent".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn jp_audio_with_pt_subtitle_marks_legendado() {
+        let chips = audio_chips_from_languages(
+            &[Language::Other("Japanese".to_string())],
+            &[Language::PtBr],
+        );
+        assert_eq!(
+            chips,
+            vec![
+                ("Japanese áudio".to_string(), "neutral".to_string()),
+                ("Legendado".to_string(), "accent".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn three_distinct_non_pt_audios_flag_multi_audio() {
+        let chips = audio_chips_from_languages(
+            &[
+                Language::En,
+                Language::Other("Spanish".to_string()),
+                Language::Other("French".to_string()),
+            ],
+            &[],
+        );
+        assert!(
+            chips.iter().any(|c| c.0 == "Multi-áudio"),
+            "expected Multi-áudio chip in {chips:?}"
+        );
+    }
+
+    #[test]
+    fn duplicate_audio_languages_deduped() {
+        let chips = audio_chips_from_languages(&[Language::PtBr, Language::PtBr], &[]);
+        assert_eq!(chips, vec![("PT-BR áudio".to_string(), "pt".to_string())]);
+    }
+
+    #[test]
+    fn subtitle_chips_render_pt_explicitly() {
+        let chips = subtitle_chips_from_languages(&[Language::PtBr, Language::En]);
+        assert_eq!(
+            chips,
+            vec![
+                ("PT-BR legenda".to_string(), "pt".to_string()),
+                ("EN legenda".to_string(), "neutral".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn empty_enrichment_produces_no_chips() {
+        assert!(audio_chips_from_languages(&[], &[]).is_empty());
+        assert!(subtitle_chips_from_languages(&[]).is_empty());
     }
 }

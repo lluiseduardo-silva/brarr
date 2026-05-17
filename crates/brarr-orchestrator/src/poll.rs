@@ -244,12 +244,8 @@ async fn pick_pushable<'a>(
     // wins; otherwise we fall back to the row's own integer. The
     // resolver also handles the FK-orphan edge case (profile deleted
     // mid-poll) by falling back to the raw `push_threshold`.
-    let threshold =
-        crate::db::arr_instances::effective_threshold(state.pool(), arr).await?;
-    for d in decisions
-        .iter()
-        .take_while(|d| d.score >= threshold)
-    {
+    let threshold = crate::db::arr_instances::effective_threshold(state.pool(), arr).await?;
+    for d in decisions.iter().take_while(|d| d.score >= threshold) {
         if !meets_quality(d) {
             debug!(
                 target: "brarr_orchestrator::poll",
@@ -637,6 +633,8 @@ mod tests {
             details_url: None,
             provider_kind: kind.map(String::from),
             published_at: None,
+            audio_languages: Vec::new(),
+            subtitle_languages: Vec::new(),
             decided_at: brarr_core::OffsetDateTime::now_utc(),
         }
     }

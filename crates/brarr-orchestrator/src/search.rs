@@ -380,6 +380,16 @@ fn build_insert(
         details_url: release.urls.details.as_ref().map(url::Url::to_string),
         provider_kind: Some(provider.kind.clone()),
         published_at: release.published_at,
+        audio_languages: release
+            .enrichment
+            .as_ref()
+            .map(|e| e.audio_languages.clone())
+            .unwrap_or_default(),
+        subtitle_languages: release
+            .enrichment
+            .as_ref()
+            .map(|e| e.subtitle_languages.clone())
+            .unwrap_or_default(),
     }
 }
 

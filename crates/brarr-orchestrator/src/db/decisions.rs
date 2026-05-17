@@ -2,7 +2,7 @@
 //! (rejected releases are still persisted so the UI can show *why*
 //! something was filtered out).
 
-use brarr_core::{ReleaseKind, Resolution};
+use brarr_core::{Language, ReleaseKind, Resolution};
 use sqlx::{Row, sqlite::SqliteRow};
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -64,6 +64,15 @@ pub struct DecisionRow {
     /// pre-dating the 20260517120000 migration have `None`; the feed
     /// renderer falls back to `now()` in that case.
     pub published_at: Option<OffsetDateTime>,
+    /// Audio track languages captured from the release's `MediaInfo`
+    /// enrichment at search time. Empty when the provider didn't ship
+    /// `MediaInfo` or the parser produced nothing. Powers explicit
+    /// `PT-BR áudio` / `Dublado` chips on the release card without
+    /// re-running the parser at render time.
+    pub audio_languages: Vec<Language>,
+    /// Subtitle track languages. Same shape and semantics as
+    /// [`Self::audio_languages`].
+    pub subtitle_languages: Vec<Language>,
     /// When the engine produced the outcome.
     pub decided_at: OffsetDateTime,
 }
@@ -107,6 +116,10 @@ pub struct DecisionInsert {
     pub provider_kind: Option<String>,
     /// Upstream upload timestamp — see [`DecisionRow::published_at`].
     pub published_at: Option<OffsetDateTime>,
+    /// Audio languages — see [`DecisionRow::audio_languages`].
+    pub audio_languages: Vec<Language>,
+    /// Subtitle languages — see [`DecisionRow::subtitle_languages`].
+    pub subtitle_languages: Vec<Language>,
 }
 
 /// Insert one decision row, returning the persisted form.
@@ -120,6 +133,8 @@ pub async fn insert(pool: &Pool, ins: DecisionInsert) -> Result<DecisionRow, App
     let now = OffsetDateTime::now_utc();
     let tags_json = serde_json::to_string(&ins.tags)?;
     let matched_json = serde_json::to_string(&ins.matched_rules)?;
+    let audio_langs_json = serde_json::to_string(&ins.audio_languages)?;
+    let subtitle_langs_json = serde_json::to_string(&ins.subtitle_languages)?;
     let resolution = resolution_label(&ins.resolution);
     let kind = kind_label(&ins.kind);
 
@@ -128,8 +143,8 @@ pub async fn insert(pool: &Pool, ins: DecisionInsert) -> Result<DecisionRow, App
             id, search_id, provider_id, provider_name, release_name, release_id_remote, \
             score, rejected, tags_json, matched_json, seeders, leechers, size_bytes, \
             resolution, kind, decided_at, download_url, details_url, provider_kind, \
-            published_at \
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            published_at, audio_langs_json, subtitle_langs_json \
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(id.to_string())
     .bind(ins.search_id.to_string())
@@ -151,6 +166,8 @@ pub async fn insert(pool: &Pool, ins: DecisionInsert) -> Result<DecisionRow, App
     .bind(&ins.details_url)
     .bind(&ins.provider_kind)
     .bind(ins.published_at.map(OffsetDateTime::unix_timestamp))
+    .bind(&audio_langs_json)
+    .bind(&subtitle_langs_json)
     .execute(pool)
     .await?;
 
@@ -174,6 +191,8 @@ pub async fn insert(pool: &Pool, ins: DecisionInsert) -> Result<DecisionRow, App
         details_url: ins.details_url,
         provider_kind: ins.provider_kind,
         published_at: ins.published_at,
+        audio_languages: ins.audio_languages,
+        subtitle_languages: ins.subtitle_languages,
         decided_at: now,
     })
 }
@@ -188,7 +207,7 @@ pub async fn list_for_search(pool: &Pool, search_id: Uuid) -> Result<Vec<Decisio
         "SELECT id, search_id, provider_id, provider_name, release_name, release_id_remote, \
                 score, rejected, tags_json, matched_json, seeders, leechers, size_bytes, \
                 resolution, kind, decided_at, download_url, details_url, provider_kind, \
-                published_at \
+                published_at, audio_langs_json, subtitle_langs_json \
          FROM decisions WHERE search_id = ? ORDER BY score DESC, seeders DESC",
     )
     .bind(search_id.to_string())
@@ -210,7 +229,7 @@ pub async fn get_by_id(pool: &Pool, id: Uuid) -> Result<DecisionRow, AppError> {
         "SELECT id, search_id, provider_id, provider_name, release_name, release_id_remote, \
                 score, rejected, tags_json, matched_json, seeders, leechers, size_bytes, \
                 resolution, kind, decided_at, download_url, details_url, provider_kind, \
-                published_at \
+                published_at, audio_langs_json, subtitle_langs_json \
          FROM decisions WHERE id = ?",
     )
     .bind(id.to_string())
@@ -237,7 +256,7 @@ pub async fn recent(pool: &Pool, limit: u32) -> Result<Vec<DecisionRow>, AppErro
         "SELECT id, search_id, provider_id, provider_name, release_name, release_id_remote, \
                 score, rejected, tags_json, matched_json, seeders, leechers, size_bytes, \
                 resolution, kind, decided_at, download_url, details_url, provider_kind, \
-                published_at \
+                published_at, audio_langs_json, subtitle_langs_json \
          FROM decisions ORDER BY decided_at DESC LIMIT ?",
     )
     .bind(i64::from(limit))
@@ -277,6 +296,22 @@ fn row_to_decision(row: &SqliteRow) -> Result<DecisionRow, AppError> {
     let download_url: Option<String> = row.try_get("download_url").ok().flatten();
     let details_url: Option<String> = row.try_get("details_url").ok().flatten();
     let provider_kind: Option<String> = row.try_get("provider_kind").ok().flatten();
+    // Legacy rows pre-dating the 20260519120000 migration get the column
+    // default `'[]'`, so parsing always returns an empty vec rather than
+    // failing. Malformed JSON (shouldn't happen — only this crate writes
+    // the column) surfaces as an `AppError` via `?`.
+    let audio_langs_json: String = row
+        .try_get::<Option<String>, _>("audio_langs_json")
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "[]".to_string());
+    let subtitle_langs_json: String = row
+        .try_get::<Option<String>, _>("subtitle_langs_json")
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "[]".to_string());
+    let audio_languages: Vec<Language> = serde_json::from_str(&audio_langs_json)?;
+    let subtitle_languages: Vec<Language> = serde_json::from_str(&subtitle_langs_json)?;
     // Legacy rows pre-dating the 20260517120000 migration keep NULL —
     // `try_get` returns `Ok(None)` then. Bad UNIX timestamps (shouldn't
     // happen but defend against malformed test fixtures) silently drop
@@ -306,6 +341,8 @@ fn row_to_decision(row: &SqliteRow) -> Result<DecisionRow, AppError> {
         details_url,
         provider_kind,
         published_at,
+        audio_languages,
+        subtitle_languages,
         decided_at,
     })
 }
@@ -390,6 +427,8 @@ mod tests {
             details_url: Some("https://capybara/torrents/12345".into()),
             provider_kind: Some("unit3d".into()),
             published_at: None,
+            audio_languages: Vec::new(),
+            subtitle_languages: Vec::new(),
         }
     }
 
@@ -473,5 +512,32 @@ mod tests {
         let pool = open_memory().await.unwrap();
         let err = get_by_id(&pool, Uuid::new_v4()).await.unwrap_err();
         assert!(matches!(err, AppError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn language_vectors_roundtrip() {
+        let pool = open_memory().await.unwrap();
+        let search_id = make_search(&pool).await;
+        let mut ins = sample_insert(search_id, 150);
+        ins.audio_languages = vec![Language::PtBr, Language::En];
+        ins.subtitle_languages = vec![Language::PtBr];
+        let row = insert(&pool, ins).await.unwrap();
+        assert_eq!(row.audio_languages, vec![Language::PtBr, Language::En]);
+        assert_eq!(row.subtitle_languages, vec![Language::PtBr]);
+        let fetched = get_by_id(&pool, row.id).await.unwrap();
+        assert_eq!(fetched.audio_languages, vec![Language::PtBr, Language::En]);
+        assert_eq!(fetched.subtitle_languages, vec![Language::PtBr]);
+    }
+
+    #[tokio::test]
+    async fn legacy_default_language_columns_parse_as_empty() {
+        // Simulates a legacy row written before the 20260519120000
+        // migration: the column default `'[]'` keeps the read path
+        // working without touching every callsite.
+        let pool = open_memory().await.unwrap();
+        let search_id = make_search(&pool).await;
+        let row = insert(&pool, sample_insert(search_id, 50)).await.unwrap();
+        assert!(row.audio_languages.is_empty());
+        assert!(row.subtitle_languages.is_empty());
     }
 }
