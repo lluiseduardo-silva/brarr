@@ -9,17 +9,25 @@
                 <th class="px-3 py-2">Base URL</th>
                 <th class="px-3 py-2">Tipo</th>
                 <th class="px-3 py-2">Criado em</th>
+                <th class="px-3 py-2">Ativo</th>
                 <th class="px-3 py-2">Status</th>
                 <th class="px-3 py-2"></th>
             </tr>
         </thead>
         <tbody>
         {% for p in providers %}
-            <tr class="border-t" id="provider-{{ p.id }}">
+            <tr class="border-t {% if !p.enabled %}bg-slate-50 text-slate-500{% endif %}" id="provider-{{ p.id }}">
                 <td class="px-3 py-2 font-medium">{{ p.name }}</td>
                 <td class="px-3 py-2"><a href="{{ p.base_url }}" class="text-blue-600 hover:underline" target="_blank" rel="noopener">{{ p.base_url }}</a></td>
                 <td class="px-3 py-2 text-xs uppercase tracking-wide">{{ p.kind }}</td>
                 <td class="px-3 py-2 font-mono text-xs">{{ p.created_at }}</td>
+                <td class="px-3 py-2">
+                    {% if p.enabled %}
+                    <span class="badge bg-emerald-100 text-emerald-800">on</span>
+                    {% else %}
+                    <span class="badge bg-slate-200 text-slate-600">off</span>
+                    {% endif %}
+                </td>
                 <td class="px-3 py-2">
                     <span id="ping-{{ p.id }}" class="text-xs text-slate-400 italic">não testado</span>
                 </td>
@@ -30,6 +38,13 @@
                             hx-indicator="#ping-{{ p.id }}"
                             class="text-emerald-700 hover:underline text-xs">
                         testar
+                    </button>
+                    <button hx-post="/providers/{{ p.id }}/toggle"
+                            hx-target="#providers-list"
+                            hx-swap="outerHTML"
+                            class="text-amber-700 hover:underline text-xs"
+                            title="Liga/desliga sem perder config (drain mode)">
+                        {% if p.enabled %}desativar{% else %}ativar{% endif %}
                     </button>
                     <a href="/providers/{{ p.id }}/probe?imdb=tt0133093"
                        target="_blank"

@@ -60,6 +60,7 @@ pub fn router(state: AppState, static_dir: &std::path::Path) -> Router {
         .route("/providers/{id}", delete(providers_delete))
         .route("/providers/{id}/test", post(providers_test))
         .route("/providers/{id}/probe", get(providers_probe))
+        .route("/providers/{id}/toggle", post(providers_toggle))
         .route(
             "/arr-instances",
             get(arr_instances_index).post(arr_instances_create),
@@ -867,8 +868,24 @@ fn provider_view(p: crate::db::providers::ProviderRow) -> ProviderView {
         name: p.name,
         base_url: p.base_url.to_string(),
         kind: p.kind,
+        enabled: p.enabled,
         created_at: format_ts(p.created_at),
     }
+}
+
+/// `POST /providers/{id}/toggle` — flip enabled flag. HTMX target is
+/// the whole list (cheap refresh, no per-row mutation tracking).
+async fn providers_toggle(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, AppError> {
+    let uuid = Uuid::parse_str(&id)
+        .map_err(|e| AppError::InvalidInput(format!("invalid provider id: {e}")))?;
+    let current = providers::get_by_id(state.pool(), uuid).await?;
+    providers::set_enabled(state.pool(), uuid, !current.enabled).await?;
+    let rows = providers::list_all(state.pool()).await?;
+    let providers = rows.into_iter().map(provider_view).collect();
+    html(&ProvidersListPartial { providers })
 }
 
 fn decision_view(d: crate::db::decisions::DecisionRow) -> DecisionView {

@@ -38,6 +38,9 @@ pub struct ProviderRow {
     /// the provider is served by one of the built-in HTTP clients
     /// (selected by `kind`).
     pub plugin_path: Option<PathBuf>,
+    /// `false` removes the provider from the search fan-out without
+    /// deleting its config (drain mode + targeted-testing toggle).
+    pub enabled: bool,
     /// Row creation timestamp.
     pub created_at: OffsetDateTime,
 }
@@ -84,8 +87,8 @@ pub async fn insert(pool: &Pool, new: NewProvider<'_>) -> Result<ProviderRow, Ap
     let created_unix = now.unix_timestamp();
     let plugin_path_str = new.plugin_path.map(|p| p.to_string_lossy().into_owned());
     sqlx::query(
-        "INSERT INTO providers (id, name, base_url, api_token, kind, plugin_path, created_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO providers (id, name, base_url, api_token, kind, plugin_path, enabled, created_at) \
+         VALUES (?, ?, ?, ?, ?, ?, 1, ?)",
     )
     .bind(&id_str)
     .bind(new.name)
@@ -104,8 +107,28 @@ pub async fn insert(pool: &Pool, new: NewProvider<'_>) -> Result<ProviderRow, Ap
         api_token: new.api_token.to_string(),
         kind: new.kind.to_string(),
         plugin_path: new.plugin_path.map(PathBuf::from),
+        enabled: true,
         created_at: now,
     })
+}
+
+/// Flip the `enabled` flag for one row in place. Returns the refreshed
+/// row.
+///
+/// # Errors
+///
+/// - [`AppError::NotFound`] when no row matches.
+/// - [`AppError::Database`] on SQL failure.
+pub async fn set_enabled(pool: &Pool, id: Uuid, enabled: bool) -> Result<ProviderRow, AppError> {
+    let res = sqlx::query("UPDATE providers SET enabled = ? WHERE id = ?")
+        .bind(i64::from(u8::from(enabled)))
+        .bind(id.to_string())
+        .execute(pool)
+        .await?;
+    if res.rows_affected() == 0 {
+        return Err(AppError::NotFound(format!("provider {id}")));
+    }
+    get_by_id(pool, id).await
 }
 
 /// List all providers, ordered by `name` ascending.
@@ -115,7 +138,7 @@ pub async fn insert(pool: &Pool, new: NewProvider<'_>) -> Result<ProviderRow, Ap
 /// Returns [`AppError::Database`] on SQL failure.
 pub async fn list_all(pool: &Pool) -> Result<Vec<ProviderRow>, AppError> {
     let rows = sqlx::query(
-        "SELECT id, name, base_url, api_token, kind, plugin_path, created_at \
+        "SELECT id, name, base_url, api_token, kind, plugin_path, enabled, created_at \
          FROM providers ORDER BY name ASC",
     )
     .fetch_all(pool)
@@ -130,7 +153,7 @@ pub async fn list_all(pool: &Pool) -> Result<Vec<ProviderRow>, AppError> {
 /// Returns [`AppError::NotFound`] if no row matches.
 pub async fn get_by_id(pool: &Pool, id: Uuid) -> Result<ProviderRow, AppError> {
     let row_opt = sqlx::query(
-        "SELECT id, name, base_url, api_token, kind, plugin_path, created_at \
+        "SELECT id, name, base_url, api_token, kind, plugin_path, enabled, created_at \
          FROM providers WHERE id = ?",
     )
     .bind(id.to_string())
@@ -167,6 +190,10 @@ fn row_to_provider(row: &SqliteRow) -> Result<ProviderRow, AppError> {
     let created_at = OffsetDateTime::from_unix_timestamp(created_unix)
         .map_err(|e| AppError::InvalidInput(format!("invalid timestamp: {e}")))?;
     let plugin_path_str: Option<String> = row.try_get("plugin_path")?;
+    // Legacy rows before the 20260517160000 migration won't have the
+    // column. `try_get` returns the SQLite default (1) so this stays
+    // backward-compatible.
+    let enabled_i64: i64 = row.try_get::<i64, _>("enabled").unwrap_or(1);
     Ok(ProviderRow {
         id,
         name: row.try_get("name")?,
@@ -174,8 +201,25 @@ fn row_to_provider(row: &SqliteRow) -> Result<ProviderRow, AppError> {
         api_token: row.try_get("api_token")?,
         kind: row.try_get("kind")?,
         plugin_path: plugin_path_str.map(PathBuf::from),
+        enabled: enabled_i64 != 0,
         created_at,
     })
+}
+
+/// Return only the providers with `enabled = 1`. Search fan-out uses
+/// this so disabled rows are skipped without losing their config.
+///
+/// # Errors
+///
+/// Returns [`AppError::Database`] on SQL failure.
+pub async fn list_enabled(pool: &Pool) -> Result<Vec<ProviderRow>, AppError> {
+    let rows = sqlx::query(
+        "SELECT id, name, base_url, api_token, kind, plugin_path, enabled, created_at \
+         FROM providers WHERE enabled = 1 ORDER BY name ASC",
+    )
+    .fetch_all(pool)
+    .await?;
+    rows.iter().map(row_to_provider).collect()
 }
 
 #[cfg(test)]

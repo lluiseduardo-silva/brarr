@@ -80,6 +80,10 @@ pub struct ProviderView {
     pub base_url: String,
     /// Provider family (`unit3d`, `newznab`, `torznab`, `plugin`).
     pub kind: String,
+    /// `true` when this provider participates in the search fan-out.
+    /// Soft-disabled rows show a muted state in the UI and are
+    /// skipped by `search::run_search`.
+    pub enabled: bool,
     /// Creation timestamp (ISO-8601).
     pub created_at: String,
 }

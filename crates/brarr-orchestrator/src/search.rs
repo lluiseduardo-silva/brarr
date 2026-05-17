@@ -126,12 +126,12 @@ pub async fn run_search(state: &AppState, keys: SearchKeys) -> Result<SearchRunO
         "search created"
     );
 
-    let providers = providers::list_all(pool).await?;
+    let providers = providers::list_enabled(pool).await?;
     if providers.is_empty() {
         warn!(
             target: "brarr_orchestrator::search",
             search_id = %search.id,
-            "no providers configured"
+            "no enabled providers"
         );
         return Ok(SearchRunOutcome {
             search,
