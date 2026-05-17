@@ -46,8 +46,19 @@ pub struct DecisionView {
     pub provider_name: String,
     /// Release title.
     pub release_name: String,
-    /// Engine score.
+    /// Score shown on the card — the max across the baseline engine
+    /// score and every per-profile score persisted for this row. Lets
+    /// a release that's modest under baseline but high under a custom
+    /// anime / dub profile read correctly without operator action.
     pub score: u32,
+    /// Baseline engine score — kept around so the search-detail page
+    /// can show "baseline 60 → anime profile 330" instead of hiding
+    /// the delta.
+    pub baseline_score: u32,
+    /// Name of the profile whose score drove the displayed [`Self::score`].
+    /// `None` when the baseline already wins (no profile re-evaluation
+    /// produced a higher number).
+    pub winning_profile: Option<String>,
     /// Rejected flag.
     pub rejected: bool,
     /// Comma-joined tags.

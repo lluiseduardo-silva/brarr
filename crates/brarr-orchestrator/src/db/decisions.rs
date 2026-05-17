@@ -2,6 +2,8 @@
 //! (rejected releases are still persisted so the UI can show *why*
 //! something was filtered out).
 
+use std::collections::HashMap;
+
 use brarr_core::{Language, ReleaseKind, Resolution};
 use sqlx::{Row, sqlite::SqliteRow};
 use time::OffsetDateTime;
@@ -73,6 +75,13 @@ pub struct DecisionRow {
     /// Subtitle track languages. Same shape and semantics as
     /// [`Self::audio_languages`].
     pub subtitle_languages: Vec<Language>,
+    /// Per-quality-profile score map: `profile_id → score`. Filled at
+    /// search time by evaluating the release against every profile
+    /// attached to an enabled *arr instance. The release card surfaces
+    /// `max(score, profile_scores.values())` so a release that scores
+    /// low under baseline but high under a custom anime / dub profile
+    /// still reads correctly in the UI.
+    pub profile_scores: HashMap<Uuid, u32>,
     /// When the engine produced the outcome.
     pub decided_at: OffsetDateTime,
 }
@@ -120,6 +129,8 @@ pub struct DecisionInsert {
     pub audio_languages: Vec<Language>,
     /// Subtitle languages — see [`DecisionRow::subtitle_languages`].
     pub subtitle_languages: Vec<Language>,
+    /// Per-profile scores — see [`DecisionRow::profile_scores`].
+    pub profile_scores: HashMap<Uuid, u32>,
 }
 
 /// Insert one decision row, returning the persisted form.
@@ -135,6 +146,15 @@ pub async fn insert(pool: &Pool, ins: DecisionInsert) -> Result<DecisionRow, App
     let matched_json = serde_json::to_string(&ins.matched_rules)?;
     let audio_langs_json = serde_json::to_string(&ins.audio_languages)?;
     let subtitle_langs_json = serde_json::to_string(&ins.subtitle_languages)?;
+    // Serialise the profile_scores map as `{"<uuid>": <score>}`. SQLite
+    // has no native map; persisting as a JSON object keeps the read
+    // path simple (one column → one HashMap).
+    let profile_scores_string_map: HashMap<String, u32> = ins
+        .profile_scores
+        .iter()
+        .map(|(k, v)| (k.to_string(), *v))
+        .collect();
+    let profile_scores_json = serde_json::to_string(&profile_scores_string_map)?;
     let resolution = resolution_label(&ins.resolution);
     let kind = kind_label(&ins.kind);
 
@@ -143,8 +163,8 @@ pub async fn insert(pool: &Pool, ins: DecisionInsert) -> Result<DecisionRow, App
             id, search_id, provider_id, provider_name, release_name, release_id_remote, \
             score, rejected, tags_json, matched_json, seeders, leechers, size_bytes, \
             resolution, kind, decided_at, download_url, details_url, provider_kind, \
-            published_at, audio_langs_json, subtitle_langs_json \
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            published_at, audio_langs_json, subtitle_langs_json, profile_scores_json \
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(id.to_string())
     .bind(ins.search_id.to_string())
@@ -168,6 +188,7 @@ pub async fn insert(pool: &Pool, ins: DecisionInsert) -> Result<DecisionRow, App
     .bind(ins.published_at.map(OffsetDateTime::unix_timestamp))
     .bind(&audio_langs_json)
     .bind(&subtitle_langs_json)
+    .bind(&profile_scores_json)
     .execute(pool)
     .await?;
 
@@ -193,6 +214,7 @@ pub async fn insert(pool: &Pool, ins: DecisionInsert) -> Result<DecisionRow, App
         published_at: ins.published_at,
         audio_languages: ins.audio_languages,
         subtitle_languages: ins.subtitle_languages,
+        profile_scores: ins.profile_scores,
         decided_at: now,
     })
 }
@@ -207,7 +229,7 @@ pub async fn list_for_search(pool: &Pool, search_id: Uuid) -> Result<Vec<Decisio
         "SELECT id, search_id, provider_id, provider_name, release_name, release_id_remote, \
                 score, rejected, tags_json, matched_json, seeders, leechers, size_bytes, \
                 resolution, kind, decided_at, download_url, details_url, provider_kind, \
-                published_at, audio_langs_json, subtitle_langs_json \
+                published_at, audio_langs_json, subtitle_langs_json, profile_scores_json \
          FROM decisions WHERE search_id = ? ORDER BY score DESC, seeders DESC",
     )
     .bind(search_id.to_string())
@@ -229,7 +251,7 @@ pub async fn get_by_id(pool: &Pool, id: Uuid) -> Result<DecisionRow, AppError> {
         "SELECT id, search_id, provider_id, provider_name, release_name, release_id_remote, \
                 score, rejected, tags_json, matched_json, seeders, leechers, size_bytes, \
                 resolution, kind, decided_at, download_url, details_url, provider_kind, \
-                published_at, audio_langs_json, subtitle_langs_json \
+                published_at, audio_langs_json, subtitle_langs_json, profile_scores_json \
          FROM decisions WHERE id = ?",
     )
     .bind(id.to_string())
@@ -256,7 +278,7 @@ pub async fn recent(pool: &Pool, limit: u32) -> Result<Vec<DecisionRow>, AppErro
         "SELECT id, search_id, provider_id, provider_name, release_name, release_id_remote, \
                 score, rejected, tags_json, matched_json, seeders, leechers, size_bytes, \
                 resolution, kind, decided_at, download_url, details_url, provider_kind, \
-                published_at, audio_langs_json, subtitle_langs_json \
+                published_at, audio_langs_json, subtitle_langs_json, profile_scores_json \
          FROM decisions ORDER BY decided_at DESC LIMIT ?",
     )
     .bind(i64::from(limit))
@@ -312,6 +334,21 @@ fn row_to_decision(row: &SqliteRow) -> Result<DecisionRow, AppError> {
         .unwrap_or_else(|| "[]".to_string());
     let audio_languages: Vec<Language> = serde_json::from_str(&audio_langs_json)?;
     let subtitle_languages: Vec<Language> = serde_json::from_str(&subtitle_langs_json)?;
+    // Legacy rows pre-dating the 20260521120000 migration get the
+    // column default `'{}'`, so the empty map fallback is the same as
+    // "no profile evaluated this release yet". Invalid UUID keys
+    // silently drop instead of failing the whole row.
+    let profile_scores_json: String = row
+        .try_get::<Option<String>, _>("profile_scores_json")
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "{}".to_string());
+    let profile_scores_string_map: HashMap<String, u32> =
+        serde_json::from_str(&profile_scores_json)?;
+    let profile_scores: HashMap<Uuid, u32> = profile_scores_string_map
+        .into_iter()
+        .filter_map(|(k, v)| Uuid::parse_str(&k).ok().map(|id| (id, v)))
+        .collect();
     // Legacy rows pre-dating the 20260517120000 migration keep NULL —
     // `try_get` returns `Ok(None)` then. Bad UNIX timestamps (shouldn't
     // happen but defend against malformed test fixtures) silently drop
@@ -343,6 +380,7 @@ fn row_to_decision(row: &SqliteRow) -> Result<DecisionRow, AppError> {
         published_at,
         audio_languages,
         subtitle_languages,
+        profile_scores,
         decided_at,
     })
 }
@@ -429,6 +467,7 @@ mod tests {
             published_at: None,
             audio_languages: Vec::new(),
             subtitle_languages: Vec::new(),
+            profile_scores: HashMap::new(),
         }
     }
 

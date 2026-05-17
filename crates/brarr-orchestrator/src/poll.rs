@@ -635,6 +635,7 @@ mod tests {
             published_at: None,
             audio_languages: Vec::new(),
             subtitle_languages: Vec::new(),
+            profile_scores: std::collections::HashMap::new(),
             decided_at: brarr_core::OffsetDateTime::now_utc(),
         }
     }

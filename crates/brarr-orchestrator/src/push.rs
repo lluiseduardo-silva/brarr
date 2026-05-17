@@ -356,6 +356,7 @@ mod tests {
             published_at: OffsetDateTime::from_unix_timestamp(1_700_000_000).ok(),
             audio_languages: Vec::new(),
             subtitle_languages: Vec::new(),
+            profile_scores: std::collections::HashMap::new(),
             decided_at: OffsetDateTime::from_unix_timestamp(1_700_000_500).unwrap(),
         }
     }

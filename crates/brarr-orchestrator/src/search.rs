@@ -138,6 +138,10 @@ pub async fn run_tmdb_search(state: &AppState, tmdb: TmdbId) -> Result<SearchRun
 /// or a decision row cannot be persisted. Tracker-level errors (HTTP
 /// timeout, decode failure, plugin trap, etc.) are **not** fatal —
 /// they collect in [`SearchRunOutcome::failures`].
+#[allow(
+    clippy::too_many_lines,
+    reason = "search pipeline is a single linear story (load profiles → fan out → score → persist); splitting into helpers obscures the read path"
+)]
 pub async fn run_search(state: &AppState, keys: SearchKeys) -> Result<SearchRunOutcome, AppError> {
     let pool = state.pool();
     let engine = state.engine();
@@ -175,6 +179,23 @@ pub async fn run_search(state: &AppState, keys: SearchKeys) -> Result<SearchRunO
         });
     }
 
+    // Pre-load every quality profile so each release can be scored
+    // against both the baseline engine and each operator-defined
+    // profile rule list. The release card displays
+    // `max(baseline, profile_scores)` so a release that scores low
+    // under baseline but high under, say, an anime profile reads
+    // correctly in the UI without the operator having to re-run.
+    let profile_rows = crate::db::quality_profiles::list_all(pool).await?;
+    let profile_engines: Vec<(uuid::Uuid, brarr_decision_service::Engine)> = profile_rows
+        .iter()
+        .map(|p| {
+            (
+                p.id,
+                brarr_decision_service::Engine::from_profile_rules(p.rules.clone()),
+            )
+        })
+        .collect();
+
     let per_provider = fan_out(state.wasm_engine(), state.wasm_ticker(), &providers, &keys).await;
 
     let mut decisions_out = Vec::new();
@@ -191,9 +212,18 @@ pub async fn run_search(state: &AppState, keys: SearchKeys) -> Result<SearchRunO
                 );
                 for release in releases {
                     let outcome = engine.evaluate(&release);
+                    // Score the same release against every persisted
+                    // profile's engine so the UI can surface custom
+                    // rule outputs (e.g. anime-jp +80 / pt-sub +150)
+                    // alongside the baseline.
+                    let mut profile_scores = std::collections::HashMap::new();
+                    for (profile_id, profile_engine) in &profile_engines {
+                        let outcome = profile_engine.evaluate(&release);
+                        profile_scores.insert(*profile_id, outcome.score.get());
+                    }
                     // Persist every release — including rejected ones —
                     // so the UI can show what was filtered out.
-                    let ins = build_insert(&search.id, &pr, &release, &outcome);
+                    let ins = build_insert(&search.id, &pr, &release, &outcome, profile_scores);
                     let row = decisions::insert(pool, ins).await?;
                     if !outcome.rejected {
                         decisions_out.push(row);
@@ -357,6 +387,7 @@ fn build_insert(
     provider: &ProviderRow,
     release: &Release,
     outcome: &brarr_decision_service::DecisionOutcome,
+    profile_scores: std::collections::HashMap<Uuid, u32>,
 ) -> DecisionInsert {
     // Best-effort parse of the provider-side release id. Falls back to 0
     // if the source kept the id as a non-numeric string.
@@ -390,6 +421,7 @@ fn build_insert(
             .as_ref()
             .map(|e| e.subtitle_languages.clone())
             .unwrap_or_default(),
+        profile_scores,
     }
 }
 

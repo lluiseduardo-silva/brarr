@@ -569,6 +569,7 @@ async fn decisions_push_records_transport_failure_against_dead_arr() {
             published_at: None,
             audio_languages: Vec::new(),
             subtitle_languages: Vec::new(),
+            profile_scores: std::collections::HashMap::new(),
         },
     )
     .await

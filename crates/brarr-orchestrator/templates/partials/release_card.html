@@ -108,7 +108,12 @@
         {# ─── SCORE ─── #}
         <div class="flex flex-col gap-1.5">
             <div class="flex items-baseline justify-between">
-                <span class="text-[10px] font-semibold uppercase tracking-[0.06em] text-fg-muted">SCORE</span>
+                <span class="text-[10px] font-semibold uppercase tracking-[0.06em] text-fg-muted">
+                    SCORE
+                    {% if let Some(profile) = d.winning_profile %}
+                    <span class="text-accent-soft-fg normal-case font-medium" title="Profile {{ profile }} pontuou mais que o baseline ({{ d.baseline_score }}).">· via {{ profile }}</span>
+                    {% endif %}
+                </span>
                 <span class="flex items-baseline gap-1">
                     <span class="font-mono font-semibold text-lg text-fg-primary leading-none">{{ d.score }}</span>
                     <span class="font-mono text-[11px] text-fg-muted">/ 500</span>

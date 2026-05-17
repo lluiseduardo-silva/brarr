@@ -239,10 +239,11 @@ async fn dashboard(State(state): State<AppState>) -> Result<Response, AppError> 
         })
         .collect();
 
+    let profile_names = profile_name_map(pool).await?;
     let recent_decisions = recent_decision_rows
         .into_iter()
         .filter(|d| !d.rejected)
-        .map(decision_view)
+        .map(|d| decision_view(d, &profile_names))
         .collect();
 
     let (push_total, push_ok) = push_history::success_rate(pool).await?;
@@ -901,7 +902,11 @@ fn render_ping_badge(provider_id: &str, b: &PingBadge) -> String {
 
 async fn releases_index(State(state): State<AppState>) -> Result<Response, AppError> {
     let rows = decisions::recent(state.pool(), 50).await?;
-    let decisions = rows.into_iter().map(decision_view).collect();
+    let profile_names = profile_name_map(state.pool()).await?;
+    let decisions = rows
+        .into_iter()
+        .map(|d| decision_view(d, &profile_names))
+        .collect();
     // Only show buttons for *arrs that are currently enabled. Disabled
     // rows still exist in the DB (drain mode) but pushing through them
     // would silently no-op the operator's click — we'd rather hide
@@ -1366,7 +1371,11 @@ async fn search_detail(
         .map_err(|e| AppError::InvalidInput(format!("invalid search id: {e}")))?;
     let search = searches::get_by_id(state.pool(), uuid).await?;
     let decisions_rows = decisions::list_for_search(state.pool(), uuid).await?;
-    let decisions = decisions_rows.into_iter().map(decision_view).collect();
+    let profile_names = profile_name_map(state.pool()).await?;
+    let decisions = decisions_rows
+        .into_iter()
+        .map(|d| decision_view(d, &profile_names))
+        .collect();
     let arr_rows = arr_instances::list_enabled(state.pool()).await?;
     let arr_instances = arr_rows.into_iter().map(arr_instance_view).collect();
     let tmpl = SearchDetailTemplate {
@@ -1408,7 +1417,10 @@ async fn providers_toggle(
     html(&ProvidersListPartial { providers })
 }
 
-fn decision_view(d: crate::db::decisions::DecisionRow) -> DecisionView {
+fn decision_view(
+    d: crate::db::decisions::DecisionRow,
+    profile_names: &std::collections::HashMap<Uuid, String>,
+) -> DecisionView {
     let rule_chips: Vec<(String, String)> = d
         .matched_rules
         .iter()
@@ -1419,11 +1431,24 @@ fn decision_view(d: crate::db::decisions::DecisionRow) -> DecisionView {
     let subtitle_chips = subtitle_chips_from_languages(&d.subtitle_languages);
     let provider_initial = first_alpha_initial(&d.provider_name);
     let age = humanize_age(d.decided_at);
+    // Resolve the displayed score by taking the max of the baseline
+    // engine output + every per-profile score persisted at search time.
+    // Tracks the winning profile id so the template can show its name.
+    let baseline_score = d.score;
+    let (display_score, winning_profile_id) = d
+        .profile_scores
+        .iter()
+        .max_by_key(|&(_, score)| *score)
+        .filter(|&(_, score)| *score > baseline_score)
+        .map_or((baseline_score, None), |(id, score)| (*score, Some(*id)));
+    let winning_profile = winning_profile_id.and_then(|id| profile_names.get(&id).cloned());
     DecisionView {
         id: d.id.to_string(),
         provider_name: d.provider_name,
         release_name: d.release_name,
-        score: d.score,
+        score: display_score,
+        baseline_score,
+        winning_profile,
         rejected: d.rejected,
         tags: d.tags.join(", "),
         matched_rules,
@@ -1437,6 +1462,16 @@ fn decision_view(d: crate::db::decisions::DecisionRow) -> DecisionView {
         provider_initial,
         age,
     }
+}
+
+/// Load every quality-profile name keyed by id. Used by handlers that
+/// build a `DecisionView`: passing a pre-loaded map keeps decision_view
+/// synchronous and avoids per-row DB queries.
+async fn profile_name_map(
+    pool: &crate::db::Pool,
+) -> Result<std::collections::HashMap<Uuid, String>, AppError> {
+    let rows = crate::db::quality_profiles::list_all(pool).await?;
+    Ok(rows.into_iter().map(|p| (p.id, p.name)).collect())
 }
 
 /// First ASCII alphanumeric of `s`, uppercased. Falls back to `?` for
