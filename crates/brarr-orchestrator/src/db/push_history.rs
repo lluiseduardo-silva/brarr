@@ -1,0 +1,473 @@
+//! `push_history` table — audit log of every push attempt brarr made
+//! to an *arr instance.
+//!
+//! See `migrations/20260517140000_push_history.sql` for schema notes.
+//! Rows are write-mostly: the search pipeline inserts one row per
+//! push attempt; the admin UI reads them grouped by decision or
+//! ordered by `pushed_at DESC` for the global feed.
+
+use brarr_arr::ArrKind;
+use sqlx::{Row, sqlite::SqliteRow};
+use time::OffsetDateTime;
+use uuid::Uuid;
+
+use crate::{AppError, db::Pool};
+
+/// Status discriminator persisted in [`PushHistoryRow::status`].
+///
+/// Kept as a typed enum on the Rust side for ergonomic matching, but
+/// serialised to/from the DB as a free-form short string so adding a
+/// new variant doesn't require a migration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PushStatus {
+    /// *arr accepted the push (HTTP 2xx) and reported no immediate
+    /// rejection. The release may still be rejected later by *arr's
+    /// internal pipeline (e.g. quality profile mismatch); those
+    /// downstream rejections aren't visible to brarr.
+    Ok,
+    /// *arr returned a non-2xx HTTP status. `http_status` carries the
+    /// code (400 for malformed payload, 401 for bad apikey, etc.) and
+    /// `response_body` captures the *arr-side error message.
+    HttpError,
+    /// `reqwest` couldn't reach the *arr instance at all (DNS failure,
+    /// timeout, TLS handshake error). No `http_status`.
+    TransportError,
+}
+
+impl PushStatus {
+    /// Short tag for the `status` column.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::HttpError => "http_error",
+            Self::TransportError => "transport_error",
+        }
+    }
+
+    fn from_label(s: &str) -> Self {
+        match s {
+            "ok" => Self::Ok,
+            "transport_error" => Self::TransportError,
+            // Default to HttpError for unknown labels — the row is
+            // still useful and the operator can spot the typo by
+            // looking at the raw value.
+            _ => Self::HttpError,
+        }
+    }
+}
+
+/// One persisted push attempt.
+#[derive(Debug, Clone)]
+pub struct PushHistoryRow {
+    /// Stable UUID v4.
+    pub id: Uuid,
+    /// FK → `decisions.id`. The release that was pushed.
+    pub decision_id: Uuid,
+    /// FK → `arr_instances.id`. `None` if the *arr instance has since
+    /// been deleted.
+    pub arr_instance_id: Option<Uuid>,
+    /// *arr instance display name snapshot (preserved across deletes).
+    pub arr_instance_name: String,
+    /// Sonarr / Radarr.
+    pub arr_kind: ArrKind,
+    /// When the push was attempted.
+    pub pushed_at: OffsetDateTime,
+    /// Status discriminator.
+    pub status: PushStatus,
+    /// HTTP status when applicable. `None` for transport errors.
+    pub http_status: Option<u16>,
+    /// Body slice from *arr (truncated to 1KiB upstream). `None` for
+    /// successful pushes.
+    pub response_body: Option<String>,
+}
+
+/// Bundle of values used to insert one push history row.
+#[derive(Debug, Clone)]
+pub struct NewPushHistory<'a> {
+    /// Decision being pushed.
+    pub decision_id: Uuid,
+    /// Target *arr.
+    pub arr_instance_id: Uuid,
+    /// Snapshot name (read once when the push fires, before *arr
+    /// possibly gets deleted).
+    pub arr_instance_name: &'a str,
+    /// Snapshot flavour.
+    pub arr_kind: ArrKind,
+    /// Outcome.
+    pub status: PushStatus,
+    /// HTTP status when applicable.
+    pub http_status: Option<u16>,
+    /// *arr-side response body (only useful on failure).
+    pub response_body: Option<&'a str>,
+}
+
+/// Insert one push history row.
+///
+/// # Errors
+///
+/// Returns [`AppError::Database`] on SQL failure.
+pub async fn insert(pool: &Pool, new: NewPushHistory<'_>) -> Result<PushHistoryRow, AppError> {
+    let id = Uuid::new_v4();
+    let now = OffsetDateTime::now_utc();
+    sqlx::query(
+        "INSERT INTO push_history ( \
+            id, decision_id, arr_instance_id, arr_instance_name, arr_kind, \
+            pushed_at, status, http_status, response_body \
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(id.to_string())
+    .bind(new.decision_id.to_string())
+    .bind(new.arr_instance_id.to_string())
+    .bind(new.arr_instance_name)
+    .bind(new.arr_kind.label())
+    .bind(now.unix_timestamp())
+    .bind(new.status.label())
+    .bind(new.http_status.map(i64::from))
+    .bind(new.response_body)
+    .execute(pool)
+    .await?;
+    Ok(PushHistoryRow {
+        id,
+        decision_id: new.decision_id,
+        arr_instance_id: Some(new.arr_instance_id),
+        arr_instance_name: new.arr_instance_name.to_string(),
+        arr_kind: new.arr_kind,
+        pushed_at: now,
+        status: new.status,
+        http_status: new.http_status,
+        response_body: new.response_body.map(String::from),
+    })
+}
+
+/// Most recent `limit` push rows across all decisions. Used by the
+/// admin UI's "Push activity" page.
+///
+/// # Errors
+///
+/// Returns [`AppError::Database`] on SQL failure.
+pub async fn recent(pool: &Pool, limit: u32) -> Result<Vec<PushHistoryRow>, AppError> {
+    let limit = match limit {
+        0 => 50,
+        n if n > 500 => 500,
+        n => n,
+    };
+    let rows = sqlx::query(
+        "SELECT id, decision_id, arr_instance_id, arr_instance_name, arr_kind, \
+                pushed_at, status, http_status, response_body \
+         FROM push_history ORDER BY pushed_at DESC LIMIT ?",
+    )
+    .bind(i64::from(limit))
+    .fetch_all(pool)
+    .await?;
+    rows.iter().map(row_to_push).collect()
+}
+
+/// All push attempts for a given decision, oldest first.
+///
+/// # Errors
+///
+/// Returns [`AppError::Database`] on SQL failure.
+pub async fn list_for_decision(
+    pool: &Pool,
+    decision_id: Uuid,
+) -> Result<Vec<PushHistoryRow>, AppError> {
+    let rows = sqlx::query(
+        "SELECT id, decision_id, arr_instance_id, arr_instance_name, arr_kind, \
+                pushed_at, status, http_status, response_body \
+         FROM push_history WHERE decision_id = ? ORDER BY pushed_at ASC",
+    )
+    .bind(decision_id.to_string())
+    .fetch_all(pool)
+    .await?;
+    rows.iter().map(row_to_push).collect()
+}
+
+/// Has this `(decision_id, arr_instance_id)` pair already been pushed
+/// successfully? Used by the auto-push path to avoid double-grabbing
+/// the same release when the search reruns.
+///
+/// # Errors
+///
+/// Returns [`AppError::Database`] on SQL failure.
+pub async fn already_pushed(
+    pool: &Pool,
+    decision_id: Uuid,
+    arr_instance_id: Uuid,
+) -> Result<bool, AppError> {
+    let row = sqlx::query(
+        "SELECT COUNT(*) AS n FROM push_history \
+         WHERE decision_id = ? AND arr_instance_id = ? AND status = 'ok'",
+    )
+    .bind(decision_id.to_string())
+    .bind(arr_instance_id.to_string())
+    .fetch_one(pool)
+    .await?;
+    let n: i64 = row.try_get("n")?;
+    Ok(n > 0)
+}
+
+fn row_to_push(row: &SqliteRow) -> Result<PushHistoryRow, AppError> {
+    let id_str: String = row.try_get("id")?;
+    let id = Uuid::parse_str(&id_str)
+        .map_err(|e| AppError::InvalidInput(format!("invalid uuid in push_history.id: {e}")))?;
+    let decision_id_str: String = row.try_get("decision_id")?;
+    let decision_id = Uuid::parse_str(&decision_id_str)
+        .map_err(|e| AppError::InvalidInput(format!("invalid uuid in decision_id: {e}")))?;
+    let arr_instance_id_opt: Option<String> = row.try_get("arr_instance_id")?;
+    let arr_instance_id = match arr_instance_id_opt {
+        Some(s) => Some(Uuid::parse_str(&s).map_err(|e| {
+            AppError::InvalidInput(format!("invalid uuid in arr_instance_id: {e}"))
+        })?),
+        None => None,
+    };
+    let arr_kind_str: String = row.try_get("arr_kind")?;
+    let arr_kind = match arr_kind_str.as_str() {
+        "sonarr" => ArrKind::Sonarr,
+        "radarr" => ArrKind::Radarr,
+        other => {
+            return Err(AppError::InvalidInput(format!(
+                "unknown push_history.arr_kind: {other}"
+            )));
+        }
+    };
+    let pushed_unix: i64 = row.try_get("pushed_at")?;
+    let pushed_at = OffsetDateTime::from_unix_timestamp(pushed_unix)
+        .map_err(|e| AppError::InvalidInput(format!("invalid timestamp: {e}")))?;
+    let status_str: String = row.try_get("status")?;
+    let http_status_i64: Option<i64> = row.try_get("http_status")?;
+    let http_status = http_status_i64.and_then(|s| u16::try_from(s).ok());
+    Ok(PushHistoryRow {
+        id,
+        decision_id,
+        arr_instance_id,
+        arr_instance_name: row.try_get("arr_instance_name")?,
+        arr_kind,
+        pushed_at,
+        status: PushStatus::from_label(&status_str),
+        http_status,
+        response_body: row.try_get("response_body")?,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::*;
+    use crate::db::arr_instances::{self, NewArrInstance};
+    use crate::db::decisions::{self, DecisionInsert};
+    use crate::db::open_memory;
+    use crate::db::searches::{self, SearchRequestJson};
+    use brarr_core::{ReleaseKind, Resolution};
+    use url::Url;
+
+    async fn make_decision(pool: &Pool) -> Uuid {
+        let search = searches::create(
+            pool,
+            SearchRequestJson {
+                tmdb_id: Some(603),
+                imdb_id: None,
+            },
+        )
+        .await
+        .unwrap();
+        let row = decisions::insert(
+            pool,
+            DecisionInsert {
+                search_id: search.id,
+                provider_id: None,
+                provider_name: "p".into(),
+                release_name: "r".into(),
+                release_id_remote: 1,
+                score: 800,
+                rejected: false,
+                tags: vec![],
+                matched_rules: vec![],
+                seeders: 1,
+                leechers: 0,
+                size_bytes: 1,
+                resolution: Resolution::P1080,
+                kind: ReleaseKind::WebDl,
+                download_url: None,
+                details_url: None,
+                provider_kind: Some("unit3d".into()),
+                published_at: None,
+            },
+        )
+        .await
+        .unwrap();
+        row.id
+    }
+
+    async fn make_arr_instance(pool: &Pool) -> Uuid {
+        let url = Url::parse("https://r.example/").unwrap();
+        arr_instances::insert(
+            pool,
+            NewArrInstance {
+                name: "radarr-main",
+                kind: ArrKind::Radarr,
+                base_url: &url,
+                api_key: "k",
+                push_threshold: None,
+                enabled: None,
+            },
+        )
+        .await
+        .unwrap()
+        .id
+    }
+
+    #[tokio::test]
+    async fn insert_and_list_roundtrips() {
+        let pool = open_memory().await.unwrap();
+        let did = make_decision(&pool).await;
+        let aid = make_arr_instance(&pool).await;
+        let row = insert(
+            &pool,
+            NewPushHistory {
+                decision_id: did,
+                arr_instance_id: aid,
+                arr_instance_name: "radarr-main",
+                arr_kind: ArrKind::Radarr,
+                status: PushStatus::Ok,
+                http_status: Some(200),
+                response_body: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(row.status, PushStatus::Ok);
+        let list = list_for_decision(&pool, did).await.unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].id, row.id);
+    }
+
+    #[tokio::test]
+    async fn already_pushed_only_counts_ok_rows() {
+        let pool = open_memory().await.unwrap();
+        let did = make_decision(&pool).await;
+        let aid = make_arr_instance(&pool).await;
+        // Failure first — should NOT count as "already pushed".
+        insert(
+            &pool,
+            NewPushHistory {
+                decision_id: did,
+                arr_instance_id: aid,
+                arr_instance_name: "x",
+                arr_kind: ArrKind::Radarr,
+                status: PushStatus::HttpError,
+                http_status: Some(400),
+                response_body: Some("Unknown movie"),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(!already_pushed(&pool, did, aid).await.unwrap());
+
+        // Successful push — should now count.
+        insert(
+            &pool,
+            NewPushHistory {
+                decision_id: did,
+                arr_instance_id: aid,
+                arr_instance_name: "x",
+                arr_kind: ArrKind::Radarr,
+                status: PushStatus::Ok,
+                http_status: Some(200),
+                response_body: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(already_pushed(&pool, did, aid).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn recent_orders_by_pushed_at_desc() {
+        let pool = open_memory().await.unwrap();
+        let did = make_decision(&pool).await;
+        let aid = make_arr_instance(&pool).await;
+        for status in [PushStatus::Ok, PushStatus::HttpError, PushStatus::Ok] {
+            insert(
+                &pool,
+                NewPushHistory {
+                    decision_id: did,
+                    arr_instance_id: aid,
+                    arr_instance_name: "x",
+                    arr_kind: ArrKind::Radarr,
+                    status,
+                    http_status: Some(200),
+                    response_body: None,
+                },
+            )
+            .await
+            .unwrap();
+            // Insert order matters — sqlite stores in arrival order
+            // and same-second timestamps are kept stable by rowid.
+        }
+        let rows = recent(&pool, 10).await.unwrap();
+        assert_eq!(rows.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn deleting_decision_cascades_to_push_history() {
+        let pool = open_memory().await.unwrap();
+        let did = make_decision(&pool).await;
+        let aid = make_arr_instance(&pool).await;
+        insert(
+            &pool,
+            NewPushHistory {
+                decision_id: did,
+                arr_instance_id: aid,
+                arr_instance_name: "x",
+                arr_kind: ArrKind::Radarr,
+                status: PushStatus::Ok,
+                http_status: Some(200),
+                response_body: None,
+            },
+        )
+        .await
+        .unwrap();
+        // Pull the search id from the decisions row and delete the
+        // search to cascade through decisions → push_history.
+        let row = sqlx::query("SELECT search_id FROM decisions WHERE id = ?")
+            .bind(did.to_string())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let search_id_str: String = row.try_get("search_id").unwrap();
+        sqlx::query("DELETE FROM searches WHERE id = ?")
+            .bind(search_id_str)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(list_for_decision(&pool, did).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn deleting_arr_instance_nulls_fk_but_keeps_audit() {
+        let pool = open_memory().await.unwrap();
+        let did = make_decision(&pool).await;
+        let aid = make_arr_instance(&pool).await;
+        insert(
+            &pool,
+            NewPushHistory {
+                decision_id: did,
+                arr_instance_id: aid,
+                arr_instance_name: "radarr-main",
+                arr_kind: ArrKind::Radarr,
+                status: PushStatus::Ok,
+                http_status: Some(200),
+                response_body: None,
+            },
+        )
+        .await
+        .unwrap();
+        arr_instances::delete_by_id(&pool, aid).await.unwrap();
+        let rows = list_for_decision(&pool, did).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].arr_instance_id.is_none());
+        assert_eq!(rows[0].arr_instance_name, "radarr-main");
+    }
+}

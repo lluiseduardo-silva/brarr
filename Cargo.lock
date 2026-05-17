@@ -419,6 +419,7 @@ dependencies = [
  "anyhow",
  "askama",
  "axum",
+ "brarr-arr",
  "brarr-core",
  "brarr-decision-service",
  "brarr-plugin-host",

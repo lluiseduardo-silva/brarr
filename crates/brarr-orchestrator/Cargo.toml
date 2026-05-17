@@ -18,6 +18,7 @@ path = "src/lib.rs"
 anyhow = "1.0.102"
 askama = "0.14.0"
 axum = { version = "0.8.9", default-features = false, features = ["macros", "http1", "tokio", "json", "query", "tracing", "form"] }
+brarr-arr = { version = "0.1.0", path = "../brarr-arr" }
 brarr-core = { version = "0.1.0", path = "../brarr-core" }
 brarr-decision-service = { version = "0.1.0", path = "../brarr-decision-service" }
 brarr-plugin-host = { version = "0.1.0", path = "../brarr-plugin-host" }

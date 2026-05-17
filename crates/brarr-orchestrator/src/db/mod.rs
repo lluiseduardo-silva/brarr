@@ -7,8 +7,10 @@
 //! Rust side; sqlx encodes them to `INTEGER` (Unix seconds) per the
 //! `STRICT` table schema.
 
+pub mod arr_instances;
 pub mod decisions;
 pub mod providers;
+pub mod push_history;
 pub mod searches;
 
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
