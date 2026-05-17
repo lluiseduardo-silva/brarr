@@ -54,10 +54,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up QEMU
-        # Cross-build for arm64 from amd64 runners; QEMU emulates the
-        # foreign architecture during the build steps.
-        uses: docker/setup-qemu-action@v3
+      # QEMU step removed — we only build linux/amd64 right now and
+      # the binfmt image pull from Docker Hub was a recurring flake
+      # source (timeouts under load). Re-add this step when arm64
+      # comes back to the platforms matrix.
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
