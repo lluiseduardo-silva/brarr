@@ -683,12 +683,23 @@ fn write_item<W: std::io::Write>(
         .as_ref()
         .map_or_else(|| download_url.clone(), url::Url::to_string);
 
+    // Sonarr/Radarr's RSS parser silently drops items without a
+    // valid `<pubDate>` and `<description>`. We don't have a real
+    // upload timestamp from every provider, so we emit "now" — the
+    // sort order Sonarr/Radarr applies to results uses size + score
+    // anyway, not pubDate. The description echoes the title so the
+    // grabber's "preview" tooltip shows something useful.
+    let pub_date = current_rfc822();
     w.create_element("item").write_inner_content(|iw| {
         iw.create_element("title")
             .write_text_content(BytesText::new(&r.title))?;
         iw.create_element("guid")
             .with_attribute(("isPermaLink", "false"))
             .write_text_content(BytesText::new(&details_url))?;
+        iw.create_element("pubDate")
+            .write_text_content(BytesText::new(&pub_date))?;
+        iw.create_element("description")
+            .write_text_content(BytesText::new(&r.title))?;
         iw.create_element("link")
             .write_text_content(BytesText::new(&download_url))?;
         iw.create_element("comments")
@@ -743,6 +754,18 @@ fn format_rfc822_30_days_ago() -> String {
     let then = time::OffsetDateTime::now_utc() - time::Duration::days(30);
     // Rfc2822 is the IETF rename of RFC 822 — same wire shape.
     then.format(&Rfc2822)
+        .unwrap_or_else(|_| "Mon, 01 Jan 2024 00:00:00 +0000".to_string())
+}
+
+/// Current UTC time formatted per RFC 822. Used as the per-item
+/// `<pubDate>` in the search-result feed when the underlying provider
+/// didn't carry a real upload timestamp (UNIT3D / Newznab attrs vary).
+/// Sonarr/Radarr require a parseable pubDate per item; without it the
+/// RSS reader drops the item silently and the search appears empty.
+fn current_rfc822() -> String {
+    use time::format_description::well_known::Rfc2822;
+    time::OffsetDateTime::now_utc()
+        .format(&Rfc2822)
         .unwrap_or_else(|_| "Mon, 01 Jan 2024 00:00:00 +0000".to_string())
 }
 
