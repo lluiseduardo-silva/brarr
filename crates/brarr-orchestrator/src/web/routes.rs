@@ -41,11 +41,13 @@ use crate::db::{arr_instances, decisions, providers, push_history, searches};
 )]
 use crate::search::run_tmdb_search;
 use crate::web::render::html;
+use crate::db::quality_profiles;
 use crate::web::templates::{
     ArrInstanceView, ArrInstancesListPartial, ArrInstancesTemplate, DashboardTemplate,
-    DecisionView, ErrorTemplate, LoginTemplate, NewSearchModalPartial, ProviderView,
-    ProvidersListPartial, ProvidersTemplate, PushGroupView, PushHistoryView, PushesTemplate,
-    RecentSearchView, ReleasesTemplate, SearchDetailTemplate,
+    DecisionView, ErrorTemplate, LoginTemplate, NewProfileModalPartial, NewSearchModalPartial,
+    ProfileView, ProfilesTemplate, ProviderView, ProvidersListPartial, ProvidersTemplate,
+    PushGroupView, PushHistoryView, PushesTemplate, RecentSearchView, ReleasesTemplate,
+    SearchDetailTemplate,
 };
 use crate::{AppError, AppState};
 use brarr_core::TmdbId;
@@ -75,6 +77,9 @@ pub fn router(state: AppState, static_dir: &std::path::Path) -> Router {
         )
         .route("/decisions/{id}/push/{arr_id}", post(decisions_push))
         .route("/pushes", get(pushes_index))
+        .route("/profiles", get(profiles_index).post(profiles_create))
+        .route("/profiles/new", get(profiles_new_modal))
+        .route("/profiles/{id}", delete(profiles_delete))
         .route("/releases", get(releases_index))
         .route("/searches", post(searches_create))
         .route("/searches/new", get(new_search_modal))
@@ -938,6 +943,78 @@ async fn new_search_modal(State(state): State<AppState>) -> Result<Response, App
         .filter(|p| p.enabled)
         .count();
     html(&NewSearchModalPartial { provider_count })
+}
+
+// ─── Quality Profiles ─────────────────────────────────────────────
+
+async fn profiles_index(State(state): State<AppState>) -> Result<Response, AppError> {
+    let rows = quality_profiles::list_all(state.pool()).await?;
+    let profiles = rows
+        .into_iter()
+        .map(|p| ProfileView {
+            id: p.id.to_string(),
+            name: p.name,
+            description: p.description,
+            push_threshold: p.push_threshold,
+            is_preset: p.is_preset,
+        })
+        .collect();
+    html(&ProfilesTemplate { profiles })
+}
+
+/// Returns the create-profile dialog partial. Modal.js opens it once
+/// HTMX swaps it into `#modal-target`.
+async fn profiles_new_modal() -> Result<Response, AppError> {
+    html(&NewProfileModalPartial)
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateProfileForm {
+    name: String,
+    description: Option<String>,
+    push_threshold: u32,
+}
+
+/// Create a new profile. On success returns an empty body + a
+/// `HX-Redirect: /profiles` header so HTMX reloads the index with the
+/// new row visible.
+async fn profiles_create(
+    State(state): State<AppState>,
+    Form(form): Form<CreateProfileForm>,
+) -> Result<Response, AppError> {
+    let description = form
+        .description
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    quality_profiles::insert(
+        state.pool(),
+        quality_profiles::NewQualityProfile {
+            name: form.name.trim(),
+            description,
+            push_threshold: form.push_threshold,
+        },
+    )
+    .await?;
+    let mut resp = Response::new(axum::body::Body::empty());
+    // `HeaderValue::from_static` is infallible for ASCII string
+    // literals at runtime; the compiler still emits a const-eval
+    // assertion. Avoids the `.expect` / `.unwrap` lints.
+    resp.headers_mut()
+        .insert("HX-Redirect", HeaderValue::from_static("/profiles"));
+    Ok(resp)
+}
+
+async fn profiles_delete(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, AppError> {
+    let uuid = Uuid::parse_str(&id)
+        .map_err(|e| AppError::InvalidInput(format!("invalid profile id: {e}")))?;
+    quality_profiles::delete_by_id(state.pool(), uuid).await?;
+    // Empty body — HTMX swaps the row's #profile-{id} card out, which
+    // visually removes the card without a full page reload.
+    Ok(Response::new(axum::body::Body::empty()))
 }
 
 async fn search_detail(

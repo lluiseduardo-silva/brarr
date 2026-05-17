@@ -242,6 +242,34 @@ pub struct NewSearchModalPartial {
     pub provider_count: usize,
 }
 
+/// Quality Profiles index at `/profiles`.
+#[derive(Debug, Template)]
+#[template(path = "profiles.html")]
+pub struct ProfilesTemplate {
+    /// Every profile row, presets first.
+    pub profiles: Vec<ProfileView>,
+}
+
+/// Single quality-profile row for the index card grid.
+#[derive(Debug)]
+pub struct ProfileView {
+    /// Stringified UUID.
+    pub id: String,
+    /// Operator-facing name.
+    pub name: String,
+    /// Optional description.
+    pub description: Option<String>,
+    /// Threshold integer (0..=1000).
+    pub push_threshold: u32,
+    /// `true` for the rows seeded by the migration.
+    pub is_preset: bool,
+}
+
+/// New-profile dialog partial returned by `GET /profiles/new`.
+#[derive(Debug, Template)]
+#[template(path = "partials/new_profile_modal.html")]
+pub struct NewProfileModalPartial;
+
 /// Single-search view at `/searches/{id}`.
 #[derive(Debug, Template)]
 #[template(path = "search_detail.html")]

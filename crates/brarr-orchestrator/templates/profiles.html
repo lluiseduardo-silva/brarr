@@ -1,0 +1,94 @@
+{% extends "base.html" %}
+{% block title %}Quality Profiles — brarr{% endblock %}
+{% block content %}
+
+<div class="flex items-center justify-between gap-4 mb-6">
+    <div>
+        <h1 class="font-semibold text-[28px] leading-9 text-fg-primary">Quality profiles</h1>
+        <p class="text-base text-fg-secondary mt-1">
+            {{ profiles.len() }} profiles — atribua um pra cada *arr instance pra controlar o cutoff de auto-push.
+        </p>
+    </div>
+    <button type="button"
+            hx-get="/profiles/new"
+            hx-target="#modal-target"
+            hx-swap="innerHTML"
+            class="brand-gradient flex items-center gap-2 px-5 h-11 rounded-lg text-white text-base font-semibold whitespace-nowrap cursor-pointer"
+            style="box-shadow: 0 8px 20px var(--color-glow);">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round">
+            <path d="M12 5v14M5 12h14"/>
+        </svg>
+        Criar profile
+    </button>
+</div>
+
+<div class="flex items-start gap-3 px-4 py-3 mb-6 rounded-lg bg-info-soft border border-info-solid">
+    <div class="shrink-0 w-5 h-5 rounded-full bg-info-solid flex items-center justify-center mt-0.5">
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="3"><circle cx="12" cy="12" r="10"/><path d="M12 11v6M12 7.5v.5" stroke-linecap="round"/></svg>
+    </div>
+    <p class="text-sm text-info-soft-fg">
+        Esta fase carrega só o threshold por profile. Editor de regras customizadas (audio/legenda/HDR/seeders) com builder visual chega numa fase seguinte.
+    </p>
+</div>
+
+{% if profiles.is_empty() %}
+<div class="card-hairline bg-bg-surface border border-border-default rounded-xl px-5 py-10 text-center">
+    <p class="text-fg-muted italic">Nenhum profile cadastrado.</p>
+</div>
+{% else %}
+<div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+{% for p in profiles %}
+<div class="card-hairline bg-bg-surface border border-border-default rounded-xl p-5" id="profile-{{ p.id }}">
+    <div class="flex items-start justify-between gap-3 mb-2">
+        <div class="flex items-center gap-2 min-w-0">
+            <h2 class="text-lg font-semibold text-fg-primary truncate">{{ p.name }}</h2>
+            {% if p.is_preset %}
+            <span class="shrink-0 px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase tracking-[0.06em] bg-accent-soft text-accent-soft-fg">preset</span>
+            {% endif %}
+        </div>
+        <div class="shrink-0 flex items-center gap-1 px-2.5 py-1 rounded-md bg-bg-muted">
+            <span class="text-[10px] font-medium uppercase tracking-[0.06em] text-fg-muted">threshold</span>
+            <span class="font-mono font-bold text-sm text-fg-primary">{{ p.push_threshold }}</span>
+        </div>
+    </div>
+
+    {% if let Some(desc) = p.description %}
+    <p class="text-sm text-fg-secondary mb-4">{{ desc }}</p>
+    {% else %}
+    <p class="text-sm italic text-fg-muted mb-4">Sem descrição.</p>
+    {% endif %}
+
+    {# Score bar — scaled to threshold/1000. Same visual language as
+       the dashboard decision score cell. #}
+    <div class="mb-4">
+        <div class="flex items-center justify-between text-[10px] font-mono text-fg-muted mb-1">
+            <span>0</span><span>500</span><span>1000</span>
+        </div>
+        <div class="h-2 w-full rounded-full bg-bg-muted overflow-hidden">
+            <div class="brand-gradient h-full" style="width: {{ p.push_threshold / 10 }}%;"></div>
+        </div>
+    </div>
+
+    <div class="h-px bg-border-default -mx-5 mb-4"></div>
+
+    <div class="flex items-center justify-end gap-1.5">
+        <button type="button"
+                disabled
+                title="Editor visual chega na próxima fase"
+                class="px-2.5 h-7 rounded-md text-xs font-medium bg-bg-muted text-fg-muted cursor-not-allowed opacity-60">
+            editar
+        </button>
+        <button hx-delete="/profiles/{{ p.id }}"
+                hx-target="#profile-{{ p.id }}"
+                hx-swap="outerHTML"
+                hx-confirm="Remover este profile? *arr instances atribuídas voltam ao threshold integer próprio."
+                class="px-2.5 h-7 rounded-md text-xs font-medium text-danger-soft-fg hover:bg-danger-soft">
+            remover
+        </button>
+    </div>
+</div>
+{% endfor %}
+</div>
+{% endif %}
+
+{% endblock %}
