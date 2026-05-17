@@ -173,6 +173,50 @@ async fn search_does_not_retry_on_4xx() {
 }
 
 #[tokio::test]
+async fn search_by_tvdb_attaches_season_and_episode_params() {
+    let server = MockServer::start().await;
+    let body = wrap_as_filter_response(&fixture("shadow.json"));
+    Mock::given(method("GET"))
+        .and(path("/api/torrents/filter"))
+        .and(query_param("tvdbId", "12345"))
+        .and(query_param("seasonNumber", "2"))
+        .and(query_param("episodeNumber", "5"))
+        .and(header("authorization", "Bearer test-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(body))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = client_for(&server, "mock");
+    let releases = client
+        .search_by_tvdb(
+            brarr_core::TvdbId::new(12345).expect("valid"),
+            Some(2),
+            Some(5),
+        )
+        .await
+        .expect("search");
+    assert_eq!(releases.len(), 1);
+}
+
+#[tokio::test]
+async fn search_by_tvdb_omits_season_when_unspecified() {
+    let server = MockServer::start().await;
+    let body = wrap_as_filter_response(&fixture("shadow.json"));
+    Mock::given(method("GET"))
+        .and(path("/api/torrents/filter"))
+        .and(query_param("tvdbId", "777"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(body))
+        .mount(&server)
+        .await;
+    let client = client_for(&server, "mock");
+    let releases = client
+        .search_by_tvdb(brarr_core::TvdbId::new(777).expect("valid"), None, None)
+        .await
+        .expect("search");
+    assert_eq!(releases.len(), 1);
+}
+
+#[tokio::test]
 async fn http_404_surfaces_as_client_error() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))

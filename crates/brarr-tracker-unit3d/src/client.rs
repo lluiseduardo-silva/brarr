@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use brarr_core::{Release, TmdbId, TrackerSource};
+use brarr_core::{Release, TmdbId, TrackerSource, TvdbId};
 use reqwest::{Client, header};
 use url::Url;
 
@@ -212,6 +212,73 @@ impl Unit3dClient {
             }
         };
 
+        envelope
+            .data
+            .into_iter()
+            .map(|dto| dto.into_release(self.tracker.clone()).map_err(Into::into))
+            .collect()
+    }
+
+    /// Busca releases de TV por TVDB id, season e episode opcionais.
+    ///
+    /// UNIT3D não tem endpoint dedicado de TV-search; `/api/torrents/filter`
+    /// aceita `tvdbId`, `seasonNumber` e `episodeNumber` no mesmo
+    /// surface usado por filmes. A maioria dos forks (Aither, Blutopia,
+    /// Fearnopeer, capybara, locadora) respeita esses três params; um
+    /// punhado de forks antigos usa `season`/`episode` em vez de
+    /// `seasonNumber`/`episodeNumber` — se aparecer um tracker assim
+    /// precisaremos de uma flag por-row, mas o default é suficiente
+    /// hoje.
+    ///
+    /// `season=None` + `episode=None` → série inteira.
+    /// `season=Some(N)` + `episode=None` → temporada inteira (lets
+    /// season packs surface).
+    /// `season=Some(N)` + `episode=Some(M)` → episódio único.
+    ///
+    /// # Errors
+    ///
+    /// Veja [`ClientError`].
+    pub async fn search_by_tvdb(
+        &self,
+        tvdb: TvdbId,
+        season: Option<u16>,
+        episode: Option<u16>,
+    ) -> Result<Vec<Release>, ClientError> {
+        run_with_retry(self.retry, "search_by_tvdb", || {
+            self.search_by_tvdb_once(tvdb, season, episode)
+        })
+        .await
+    }
+
+    async fn search_by_tvdb_once(
+        &self,
+        tvdb: TvdbId,
+        season: Option<u16>,
+        episode: Option<u16>,
+    ) -> Result<Vec<Release>, ClientError> {
+        let url = self.base_url.join("api/torrents/filter")?;
+        let mut req = self.http.get(url).query(&[("tvdbId", tvdb.get())]);
+        if let Some(s) = season {
+            req = req.query(&[("seasonNumber", u32::from(s))]);
+        }
+        if let Some(e) = episode {
+            req = req.query(&[("episodeNumber", u32::from(e))]);
+        }
+        let resp = req.send().await?.error_for_status()?;
+        let body = resp.text().await?;
+        let envelope: Envelope<Vec<Unit3dTorrent>> = match serde_json::from_str(&body) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::debug!(
+                    target: "brarr_tracker_unit3d::client",
+                    error = %e,
+                    body_len = body.len(),
+                    body_excerpt = %body.chars().take(2000).collect::<String>(),
+                    "search_by_tvdb: failed to decode envelope"
+                );
+                return Err(ClientError::BadJson(e));
+            }
+        };
         envelope
             .data
             .into_iter()
