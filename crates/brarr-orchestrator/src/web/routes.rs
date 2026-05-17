@@ -1289,7 +1289,7 @@ fn preview_fixtures() -> Result<Vec<(&'static str, brarr_core::Release)>, AppErr
                 "Steins;Gate S01E01 1080p BluRay x264-NIPPON",
                 ReleaseKind::BluRay,
                 Resolution::P1080,
-                vec![Language::Other("Japanese".to_string())],
+                vec![Language::Jp],
                 vec![Language::PtBr],
                 false,
                 12,
@@ -1512,6 +1512,8 @@ fn audio_chips_from_languages(
             Language::PtPt => Some(("PT-PT áudio".to_string(), "pt".to_string())),
             Language::Pt => Some(("PT áudio".to_string(), "pt".to_string())),
             Language::En => Some(("EN áudio".to_string(), "neutral".to_string())),
+            Language::Jp => Some(("JP áudio".to_string(), "accent".to_string())),
+            Language::Zh => Some(("ZH áudio".to_string(), "accent".to_string())),
             Language::Other(name) => Some((format!("{name} áudio"), "neutral".to_string())),
         };
         if let Some(c) = chip {
@@ -1522,9 +1524,12 @@ fn audio_chips_from_languages(
     // chips read first.
     let has_pt_audio = audio.iter().any(Language::is_portuguese);
     let has_pt_subtitle = subtitle.iter().any(Language::is_portuguese);
-    let has_non_pt_audio = audio
-        .iter()
-        .any(|l| matches!(l, Language::En | Language::Other(_)));
+    let has_non_pt_audio = audio.iter().any(|l| {
+        matches!(
+            l,
+            Language::En | Language::Jp | Language::Zh | Language::Other(_)
+        )
+    });
     if has_pt_audio && has_non_pt_audio {
         out.push(("Dublado".to_string(), "accent".to_string()));
     }
@@ -1565,6 +1570,8 @@ fn subtitle_chips_from_languages(subtitle: &[brarr_core::Language]) -> Vec<(Stri
             Language::PtPt => Some(("PT-PT legenda".to_string(), "pt".to_string())),
             Language::Pt => Some(("PT legenda".to_string(), "pt".to_string())),
             Language::En => Some(("EN legenda".to_string(), "neutral".to_string())),
+            Language::Jp => Some(("JP legenda".to_string(), "neutral".to_string())),
+            Language::Zh => Some(("ZH legenda".to_string(), "neutral".to_string())),
             Language::Other(name) => Some((format!("{name} legenda"), "neutral".to_string())),
         };
         if let Some(c) = chip {

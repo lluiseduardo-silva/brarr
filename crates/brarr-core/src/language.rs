@@ -37,6 +37,17 @@ pub enum Language {
     Pt,
     /// Inglês (`Language: English`).
     En,
+    /// Japonês. Reconhecido a partir de:
+    /// - `Language: Japanese` / `Language: ja` / `Language: jp` / `Language: jpn`.
+    Jp,
+    /// Chinês (qualquer variante — Mandarim, Cantonês, etc). Reconhecido
+    /// a partir de:
+    /// - `Language: Chinese` / `Language: Mandarin` / `Language: Cantonese`
+    /// - `Language: zh` / `Language: zh-CN` / `Language: zho` / `Language: chi`.
+    ///
+    /// O brarr não distingue regiões chinesas porque o uso real (anime +
+    /// dorama) raramente expõe a região no `MediaInfo`.
+    Zh,
     /// Qualquer idioma fora do conjunto acima. Preserva a string
     /// original do campo `Language` (e.g., `"Spanish (Latin America)"`,
     /// `"Catalan (ES)"`, `"Serbian-Latn-RS"`).
@@ -85,6 +96,12 @@ impl Language {
         if lang.eq_ignore_ascii_case("English") {
             return Self::En;
         }
+        if is_japanese_tag(lang) {
+            return Self::Jp;
+        }
+        if is_chinese_tag(lang) {
+            return Self::Zh;
+        }
         Self::Other(lang.to_string())
     }
 
@@ -94,6 +111,29 @@ impl Language {
     pub const fn is_portuguese(&self) -> bool {
         matches!(self, Self::PtBr | Self::PtPt | Self::Pt)
     }
+}
+
+/// Reconhece um campo `Language` do `MediaInfo` como Japonês. Cobre as
+/// formas que aparecem na prática: nome em inglês (`Japanese`), código
+/// ISO 639-1 (`ja`) e 639-2 (`jpn`), além do alias popular `jp`.
+fn is_japanese_tag(lang: &str) -> bool {
+    let lc = lang.to_ascii_lowercase();
+    matches!(lc.as_str(), "japanese" | "ja" | "jp" | "jpn")
+}
+
+/// Reconhece um campo `Language` do `MediaInfo` como Chinês. Aceita o
+/// nome em inglês, as variantes faladas mais comuns (Mandarim,
+/// Cantonês), o código ISO 639-1 (`zh`) com sufixos regionais (`zh-CN`,
+/// `zh-TW`) e o ISO 639-2 (`zho` / `chi`).
+fn is_chinese_tag(lang: &str) -> bool {
+    let lc = lang.to_ascii_lowercase();
+    if matches!(
+        lc.as_str(),
+        "chinese" | "mandarin" | "cantonese" | "zh" | "zho" | "chi"
+    ) {
+        return true;
+    }
+    lc.starts_with("zh-") || lc.starts_with("zh_") || lc.starts_with("chinese ")
 }
 
 #[cfg(test)]
@@ -199,5 +239,40 @@ mod tests {
         assert!(Language::Pt.is_portuguese());
         assert!(!Language::En.is_portuguese());
         assert!(!Language::Other("Spanish".to_string()).is_portuguese());
+    }
+
+    #[test]
+    fn japanese_recognized_across_common_tags() {
+        assert_eq!(Language::from_mediainfo("Japanese", None), Language::Jp);
+        assert_eq!(Language::from_mediainfo("japanese", None), Language::Jp);
+        assert_eq!(Language::from_mediainfo("ja", None), Language::Jp);
+        assert_eq!(Language::from_mediainfo("JP", None), Language::Jp);
+        assert_eq!(Language::from_mediainfo("jpn", None), Language::Jp);
+    }
+
+    #[test]
+    fn chinese_recognized_across_common_tags() {
+        assert_eq!(Language::from_mediainfo("Chinese", None), Language::Zh);
+        assert_eq!(Language::from_mediainfo("Mandarin", None), Language::Zh);
+        assert_eq!(Language::from_mediainfo("Cantonese", None), Language::Zh);
+        assert_eq!(Language::from_mediainfo("zh", None), Language::Zh);
+        assert_eq!(Language::from_mediainfo("zh-CN", None), Language::Zh);
+        assert_eq!(Language::from_mediainfo("zh-TW", None), Language::Zh);
+        assert_eq!(Language::from_mediainfo("zho", None), Language::Zh);
+        assert_eq!(Language::from_mediainfo("chi", None), Language::Zh);
+    }
+
+    #[test]
+    fn japanese_chinese_do_not_collide_with_other() {
+        // Regression guard: unrelated language tags still fall through
+        // to Other, not silently into Jp/Zh.
+        assert_eq!(
+            Language::from_mediainfo("Korean", None),
+            Language::Other("Korean".to_string()),
+        );
+        assert_eq!(
+            Language::from_mediainfo("Spanish", None),
+            Language::Other("Spanish".to_string()),
+        );
     }
 }

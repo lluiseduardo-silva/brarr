@@ -228,6 +228,11 @@ pub enum AudioFilter {
     PtAny,
     /// Inglês.
     En,
+    /// Japonês — útil para regras de anime original ("legendado").
+    Jp,
+    /// Chinês (qualquer variante — Mandarim, Cantonês). Útil para
+    /// doramas e séries chinesas.
+    Zh,
 }
 
 /// Filtro de legenda: o release precisa ter pelo menos uma faixa de
@@ -241,6 +246,12 @@ pub enum SubtitleFilter {
     PtPt,
     /// PT-BR ou PT-PT.
     PtAny,
+    /// Inglês.
+    En,
+    /// Japonês.
+    Jp,
+    /// Chinês.
+    Zh,
 }
 
 /// Filtro de resolução.
@@ -277,6 +288,8 @@ fn audio_matches(release: &Release, a: &AudioFilter) -> bool {
                 || e.has_audio_in(&Language::Pt)
         }
         AudioFilter::En => e.has_audio_in(&Language::En),
+        AudioFilter::Jp => e.has_audio_in(&Language::Jp),
+        AudioFilter::Zh => e.has_audio_in(&Language::Zh),
     }
 }
 
@@ -290,6 +303,9 @@ fn subtitle_matches(release: &Release, s: &SubtitleFilter) -> bool {
         SubtitleFilter::PtAny => {
             e.has_subtitle_in(&Language::PtBr) || e.has_subtitle_in(&Language::PtPt)
         }
+        SubtitleFilter::En => e.has_subtitle_in(&Language::En),
+        SubtitleFilter::Jp => e.has_subtitle_in(&Language::Jp),
+        SubtitleFilter::Zh => e.has_subtitle_in(&Language::Zh),
     }
 }
 
@@ -437,6 +453,62 @@ mod tests {
         assert!(audio_matches(&pt_pt, &AudioFilter::PtAny));
         assert!(audio_matches(&pt_ambiguous, &AudioFilter::PtAny));
         assert!(!audio_matches(&only_en, &AudioFilter::PtAny));
+    }
+
+    #[test]
+    fn audio_jp_filter_matches_only_japanese_track() {
+        let with_jp = release(
+            vec![Language::Jp, Language::PtBr],
+            vec![],
+            Resolution::P1080,
+            0,
+            0,
+            false,
+            "t",
+        );
+        let without = release(
+            vec![Language::En, Language::PtBr],
+            vec![],
+            Resolution::P1080,
+            0,
+            0,
+            false,
+            "t",
+        );
+        assert!(audio_matches(&with_jp, &AudioFilter::Jp));
+        assert!(!audio_matches(&without, &AudioFilter::Jp));
+    }
+
+    #[test]
+    fn audio_zh_filter_matches_chinese_track() {
+        let with_zh = release(
+            vec![Language::Zh],
+            vec![],
+            Resolution::P1080,
+            0,
+            0,
+            false,
+            "t",
+        );
+        assert!(audio_matches(&with_zh, &AudioFilter::Zh));
+        assert!(!audio_matches(&with_zh, &AudioFilter::Jp));
+    }
+
+    #[test]
+    fn subtitle_en_jp_zh_filters_match_respective_tracks() {
+        let multi = release(
+            vec![],
+            vec![Language::En, Language::Jp, Language::Zh],
+            Resolution::P1080,
+            0,
+            0,
+            false,
+            "t",
+        );
+        assert!(subtitle_matches(&multi, &SubtitleFilter::En));
+        assert!(subtitle_matches(&multi, &SubtitleFilter::Jp));
+        assert!(subtitle_matches(&multi, &SubtitleFilter::Zh));
+        assert!(!subtitle_matches(&multi, &SubtitleFilter::PtAny));
     }
 
     #[test]
