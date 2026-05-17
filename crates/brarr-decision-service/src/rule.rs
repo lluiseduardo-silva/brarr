@@ -9,10 +9,10 @@
 //! totalmente vazio casa sempre (regra default).
 
 use brarr_core::{Language, Release, Resolution};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Conjunto completo de regras avaliadas em ordem para cada release.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuleSet {
     /// Lista de regras na ordem de avaliação. Cada regra que casa
@@ -92,7 +92,7 @@ impl RuleSet {
 }
 
 /// Uma regra declarativa.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Rule {
     /// Nome opcional para identificar a regra em logs e diagnóstico.
@@ -119,7 +119,7 @@ pub struct Rule {
 /// Cada campo `Option<_>`:
 /// - `None` (omitido) → não filtra por esse aspecto.
 /// - `Some(spec)` → release precisa satisfazer.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Condition {
     /// Filtro de áudio (`pt-br`, `pt-pt`, `pt`, `pt-any`).
@@ -215,7 +215,7 @@ impl Condition {
 }
 
 /// Filtro de áudio: o release precisa ter pelo menos uma faixa que case.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum AudioFilter {
     /// Português brasileiro explícito.
@@ -232,7 +232,7 @@ pub enum AudioFilter {
 
 /// Filtro de legenda: o release precisa ter pelo menos uma faixa de
 /// legenda que case.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SubtitleFilter {
     /// PT-BR.
@@ -244,7 +244,7 @@ pub enum SubtitleFilter {
 }
 
 /// Filtro de resolução.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub enum ResolutionFilter {
     /// Pelo menos 720p (qualquer ≥ 720p casa).
     #[serde(rename = "min-720")]
@@ -560,6 +560,32 @@ mod tests {
             ..Condition::default()
         };
         assert!(permissive.matches(&r));
+    }
+
+    #[test]
+    fn ruleset_serde_json_roundtrips_baseline_exactly() {
+        // The orchestrator persists `RuleSet`s as JSON in
+        // `quality_profiles.rules_json`. Round-tripping the baseline
+        // through serde_json must preserve every rule + condition
+        // exactly so the engine produces identical scores before and
+        // after a save.
+        let baseline = super::RuleSet::baseline();
+        let json = serde_json::to_string(&baseline).unwrap();
+        let parsed: super::RuleSet = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.rules.len(), baseline.rules.len());
+        for (a, b) in parsed.rules.iter().zip(baseline.rules.iter()) {
+            assert_eq!(a.name, b.name);
+            assert_eq!(a.add_score, b.add_score);
+            assert_eq!(a.tag, b.tag);
+            assert_eq!(a.reject, b.reject);
+            assert_eq!(a.when.audio, b.when.audio);
+            assert_eq!(a.when.subtitle, b.when.subtitle);
+            assert_eq!(a.when.hdr, b.when.hdr);
+            assert_eq!(a.when.resolution, b.when.resolution);
+            assert_eq!(a.when.min_seeders, b.when.min_seeders);
+            assert_eq!(a.when.max_size_bytes, b.when.max_size_bytes);
+            assert_eq!(a.when.tracker, b.when.tracker);
+        }
     }
 
     #[test]
