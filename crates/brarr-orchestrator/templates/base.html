@@ -44,6 +44,10 @@
 </head>
 <body class="bg-bg-canvas text-fg-primary min-h-screen flex flex-col">
 
+    {# Sub-templates that render outside the authed area (login, error
+       pages, the eventual onboarding flow) override `nav` to an empty
+       block so users don't see fake links to pages they cannot reach. #}
+    {% block nav %}
     <nav class="bg-bg-surface border-b border-border-default">
         <div class="max-w-7xl mx-auto px-8 h-16 flex items-center justify-between gap-8">
             {# Logo lockup + primary links. #}
@@ -94,10 +98,15 @@
             </div>
         </div>
     </nav>
+    {% endblock %}
 
+    {# Authenticated pages live inside `main`; the centred-card pages
+       (login, 404) override `main` with their own layout. #}
+    {% block main %}
     <main class="flex-1 max-w-7xl w-full mx-auto px-8 py-8">
         {% block content %}{% endblock %}
     </main>
+    {% endblock %}
 
 </body>
 </html>

@@ -202,7 +202,7 @@ async fn releases_index_renders_empty_state() {
         .expect("send");
     assert_eq!(resp.status(), 200);
     let body = resp.text().await.unwrap();
-    assert!(body.contains("Histórico de decisões"));
+    assert!(body.contains("Releases history"));
     assert!(body.contains("Ainda não há decisões"));
 }
 
@@ -353,7 +353,7 @@ async fn pushes_index_renders_empty_state() {
         .expect("send");
     assert_eq!(resp.status(), 200);
     let body = resp.text().await.unwrap();
-    assert!(body.contains("Histórico de push"));
+    assert!(body.contains("Push history"));
     assert!(body.contains("Nenhum push registrado"));
 }
 

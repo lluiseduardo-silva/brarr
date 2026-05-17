@@ -1,69 +1,105 @@
-<section id="providers-list" class="bg-white rounded-lg shadow overflow-x-auto">
+<section id="providers-list" class="card-hairline bg-bg-surface border border-border-default rounded-xl overflow-hidden">
     {% if providers.is_empty() %}
-    <p class="p-4 text-slate-500 italic">Nenhum provider configurado ainda.</p>
+    <p class="px-5 py-6 text-sm italic text-fg-muted">Nenhum provider configurado ainda.</p>
     {% else %}
-    <table class="w-full text-sm">
-        <thead class="bg-slate-100 text-left">
-            <tr>
-                <th class="px-3 py-2">Nome</th>
-                <th class="px-3 py-2">Base URL</th>
-                <th class="px-3 py-2">Tipo</th>
-                <th class="px-3 py-2">Criado em</th>
-                <th class="px-3 py-2">Ativo</th>
-                <th class="px-3 py-2">Status</th>
-                <th class="px-3 py-2"></th>
-            </tr>
-        </thead>
-        <tbody>
-        {% for p in providers %}
-            <tr class="border-t {% if !p.enabled %}bg-slate-50 text-slate-500{% endif %}" id="provider-{{ p.id }}">
-                <td class="px-3 py-2 font-medium">{{ p.name }}</td>
-                <td class="px-3 py-2"><a href="{{ p.base_url }}" class="text-blue-600 hover:underline" target="_blank" rel="noopener">{{ p.base_url }}</a></td>
-                <td class="px-3 py-2 text-xs uppercase tracking-wide">{{ p.kind }}</td>
-                <td class="px-3 py-2 font-mono text-xs">{{ p.created_at }}</td>
-                <td class="px-3 py-2">
-                    {% if p.enabled %}
-                    <span class="badge bg-emerald-100 text-emerald-800">on</span>
-                    {% else %}
-                    <span class="badge bg-slate-200 text-slate-600">off</span>
-                    {% endif %}
-                </td>
-                <td class="px-3 py-2">
-                    <span id="ping-{{ p.id }}" class="text-xs text-slate-400 italic">não testado</span>
-                </td>
-                <td class="px-3 py-2 text-right space-x-2">
-                    <button hx-post="/providers/{{ p.id }}/test"
-                            hx-target="#ping-{{ p.id }}"
-                            hx-swap="outerHTML"
-                            hx-indicator="#ping-{{ p.id }}"
-                            class="text-emerald-700 hover:underline text-xs">
-                        testar
-                    </button>
-                    <button hx-post="/providers/{{ p.id }}/toggle"
-                            hx-target="#providers-list"
-                            hx-swap="outerHTML"
-                            class="text-amber-700 hover:underline text-xs"
-                            title="Liga/desliga sem perder config (drain mode)">
-                        {% if p.enabled %}desativar{% else %}ativar{% endif %}
-                    </button>
-                    <a href="/providers/{{ p.id }}/probe?imdb=tt0133093"
-                       target="_blank"
-                       rel="noopener"
-                       class="text-blue-600 hover:underline text-xs"
-                       title="Roda uma busca real e devolve JSON com o XML cru + Release parsed (Matrix tt0133093 por default)">
-                        inspecionar
-                    </a>
-                    <button hx-delete="/providers/{{ p.id }}"
-                            hx-target="#provider-{{ p.id }}"
-                            hx-swap="outerHTML"
-                            hx-confirm="Remover este provider?"
-                            class="text-red-600 hover:underline text-xs">
-                        remover
-                    </button>
-                </td>
-            </tr>
-        {% endfor %}
-        </tbody>
-    </table>
+    <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+            <thead class="bg-bg-muted">
+                <tr class="text-left">
+                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Provider</th>
+                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Kind</th>
+                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Base URL</th>
+                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Criado</th>
+                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Status</th>
+                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted text-right">Ações</th>
+                </tr>
+            </thead>
+            <tbody>
+            {% for p in providers %}
+                {# Provider row. Disabled rows fade to 55% opacity per Figma. #}
+                <tr class="border-t border-border-default {% if !p.enabled %}opacity-55{% endif %}" id="provider-{{ p.id }}">
+                    {# Name col: status dot + bold label. Dot colour
+                       reflects enabled state until /test populates
+                       #ping-{id} with a real verdict. #}
+                    <td class="px-4 py-3">
+                        <div class="flex items-center gap-2.5">
+                            <span class="w-2 h-2 rounded-full {% if p.enabled %}bg-success-solid{% else %}bg-fg-muted{% endif %}"></span>
+                            <span class="font-semibold text-fg-primary">{{ p.name }}</span>
+                        </div>
+                    </td>
+
+                    {# Provider kind tag — mini coloured letter + label.
+                       Colour mapping matches the Figma palette. #}
+                    <td class="px-4 py-3">
+                        {% if p.kind == "unit3d" %}
+                        <span class="inline-flex items-center gap-1.5 pl-1 pr-2 py-1 rounded-md bg-accent-soft">
+                            <span class="inline-flex items-center justify-center w-[18px] h-[18px] rounded font-mono font-bold text-[10px] bg-accent-soft-fg text-accent-soft">U</span>
+                            <span class="font-semibold text-[11px] text-accent-soft-fg">unit3d</span>
+                        </span>
+                        {% else if p.kind == "newznab" %}
+                        <span class="inline-flex items-center gap-1.5 pl-1 pr-2 py-1 rounded-md bg-secondary-soft">
+                            <span class="inline-flex items-center justify-center w-[18px] h-[18px] rounded font-mono font-bold text-[10px] bg-secondary-soft-fg text-secondary-soft">N</span>
+                            <span class="font-semibold text-[11px] text-secondary-soft-fg">newznab</span>
+                        </span>
+                        {% else if p.kind == "torznab" %}
+                        <span class="inline-flex items-center gap-1.5 pl-1 pr-2 py-1 rounded-md bg-warning-soft">
+                            <span class="inline-flex items-center justify-center w-[18px] h-[18px] rounded font-mono font-bold text-[10px] bg-warning-soft-fg text-warning-soft">T</span>
+                            <span class="font-semibold text-[11px] text-warning-soft-fg">torznab</span>
+                        </span>
+                        {% else %}
+                        <span class="inline-flex items-center gap-1.5 pl-1 pr-2 py-1 rounded-md bg-success-soft">
+                            <span class="inline-flex items-center justify-center w-[18px] h-[18px] rounded font-mono font-bold text-[10px] bg-success-soft-fg text-success-soft">P</span>
+                            <span class="font-semibold text-[11px] text-success-soft-fg">plugin</span>
+                        </span>
+                        {% endif %}
+                    </td>
+
+                    <td class="px-4 py-3 font-mono text-sm text-fg-secondary">
+                        <a href="{{ p.base_url }}" class="hover:text-accent-soft-fg" target="_blank" rel="noopener">{{ p.base_url }}</a>
+                    </td>
+
+                    <td class="px-4 py-3 font-mono text-xs text-fg-muted">{{ p.created_at }}</td>
+
+                    <td class="px-4 py-3">
+                        <span id="ping-{{ p.id }}" class="text-xs italic text-fg-muted">não testado</span>
+                    </td>
+
+                    <td class="px-4 py-3">
+                        <div class="flex items-center justify-end gap-1.5">
+                            <button hx-post="/providers/{{ p.id }}/test"
+                                    hx-target="#ping-{{ p.id }}"
+                                    hx-swap="outerHTML"
+                                    hx-indicator="#ping-{{ p.id }}"
+                                    class="px-2.5 h-7 rounded-md bg-bg-muted text-xs font-medium text-fg-primary hover:bg-bg-surface-raised">
+                                testar
+                            </button>
+                            <button hx-post="/providers/{{ p.id }}/toggle"
+                                    hx-target="#providers-list"
+                                    hx-swap="outerHTML"
+                                    title="Liga/desliga sem perder config (drain mode)"
+                                    class="px-2.5 h-7 rounded-md text-xs font-medium {% if p.enabled %}bg-accent-soft text-accent-soft-fg{% else %}bg-bg-muted text-fg-primary{% endif %}">
+                                {% if p.enabled %}desativar{% else %}ativar{% endif %}
+                            </button>
+                            <a href="/providers/{{ p.id }}/probe?imdb=tt0133093"
+                               target="_blank"
+                               rel="noopener"
+                               title="Roda uma busca real e devolve JSON cru + Release parsed (Matrix tt0133093 por default)"
+                               class="px-2.5 h-7 inline-flex items-center rounded-md bg-secondary-soft text-xs font-medium text-secondary-soft-fg">
+                                inspecionar
+                            </a>
+                            <button hx-delete="/providers/{{ p.id }}"
+                                    hx-target="#provider-{{ p.id }}"
+                                    hx-swap="outerHTML"
+                                    hx-confirm="Remover este provider?"
+                                    class="px-2.5 h-7 rounded-md text-xs font-medium text-danger-soft-fg hover:bg-danger-soft">
+                                remover
+                            </button>
+                        </div>
+                    </td>
+                </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
     {% endif %}
 </section>

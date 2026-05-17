@@ -1,53 +1,218 @@
 {% extends "base.html" %}
 {% block title %}Providers — brarr{% endblock %}
 {% block content %}
-<h1 class="text-2xl font-bold mb-4">Providers</h1>
 
-<section class="bg-white rounded-lg shadow p-4 mb-6">
-    <h2 class="text-lg font-semibold mb-2">Adicionar provider</h2>
+{# Page title + Adicionar CTA. #}
+<div class="flex items-center justify-between gap-4 mb-6">
+    <div>
+        <h1 class="font-semibold text-[28px] leading-9 text-fg-primary">Providers</h1>
+        <p class="text-base text-fg-secondary mt-1">
+            {{ providers.len() }} configurados — trackers UNIT3D, indexers Newznab/Torznab, plugins WASM.
+        </p>
+    </div>
+    <a href="#new-provider"
+       class="brand-gradient flex items-center gap-2 px-5 h-11 rounded-lg text-white text-base font-semibold whitespace-nowrap"
+       style="box-shadow: 0 8px 20px var(--color-glow);">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round">
+            <path d="M12 5v14M5 12h14"/>
+        </svg>
+        Adicionar provider
+    </a>
+</div>
+
+{# Hint card — explains the scoring engine + ships ready-to-paste
+   threshold presets. Values come straight from the brarr-decision-
+   service Engine::baseline() rules so the operator never has to dig
+   through Rust source to plan a threshold. #}
+<section class="rounded-xl border border-accent-solid bg-accent-soft mb-6 overflow-hidden">
+    <header class="flex items-center gap-3 px-5 py-4">
+        <div class="shrink-0 w-9 h-9 rounded-lg brand-gradient flex items-center justify-center">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linejoin="round">
+                <rect x="4" y="2" width="16" height="20" rx="2"/>
+                <rect x="7" y="5" width="10" height="4"/>
+                <circle cx="9" cy="13" r="1" fill="white"/>
+                <circle cx="12" cy="13" r="1" fill="white"/>
+                <circle cx="15" cy="13" r="1" fill="white"/>
+                <circle cx="9" cy="17" r="1" fill="white"/>
+                <circle cx="12" cy="17" r="1" fill="white"/>
+            </svg>
+        </div>
+        <div>
+            <h2 class="text-lg font-semibold text-accent-soft-fg">Como funciona o scoring?</h2>
+            <p class="text-xs text-accent-soft-fg/80">
+                Cada release recebe pontos por regras casadas. Threshold do *arr define o cutoff de auto-push.
+            </p>
+        </div>
+    </header>
+
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-4 px-5 pb-5">
+        {# Col 1 — baseline rules. #}
+        <div class="bg-bg-surface border border-border-default rounded-lg p-4">
+            <p class="text-xs font-medium uppercase tracking-[0.06em] text-fg-muted mb-3">Regras baseline</p>
+            <ul class="space-y-1.5">
+                <li class="flex items-center justify-between text-sm"><span class="text-fg-primary">Áudio PT-BR</span><span class="px-1.5 py-0.5 rounded text-xs font-semibold font-mono bg-success-soft text-success-soft-fg">+100</span></li>
+                <li class="flex items-center justify-between text-sm"><span class="text-fg-primary">Áudio PT-PT</span><span class="px-1.5 py-0.5 rounded text-xs font-semibold font-mono bg-success-soft text-success-soft-fg">+25</span></li>
+                <li class="flex items-center justify-between text-sm"><span class="text-fg-primary">Áudio PT ambíguo</span><span class="px-1.5 py-0.5 rounded text-xs font-semibold font-mono bg-success-soft text-success-soft-fg">+50</span></li>
+                <li class="flex items-center justify-between text-sm"><span class="text-fg-primary">Legenda PT-BR</span><span class="px-1.5 py-0.5 rounded text-xs font-semibold font-mono bg-success-soft text-success-soft-fg">+50</span></li>
+                <li class="flex items-center justify-between text-sm"><span class="text-fg-primary">Legenda PT-PT</span><span class="px-1.5 py-0.5 rounded text-xs font-semibold font-mono bg-success-soft text-success-soft-fg">+15</span></li>
+                <li class="flex items-center justify-between text-sm"><span class="text-fg-primary">Resolução 2160p</span><span class="px-1.5 py-0.5 rounded text-xs font-semibold font-mono bg-accent-soft text-accent-soft-fg">+20</span></li>
+                <li class="flex items-center justify-between text-sm"><span class="text-fg-primary">Resolução 1080p</span><span class="px-1.5 py-0.5 rounded text-xs font-semibold font-mono bg-accent-soft text-accent-soft-fg">+10</span></li>
+                <li class="flex items-center justify-between text-sm"><span class="text-fg-primary">HDR</span><span class="px-1.5 py-0.5 rounded text-xs font-semibold font-mono bg-accent-soft text-accent-soft-fg">+10</span></li>
+                <li class="flex items-center justify-between text-sm"><span class="text-fg-primary">Seeders (cap 50)</span><span class="px-1.5 py-0.5 rounded text-xs font-semibold font-mono bg-warning-soft text-warning-soft-fg">+1/ea</span></li>
+            </ul>
+        </div>
+
+        {# Col 2 — example calculations. #}
+        <div class="bg-bg-surface border border-border-default rounded-lg p-4">
+            <p class="text-xs font-medium uppercase tracking-[0.06em] text-fg-muted mb-3">Cálculos de exemplo</p>
+            <ul class="space-y-3">
+                <li>
+                    <div class="flex flex-wrap gap-1 mb-1">
+                        <span class="font-mono text-[10px] px-1.5 py-0.5 rounded bg-bg-muted text-fg-secondary">100 PT-BR</span>
+                        <span class="font-mono text-[10px] px-1.5 py-0.5 rounded bg-bg-muted text-fg-secondary">+10 1080p</span>
+                        <span class="font-mono text-[10px] px-1.5 py-0.5 rounded bg-bg-muted text-fg-secondary">+10 seeders</span>
+                    </div>
+                    <p class="text-xs"><span class="text-fg-muted">= score</span> <span class="brand-gradient-text font-mono font-semibold text-lg">120</span></p>
+                </li>
+                <li>
+                    <div class="flex flex-wrap gap-1 mb-1">
+                        <span class="font-mono text-[10px] px-1.5 py-0.5 rounded bg-bg-muted text-fg-secondary">100 PT-BR</span>
+                        <span class="font-mono text-[10px] px-1.5 py-0.5 rounded bg-bg-muted text-fg-secondary">+50 leg PT-BR</span>
+                        <span class="font-mono text-[10px] px-1.5 py-0.5 rounded bg-bg-muted text-fg-secondary">+10 1080p</span>
+                        <span class="font-mono text-[10px] px-1.5 py-0.5 rounded bg-bg-muted text-fg-secondary">+10 seeders</span>
+                    </div>
+                    <p class="text-xs"><span class="text-fg-muted">= score</span> <span class="brand-gradient-text font-mono font-semibold text-lg">170</span></p>
+                </li>
+                <li>
+                    <div class="flex flex-wrap gap-1 mb-1">
+                        <span class="font-mono text-[10px] px-1.5 py-0.5 rounded bg-bg-muted text-fg-secondary">100 PT-BR</span>
+                        <span class="font-mono text-[10px] px-1.5 py-0.5 rounded bg-bg-muted text-fg-secondary">+20 2160p</span>
+                        <span class="font-mono text-[10px] px-1.5 py-0.5 rounded bg-bg-muted text-fg-secondary">+10 HDR</span>
+                        <span class="font-mono text-[10px] px-1.5 py-0.5 rounded bg-bg-muted text-fg-secondary">+30 seeders</span>
+                    </div>
+                    <p class="text-xs"><span class="text-fg-muted">= score</span> <span class="brand-gradient-text font-mono font-semibold text-lg">160</span></p>
+                </li>
+                <li>
+                    <div class="flex flex-wrap gap-1 mb-1">
+                        <span class="font-mono text-[10px] px-1.5 py-0.5 rounded bg-bg-muted text-fg-secondary">100 PT-BR</span>
+                        <span class="font-mono text-[10px] px-1.5 py-0.5 rounded bg-bg-muted text-fg-secondary">+50 leg</span>
+                        <span class="font-mono text-[10px] px-1.5 py-0.5 rounded bg-bg-muted text-fg-secondary">+20 2160p</span>
+                        <span class="font-mono text-[10px] px-1.5 py-0.5 rounded bg-bg-muted text-fg-secondary">+10 HDR</span>
+                        <span class="font-mono text-[10px] px-1.5 py-0.5 rounded bg-bg-muted text-fg-secondary">+50 seeders</span>
+                    </div>
+                    <p class="text-xs"><span class="text-fg-muted">= score</span> <span class="brand-gradient-text font-mono font-semibold text-lg">230</span></p>
+                </li>
+            </ul>
+        </div>
+
+        {# Col 3 — threshold presets. Cosmetic-only for now; the
+           backend reads push_threshold from the *arr instance form, so
+           "applying" a preset is operator copy/paste until P4 wires
+           Quality Profiles. #}
+        <div class="bg-bg-surface border border-border-default rounded-lg p-4">
+            <p class="text-xs font-medium uppercase tracking-[0.06em] text-fg-muted mb-3">Presets de threshold</p>
+            <ul class="space-y-2">
+                <li class="flex items-center justify-between gap-2 p-2.5 rounded-lg bg-bg-canvas border border-border-default">
+                    <div>
+                        <p class="text-sm font-semibold text-fg-primary">Mínimo PT</p>
+                        <p class="text-xs text-fg-muted">Qualquer release com match PT</p>
+                    </div>
+                    <span class="px-2.5 py-1 rounded-md font-mono text-sm font-semibold bg-accent-soft text-accent-soft-fg whitespace-nowrap">≥ 50</span>
+                </li>
+                <li class="flex items-center justify-between gap-2 p-2.5 rounded-lg bg-bg-canvas border border-border-default">
+                    <div>
+                        <p class="text-sm font-semibold text-fg-primary">FHD Dublado</p>
+                        <p class="text-xs text-fg-muted">1080p + PT-BR garantido</p>
+                    </div>
+                    <span class="px-2.5 py-1 rounded-md font-mono text-sm font-semibold bg-accent-soft text-accent-soft-fg whitespace-nowrap">≥ 110</span>
+                </li>
+                <li class="flex items-center justify-between gap-2 p-2.5 rounded-lg bg-bg-canvas border border-border-default">
+                    <div>
+                        <p class="text-sm font-semibold text-fg-primary">FHD Dublado + Legenda</p>
+                        <p class="text-xs text-fg-muted">1080p + áudio + legenda PT-BR</p>
+                    </div>
+                    <span class="px-2.5 py-1 rounded-md font-mono text-sm font-semibold bg-accent-soft text-accent-soft-fg whitespace-nowrap">≥ 170</span>
+                </li>
+                <li class="flex items-center justify-between gap-2 p-2.5 rounded-lg bg-bg-canvas border border-border-default">
+                    <div>
+                        <p class="text-sm font-semibold text-fg-primary">4K HDR Dublado</p>
+                        <p class="text-xs text-fg-muted">2160p + HDR + áudio PT-BR</p>
+                    </div>
+                    <span class="px-2.5 py-1 rounded-md font-mono text-sm font-semibold bg-accent-soft text-accent-soft-fg whitespace-nowrap">≥ 130</span>
+                </li>
+                <li class="flex items-center justify-between gap-2 p-2.5 rounded-lg bg-bg-canvas border border-border-default">
+                    <div>
+                        <p class="text-sm font-semibold text-fg-primary">Premium (4K HDR + leg + seeders)</p>
+                        <p class="text-xs text-fg-muted">Top tier baseline (~max)</p>
+                    </div>
+                    <span class="px-2.5 py-1 rounded-md font-mono text-sm font-semibold bg-accent-soft text-accent-soft-fg whitespace-nowrap">≥ 200</span>
+                </li>
+                <li>
+                    <a href="/profiles"
+                       class="flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg text-sm font-semibold text-accent-soft-fg border border-dashed border-accent-solid">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+                            <path d="M12 5v14M5 12h14"/>
+                        </svg>
+                        Criar profile customizado pra controle granular →
+                    </a>
+                </li>
+            </ul>
+        </div>
+    </div>
+</section>
+
+{# Add provider form. #}
+<section id="new-provider" class="card-hairline bg-bg-surface border border-border-default rounded-xl mb-6">
+    <header class="px-5 py-4">
+        <h2 class="text-lg font-semibold text-fg-primary">Adicionar provider</h2>
+    </header>
+    <div class="h-px bg-border-default"></div>
     <form hx-post="/providers"
           hx-target="#providers-list"
           hx-swap="outerHTML"
           hx-on::after-request="this.reset()"
-          class="grid grid-cols-1 md:grid-cols-6 gap-3 items-end">
-        <label class="text-xs uppercase tracking-wide text-slate-500">
-            Nome
-            <input name="name" required class="w-full mt-1 border rounded px-2 py-1 text-sm" placeholder="capybara">
+          class="grid grid-cols-1 md:grid-cols-6 gap-3 items-end px-5 py-4">
+        <label class="block">
+            <span class="block mb-1.5 text-xs font-medium uppercase tracking-[0.06em] text-fg-muted">Nome</span>
+            <input name="name" required placeholder="capybara"
+                   class="w-full px-3 h-10 rounded-md bg-bg-canvas border border-border-strong text-sm text-fg-primary placeholder:text-fg-muted focus:outline-none focus:border-accent-solid">
         </label>
-        <label class="text-xs uppercase tracking-wide text-slate-500">
-            Tipo
-            <select name="kind" class="w-full mt-1 border rounded px-2 py-1 text-sm bg-white">
+        <label class="block">
+            <span class="block mb-1.5 text-xs font-medium uppercase tracking-[0.06em] text-fg-muted">Tipo</span>
+            <select name="kind"
+                    class="w-full px-3 h-10 rounded-md bg-bg-canvas border border-border-strong text-sm text-fg-primary focus:outline-none focus:border-accent-solid">
                 <option value="unit3d">UNIT3D (tracker direto)</option>
                 <option value="newznab">Newznab (Usenet indexer)</option>
-                <option value="torznab">Torznab (Jackett/Prowlarr/gateway)</option>
+                <option value="torznab">Torznab (Jackett/Prowlarr)</option>
                 <option value="plugin">WASM plugin</option>
             </select>
         </label>
-        <label class="text-xs uppercase tracking-wide text-slate-500">
-            Base URL
-            <input name="base_url" required type="url" class="w-full mt-1 border rounded px-2 py-1 text-sm" placeholder="https://capybarabr.com/">
+        <label class="block md:col-span-2">
+            <span class="block mb-1.5 text-xs font-medium uppercase tracking-[0.06em] text-fg-muted">Base URL</span>
+            <input name="base_url" required type="url" placeholder="https://capybarabr.com/"
+                   class="w-full px-3 h-10 rounded-md bg-bg-canvas border border-border-strong text-sm text-fg-primary placeholder:text-fg-muted focus:outline-none focus:border-accent-solid">
         </label>
-        <label class="text-xs uppercase tracking-wide text-slate-500">
-            API token
-            <input name="api_token" type="password" class="w-full mt-1 border rounded px-2 py-1 text-sm">
+        <label class="block">
+            <span class="block mb-1.5 text-xs font-medium uppercase tracking-[0.06em] text-fg-muted">API token</span>
+            <input name="api_token" type="password"
+                   class="w-full px-3 h-10 rounded-md bg-bg-canvas border border-border-strong text-sm text-fg-primary focus:outline-none focus:border-accent-solid">
         </label>
-        <label class="text-xs uppercase tracking-wide text-slate-500">
-            Plugin .wasm (se tipo=plugin)
-            <input name="plugin_path" class="w-full mt-1 border rounded px-2 py-1 text-sm" placeholder="/plugins/custom.wasm">
-        </label>
-        <button type="submit" class="bg-amber-500 hover:bg-amber-600 text-white text-sm font-semibold px-3 py-2 rounded">
-            Salvar
+        <button type="submit"
+                class="brand-gradient h-10 px-4 rounded-md text-white text-sm font-semibold whitespace-nowrap">
+            Adicionar
         </button>
+
+        <label class="block md:col-span-6">
+            <span class="block mb-1.5 text-xs font-medium uppercase tracking-[0.06em] text-fg-muted">Plugin .wasm (somente quando tipo=plugin)</span>
+            <input name="plugin_path" placeholder="/plugins/custom.wasm"
+                   class="w-full max-w-md px-3 h-10 rounded-md bg-bg-canvas border border-border-strong text-sm text-fg-primary placeholder:text-fg-muted focus:outline-none focus:border-accent-solid">
+        </label>
     </form>
-    <p class="text-xs text-slate-500 mt-2">
-        <strong>UNIT3D</strong>: tracker direto (capybara, locadora). API token bearer. Base URL: raiz do site (ex. <code>https://capybarabr.com/</code>).<br>
-        <strong>Newznab</strong>: indexer Usenet (NZBGeek, DrunkenSlug). API token = apikey. Base URL: raiz da API <em>sem</em> <code>/api</code> no final (ex. <code>https://api.nzbgeek.info/</code>).<br>
-        <strong>Torznab</strong>: gateway torrent (Jackett, Prowlarr). API token = apikey. Mesmas regras do Newznab.<br>
-        <strong>Plugin</strong>: módulo WASM carregado por busca (ABI v1 do <code>brarr-plugin-host</code>).
-    </p>
-    <p class="text-xs text-slate-400 mt-1">
-        Após salvar, clique em <em>testar</em> na lista pra confirmar URL+apikey.
-    </p>
+    <div class="px-5 pb-4 text-xs text-fg-muted leading-relaxed">
+        <strong class="text-fg-secondary">UNIT3D</strong> — base URL = raiz do site, token = bearer.
+        <strong class="text-fg-secondary">Newznab/Torznab</strong> — base URL = raiz <em>sem</em> <code class="font-mono text-fg-secondary">/api</code>, token = apikey.
+        Após salvar use <em class="text-fg-secondary">testar</em> na lista pra validar URL + apikey.
+    </div>
 </section>
 
 {% include "partials/providers_list.html" %}

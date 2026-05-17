@@ -1,23 +1,63 @@
 {% extends "base.html" %}
 {% block title %}Entrar — brarr{% endblock %}
-{% block content %}
-<div class="max-w-sm mx-auto bg-white rounded-lg shadow p-6 mt-12">
-    <h1 class="text-xl font-bold mb-4">Acesso administrativo</h1>
-    {% if let Some(msg) = error_message %}
-    <p class="mb-3 text-sm text-red-700 bg-red-50 border border-red-200 rounded px-3 py-2">{{ msg }}</p>
-    {% endif %}
-    <form method="post" action="/login" class="space-y-3">
-        <label class="block text-xs uppercase tracking-wide text-slate-500">
-            Token
-            <input name="token" required type="password" autocomplete="current-password"
-                   class="w-full mt-1 border rounded px-2 py-1 text-sm">
-        </label>
-        <button type="submit" class="w-full bg-amber-500 hover:bg-amber-600 text-white text-sm font-semibold px-3 py-2 rounded">
-            Entrar
-        </button>
-    </form>
-    <p class="mt-4 text-xs text-slate-500">
-        Configure <code>BRARR_AUTH_TOKEN</code> no ambiente do servidor para gerar este segredo.
-    </p>
-</div>
+
+{# No nav — operator hasn't authed yet. #}
+{% block nav %}{% endblock %}
+
+{# Centred card layout (Figma screen 1). Override `main` so we can
+   vertical-center the card without inheriting the dashboard container. #}
+{% block main %}
+<main class="flex-1 flex items-center justify-center w-full px-8 py-8">
+    <div class="w-[440px] max-w-full card-hairline bg-bg-surface border border-border-default rounded-2xl"
+         style="box-shadow: 0 18px 48px var(--color-glow);">
+
+        <div class="flex flex-col items-center gap-6 px-10 py-10">
+            {# Logo block. #}
+            <div class="flex flex-col items-center gap-2">
+                <div class="flex items-center gap-3">
+                    <svg width="48" height="48" viewBox="0 0 80 80" fill="none" xmlns="http://www.w3.org/2000/svg" class="text-accent-solid">
+                        <path d="M10 18 L40 40 L10 62" stroke="currentColor" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+                        <path d="M28 22 L52 40 L28 58" stroke="currentColor" stroke-width="6" stroke-linecap="round" stroke-linejoin="round" opacity="0.55"/>
+                        <circle cx="68" cy="40" r="6" fill="currentColor"/>
+                    </svg>
+                    <span class="font-semibold text-[42px] leading-none -tracking-[0.03em] text-fg-primary">brarr</span>
+                </div>
+                <p class="text-sm text-fg-secondary">Agregador de buscas em trackers UNIT3D + Newznab</p>
+            </div>
+
+            <div class="w-full h-px bg-border-default"></div>
+
+            {# Error banner (variant=danger, no leading icon to match the Figma "compact" look). #}
+            {% if let Some(msg) = error_message %}
+            <div class="w-full flex items-start gap-3 px-4 py-3 rounded-lg bg-danger-soft border border-danger-solid">
+                <div class="shrink-0 mt-0.5 w-5 h-5 rounded-full bg-danger-solid flex items-center justify-center">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="3" stroke-linecap="round">
+                        <path d="M6 6l12 12M18 6L6 18"/>
+                    </svg>
+                </div>
+                <p class="text-sm font-medium text-danger-soft-fg">{{ msg }}</p>
+            </div>
+            {% endif %}
+
+            <form method="post" action="/login" class="w-full flex flex-col gap-4">
+                <label class="block">
+                    <span class="block mb-1.5 text-xs font-medium uppercase tracking-[0.06em] text-fg-muted">Token de acesso</span>
+                    <input name="token" required type="password" autocomplete="current-password"
+                           class="w-full font-mono text-base px-4 py-3 rounded-lg bg-bg-canvas border-2 border-accent-solid text-fg-primary placeholder:text-fg-muted focus:outline-none"
+                           placeholder="••••••••••••••••••••••••••••">
+                    <span class="block mt-1.5 text-xs text-fg-muted">Cole o BRARR_AUTH_TOKEN configurado no servidor.</span>
+                </label>
+
+                <button type="submit"
+                        class="brand-gradient w-full flex items-center justify-center gap-2 h-12 rounded-lg text-white text-base font-semibold"
+                        style="box-shadow: 0 8px 20px var(--color-glow);">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="white">
+                        <path d="M12 3l2 6 6 2-6 2-2 6-2-6-6-2 6-2z"/>
+                    </svg>
+                    Entrar
+                </button>
+            </form>
+        </div>
+    </div>
+</main>
 {% endblock %}

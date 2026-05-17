@@ -1,79 +1,105 @@
-<section id="arr-instances-list" class="bg-white rounded-lg shadow overflow-x-auto">
+<section id="arr-instances-list" class="card-hairline bg-bg-surface border border-border-default rounded-xl overflow-hidden">
     {% if instances.is_empty() %}
-    <p class="p-4 text-slate-500 italic">Nenhum *arr cadastrado. Adicione um Radarr/Sonarr acima pra ativar push automático.</p>
+    <p class="px-5 py-6 text-sm italic text-fg-muted">Nenhum *arr cadastrado. Adicione um Radarr/Sonarr acima pra ativar push automático.</p>
     {% else %}
-    <table class="w-full text-sm">
-        <thead class="bg-slate-100 text-left">
-            <tr>
-                <th class="px-3 py-2">Nome</th>
-                <th class="px-3 py-2">Tipo</th>
-                <th class="px-3 py-2">Base URL</th>
-                <th class="px-3 py-2">Score mín.</th>
-                <th class="px-3 py-2">Ativo</th>
-                <th class="px-3 py-2">Status</th>
-                <th class="px-3 py-2"></th>
-            </tr>
-        </thead>
-        <tbody>
-        {% for a in instances %}
-            <tr class="border-t" id="arr-instance-{{ a.id }}">
-                <td class="px-3 py-2 font-medium">{{ a.name }}</td>
-                <td class="px-3 py-2 text-xs uppercase tracking-wide">{{ a.kind }}</td>
-                <td class="px-3 py-2"><a href="{{ a.base_url }}" class="text-blue-600 hover:underline" target="_blank" rel="noopener">{{ a.base_url }}</a></td>
-                <td class="px-3 py-2">
-                    <form hx-post="/arr-instances/{{ a.id }}/threshold"
-                          hx-target="#arr-instances-list"
-                          hx-swap="outerHTML"
-                          class="flex items-center gap-1">
-                        <input name="push_threshold"
-                               type="number"
-                               min="0"
-                               max="1000"
-                               value="{{ a.push_threshold }}"
-                               class="w-16 border rounded px-1 py-0.5 text-xs font-mono">
-                        <button type="submit"
-                                class="text-xs text-blue-700 hover:underline"
-                                title="Salvar novo threshold">✓</button>
-                    </form>
-                </td>
-                <td class="px-3 py-2">
-                    {% if a.enabled %}
-                    <span class="badge bg-emerald-100 text-emerald-800">on</span>
-                    {% else %}
-                    <span class="badge bg-slate-200 text-slate-600">off</span>
-                    {% endif %}
-                </td>
-                <td class="px-3 py-2">
-                    <span id="arr-ping-{{ a.id }}" class="text-xs text-slate-400 italic">não testado</span>
-                </td>
-                <td class="px-3 py-2 text-right space-x-2">
-                    <button hx-post="/arr-instances/{{ a.id }}/test"
-                            hx-target="#arr-ping-{{ a.id }}"
-                            hx-swap="outerHTML"
-                            hx-indicator="#arr-ping-{{ a.id }}"
-                            class="text-emerald-700 hover:underline text-xs">
-                        testar
-                    </button>
-                    <button hx-post="/arr-instances/{{ a.id }}/poll-now"
-                            hx-target="#arr-ping-{{ a.id }}"
-                            hx-swap="outerHTML"
-                            hx-indicator="#arr-ping-{{ a.id }}"
-                            hx-confirm="Rodar um ciclo de poll agora? Pode levar minutos."
-                            class="text-blue-700 hover:underline text-xs"
-                            title="Varre wanted items + dispara push automático">
-                        rodar agora
-                    </button>
-                    <button hx-delete="/arr-instances/{{ a.id }}"
-                            hx-target="#arr-instance-{{ a.id }}"
-                            hx-swap="outerHTML"
-                            hx-confirm="Remover este *arr?"
-                            class="text-red-600 hover:underline text-xs">
-                        remover
-                    </button>
-                </td>
-            </tr>
-        {% endfor %}
-        </tbody>
-    </table>
+    <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+            <thead class="bg-bg-muted">
+                <tr class="text-left">
+                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Nome</th>
+                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Kind</th>
+                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Base URL</th>
+                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Threshold</th>
+                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Status</th>
+                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted text-right">Ações</th>
+                </tr>
+            </thead>
+            <tbody>
+            {% for a in instances %}
+                <tr class="border-t border-border-default {% if !a.enabled %}opacity-55{% endif %}" id="arr-instance-{{ a.id }}">
+                    {# Name + status dot. Dot colour mirrors enabled
+                       state until /test populates #arr-ping-{id}. #}
+                    <td class="px-4 py-3">
+                        <div class="flex items-center gap-2.5">
+                            <span class="w-2 h-2 rounded-full {% if a.enabled %}bg-success-solid{% else %}bg-fg-muted{% endif %}"></span>
+                            <span class="font-semibold text-fg-primary">{{ a.name }}</span>
+                        </div>
+                    </td>
+
+                    {# Kind tag. Radarr = warm (movies = amber), Sonarr
+                       = info (series = cyan). Matches Figma per-kind
+                       palette. #}
+                    <td class="px-4 py-3">
+                        {% if a.kind == "radarr" %}
+                        <span class="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-semibold bg-warning-soft text-warning-soft-fg">Radarr</span>
+                        {% else %}
+                        <span class="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-semibold bg-info-soft text-info-soft-fg">Sonarr</span>
+                        {% endif %}
+                    </td>
+
+                    <td class="px-4 py-3 font-mono text-sm text-fg-secondary">
+                        <a href="{{ a.base_url }}" class="hover:text-accent-soft-fg" target="_blank" rel="noopener">{{ a.base_url }}</a>
+                    </td>
+
+                    {# Inline threshold editor. The ✓ button submits the
+                       form; the entire list partial gets swapped back
+                       in so the new value renders pre-validated. #}
+                    <td class="px-4 py-3">
+                        <form hx-post="/arr-instances/{{ a.id }}/threshold"
+                              hx-target="#arr-instances-list"
+                              hx-swap="outerHTML"
+                              class="flex items-center gap-1.5">
+                            <input name="push_threshold"
+                                   type="number"
+                                   min="0"
+                                   max="1000"
+                                   value="{{ a.push_threshold }}"
+                                   class="w-20 h-8 px-2 rounded-md bg-bg-canvas border border-border-strong text-sm font-mono font-semibold text-fg-primary focus:outline-none focus:border-accent-solid">
+                            <button type="submit"
+                                    title="Salvar novo threshold"
+                                    class="w-8 h-8 inline-flex items-center justify-center rounded-md bg-accent-soft text-accent-soft-fg hover:bg-accent-solid hover:text-accent-fg">
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+                                    <path d="M5 12l5 5L20 7"/>
+                                </svg>
+                            </button>
+                        </form>
+                    </td>
+
+                    <td class="px-4 py-3">
+                        <span id="arr-ping-{{ a.id }}" class="text-xs italic text-fg-muted">não testado</span>
+                    </td>
+
+                    <td class="px-4 py-3">
+                        <div class="flex items-center justify-end gap-1.5">
+                            <button hx-post="/arr-instances/{{ a.id }}/test"
+                                    hx-target="#arr-ping-{{ a.id }}"
+                                    hx-swap="outerHTML"
+                                    hx-indicator="#arr-ping-{{ a.id }}"
+                                    class="px-2.5 h-7 rounded-md bg-bg-muted text-xs font-medium text-fg-primary hover:bg-bg-surface-raised">
+                                testar
+                            </button>
+                            <button hx-post="/arr-instances/{{ a.id }}/poll-now"
+                                    hx-target="#arr-ping-{{ a.id }}"
+                                    hx-swap="outerHTML"
+                                    hx-indicator="#arr-ping-{{ a.id }}"
+                                    hx-confirm="Rodar um ciclo de poll agora? Pode levar minutos."
+                                    title="Varre wanted items + dispara push automático"
+                                    class="px-2.5 h-7 rounded-md bg-secondary-soft text-xs font-medium text-secondary-soft-fg">
+                                rodar agora
+                            </button>
+                            <button hx-delete="/arr-instances/{{ a.id }}"
+                                    hx-target="#arr-instance-{{ a.id }}"
+                                    hx-swap="outerHTML"
+                                    hx-confirm="Remover este *arr?"
+                                    class="px-2.5 h-7 rounded-md text-xs font-medium text-danger-soft-fg hover:bg-danger-soft">
+                                remover
+                            </button>
+                        </div>
+                    </td>
+                </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
     {% endif %}
 </section>

@@ -1,86 +1,140 @@
 {% extends "base.html" %}
 {% block title %}Pushes — brarr{% endblock %}
 {% block content %}
-<h1 class="text-2xl font-bold mb-1">Histórico de push</h1>
-<p class="text-sm text-slate-600 mb-4">
-    Agrupado por release × *arr. Clica num grupo pra ver tentativas
-    individuais. Status <code>ok</code> = *arr aceitou; <code>http</code> = *arr
-    rejeitou (motivo nas tentativas); <code>net</code> = brarr não conseguiu
-    falar com o *arr.
-</p>
+
+<div class="mb-6">
+    <h1 class="font-semibold text-[28px] leading-9 text-fg-primary">Push history</h1>
+    <p class="text-base text-fg-secondary mt-1">
+        Tentativas agrupadas por release × instância. <code class="font-mono text-xs px-1 py-0.5 rounded bg-bg-muted text-fg-primary">ok</code> = ao menos uma tentativa retornou sucesso.
+    </p>
+</div>
 
 {% if groups.is_empty() %}
-<p class="text-slate-500 italic bg-white rounded-lg shadow p-4">Nenhum push registrado ainda. Use o botão <em>push</em> em <a href="/releases" class="text-blue-600 hover:underline">releases</a> ou aguarde o auto-push do scheduler.</p>
+<div class="card-hairline bg-bg-surface border border-border-default rounded-xl px-5 py-10 text-center">
+    <p class="text-fg-muted italic">
+        Nenhum push registrado ainda. Use o botão <em>push</em> em
+        <a href="/releases" class="text-accent-soft-fg font-semibold">releases</a> ou aguarde o auto-push do scheduler.
+    </p>
+</div>
 {% else %}
-<div class="space-y-2">
+
+<div class="space-y-3">
 {% for g in groups %}
-<details class="bg-white rounded-lg shadow">
-    <summary class="cursor-pointer px-4 py-3 flex items-center gap-3 hover:bg-slate-50">
-        {% if g.any_ok %}
-        <span class="badge bg-emerald-100 text-emerald-800">ok</span>
-        {% else %}
-        <span class="badge bg-red-100 text-red-800">{{ g.attempt_count }}× sem sucesso</span>
-        {% endif %}
-        <span class="font-medium truncate" title="{{ g.release_name }}">{{ g.release_name }}</span>
-        <span class="text-xs text-slate-500">→</span>
-        <span class="text-xs font-medium">{{ g.arr_name }}</span>
-        <span class="text-xs text-slate-500">({{ g.arr_kind }})</span>
-        <span class="text-xs text-slate-400">via {{ g.provider_name }}</span>
-        <span class="text-xs text-slate-400 ml-auto font-mono">{{ g.latest_at }}</span>
-        <span class="text-xs text-slate-500">{{ g.attempt_count }} tentativa{% if g.attempt_count != 1 %}s{% endif %}</span>
+{# Each group = a collapsible rich card. Header shows the dominant
+   status badge + release + destination *arr tag + attempt count.
+   Expanded body = compact attempt table. #}
+<details class="card-hairline bg-bg-surface border border-border-default rounded-xl overflow-hidden">
+    <summary class="cursor-pointer list-none">
+        <div class="flex items-center gap-4 px-5 py-4">
+            {# Status badge (dominant). #}
+            {% if g.any_ok %}
+            <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-success-soft text-success-soft-fg border border-success-solid">
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5L20 7"/></svg>
+                ok
+            </span>
+            {% else %}
+            <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-danger-soft text-danger-soft-fg border border-danger-solid">
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+                {{ g.attempt_count }}× sem sucesso
+            </span>
+            {% endif %}
+
+            <div class="flex-1 min-w-0">
+                <p class="font-semibold text-sm text-fg-primary truncate" title="{{ g.release_name }}">{{ g.release_name }}</p>
+                <div class="flex flex-wrap items-center gap-2 mt-1">
+                    <span class="text-xs text-fg-muted">→</span>
+                    {% if g.arr_kind == "radarr" %}
+                    <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[11px] font-semibold bg-warning-soft text-warning-soft-fg">
+                        Radarr <span class="font-mono">{{ g.arr_name }}</span>
+                    </span>
+                    {% else %}
+                    <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[11px] font-semibold bg-info-soft text-info-soft-fg">
+                        Sonarr <span class="font-mono">{{ g.arr_name }}</span>
+                    </span>
+                    {% endif %}
+                    <span class="px-2 py-0.5 rounded text-[11px] font-medium bg-bg-muted text-fg-secondary font-mono">
+                        {{ g.attempt_count }} tentativa{% if g.attempt_count != 1 %}s{% endif %}
+                    </span>
+                    <span class="px-2 py-0.5 rounded text-[11px] font-medium bg-bg-muted text-fg-secondary">
+                        via {{ g.provider_name }}
+                    </span>
+                    <span class="text-[11px] text-fg-muted font-mono ml-auto">{{ g.latest_at }}</span>
+                </div>
+            </div>
+
+            <div class="shrink-0 p-1.5 rounded-md bg-bg-muted text-fg-secondary">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M6 9l6 6 6-6"/>
+                </svg>
+            </div>
+        </div>
     </summary>
-    <div class="border-t overflow-x-auto">
-        <table class="w-full text-sm">
-            <thead class="bg-slate-50 text-left">
-                <tr>
-                    <th class="px-3 py-2">Quando</th>
-                    <th class="px-3 py-2">Status</th>
-                    <th class="px-3 py-2">HTTP</th>
-                    <th class="px-3 py-2">Resposta</th>
-                </tr>
-            </thead>
-            <tbody>
-            {% for p in g.attempts %}
-                <tr class="border-t">
-                    <td class="px-3 py-2 font-mono text-xs whitespace-nowrap">{{ p.pushed_at }}</td>
-                    <td class="px-3 py-2">
-                        {% if p.status == "ok" %}
-                        <span class="badge bg-emerald-100 text-emerald-800">ok</span>
-                        {% else if p.status == "http_error" %}
-                        <span class="badge bg-red-100 text-red-800">http</span>
-                        {% else %}
-                        <span class="badge bg-amber-100 text-amber-800">net</span>
-                        {% endif %}
-                    </td>
-                    <td class="px-3 py-2 font-mono text-xs">
-                        {% match p.http_status %}
-                        {% when Some with (s) %}{{ s }}
-                        {% when None %}—
-                        {% endmatch %}
-                    </td>
-                    <td class="px-3 py-2 text-xs max-w-md">
-                        {% if p.rejections.is_empty() %}
+
+    <div class="border-t border-border-default bg-bg-canvas">
+        <div class="overflow-x-auto">
+            <table class="w-full text-sm">
+                <thead class="bg-bg-muted">
+                    <tr class="text-left">
+                        <th class="px-4 py-2.5 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Quando</th>
+                        <th class="px-4 py-2.5 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Status</th>
+                        <th class="px-4 py-2.5 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">HTTP</th>
+                        <th class="px-4 py-2.5 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Resposta</th>
+                    </tr>
+                </thead>
+                <tbody>
+                {% for p in g.attempts %}
+                    <tr class="border-t border-border-default">
+                        <td class="px-4 py-2.5 font-mono text-xs text-fg-secondary whitespace-nowrap">{{ p.pushed_at }}</td>
+                        <td class="px-4 py-2.5">
                             {% if p.status == "ok" %}
-                            <span class="text-emerald-700 italic">*arr aceitou — grab disparado</span>
+                            <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-success-soft text-success-soft-fg border border-success-solid">
+                                <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5L20 7"/></svg>
+                                ok
+                            </span>
+                            {% else if p.status == "http_error" %}
+                            <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-danger-soft text-danger-soft-fg border border-danger-solid">
+                                <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+                                http
+                            </span>
                             {% else %}
-                            <span class="text-slate-500 italic truncate" title="{{ p.response_body }}">{{ p.response_body }}</span>
+                            <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-warning-soft text-warning-soft-fg border border-warning-solid">
+                                net
+                            </span>
                             {% endif %}
-                        {% else %}
-                        <ul class="ml-3 list-disc text-slate-700 space-y-1">
-                            {% for r in p.rejections %}
-                            <li>{{ r }}</li>
-                            {% endfor %}
-                        </ul>
-                        {% endif %}
-                    </td>
-                </tr>
-            {% endfor %}
-            </tbody>
-        </table>
+                        </td>
+                        <td class="px-4 py-2.5 font-mono text-xs font-semibold text-fg-primary">
+                            {% match p.http_status %}
+                            {% when Some with (s) %}{{ s }}
+                            {% when None %}—
+                            {% endmatch %}
+                        </td>
+                        <td class="px-4 py-2.5 text-xs max-w-xl">
+                            {% if p.rejections.is_empty() %}
+                                {% if p.status == "ok" %}
+                                <span class="text-success-soft-fg italic">*arr aceitou — grab disparado</span>
+                                {% else %}
+                                <span class="text-fg-secondary italic font-mono truncate block" title="{{ p.response_body }}">{{ p.response_body }}</span>
+                                {% endif %}
+                            {% else %}
+                            <ul class="space-y-1 text-fg-secondary">
+                                {% for r in p.rejections %}
+                                <li class="flex items-start gap-2">
+                                    <span class="shrink-0 mt-1.5 w-1 h-1 rounded-full bg-danger-solid"></span>
+                                    <span>{{ r }}</span>
+                                </li>
+                                {% endfor %}
+                            </ul>
+                            {% endif %}
+                        </td>
+                    </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </div>
     </div>
 </details>
 {% endfor %}
 </div>
-{% endif %}
 
+{% endif %}
 {% endblock %}

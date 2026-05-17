@@ -1,67 +1,133 @@
 {% extends "base.html" %}
 {% block title %}Releases — brarr{% endblock %}
 {% block content %}
-<h1 class="text-2xl font-bold mb-4">Histórico de decisões</h1>
+
+<div class="mb-6">
+    <h1 class="font-semibold text-[28px] leading-9 text-fg-primary">Releases history</h1>
+    <p class="text-base text-fg-secondary mt-1">
+        {{ decisions.len() }} decisões no painel — mantidas + rejeitadas, mais recentes primeiro.
+    </p>
+</div>
+
+{# Filter bar — chips são cosméticos por ora; backend de filtragem
+   chega no follow-up (precisa cursor + index em decisions.score). #}
+<div class="flex flex-wrap items-center gap-3 px-3 py-3 mb-4 rounded-lg bg-bg-surface border border-border-default">
+    <div class="flex items-center gap-2 px-3 h-9 rounded-md bg-bg-canvas border border-border-default flex-1 min-w-[240px] max-w-[360px]">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" class="text-fg-muted">
+            <circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>
+        </svg>
+        <input type="text" placeholder="Filtrar por release, provider…" disabled
+               class="flex-1 bg-transparent text-sm text-fg-muted placeholder:text-fg-muted focus:outline-none">
+    </div>
+    <button class="px-3 py-1.5 rounded-md text-xs font-semibold bg-accent-soft text-accent-soft-fg border border-accent-solid" type="button">Todos</button>
+    <button class="px-3 py-1.5 rounded-md text-xs font-semibold bg-bg-muted text-fg-secondary" type="button">Mantidos</button>
+    <button class="px-3 py-1.5 rounded-md text-xs font-semibold bg-bg-muted text-fg-secondary" type="button">Rejeitados</button>
+    <button class="px-3 py-1.5 rounded-md text-xs font-semibold bg-bg-muted text-fg-secondary" type="button">Score ≥ 500</button>
+    <button class="ml-auto inline-flex items-center gap-1.5 px-3 h-9 rounded-md bg-bg-canvas border border-border-default text-xs font-medium text-fg-primary" type="button">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18M6 12h12M10 18h4"/></svg>
+        Ordenar
+    </button>
+</div>
 
 {% if decisions.is_empty() %}
-<p class="text-slate-500 italic">Ainda não há decisões persistidas.</p>
+<div class="card-hairline bg-bg-surface border border-border-default rounded-xl px-5 py-10 text-center">
+    <p class="text-fg-muted italic">Ainda não há decisões persistidas. Rode uma busca pelo botão "Nova busca" no Dashboard.</p>
+</div>
 {% else %}
-<div class="bg-white rounded-lg shadow overflow-x-auto">
-    <table class="w-full text-sm">
-        <thead class="bg-slate-100 text-left">
-            <tr>
-                <th class="px-3 py-2">Score</th>
-                <th class="px-3 py-2">Provider</th>
-                <th class="px-3 py-2">Release</th>
-                <th class="px-3 py-2">Tipo</th>
-                <th class="px-3 py-2">Resolução</th>
-                <th class="px-3 py-2">Tamanho</th>
-                <th class="px-3 py-2">Seeders</th>
-                <th class="px-3 py-2">Tags</th>
-                <th class="px-3 py-2">Regras casadas</th>
-                <th class="px-3 py-2">Status</th>
-                {% if !arr_instances.is_empty() %}
-                <th class="px-3 py-2">Push</th>
-                {% endif %}
-            </tr>
-        </thead>
-        <tbody>
-        {% for d in decisions %}
-            <tr class="border-t {% if d.rejected %}bg-red-50{% endif %}">
-                <td class="px-3 py-2 font-bold">{{ d.score }}</td>
-                <td class="px-3 py-2">{{ d.provider_name }}</td>
-                <td class="px-3 py-2">{{ d.release_name }}</td>
-                <td class="px-3 py-2">{{ d.kind }}</td>
-                <td class="px-3 py-2">{{ d.resolution }}</td>
-                <td class="px-3 py-2 font-mono text-xs">{{ d.size_human }}</td>
-                <td class="px-3 py-2">{{ d.seeders }}</td>
-                <td class="px-3 py-2 text-xs">{{ d.tags }}</td>
-                <td class="px-3 py-2 text-xs text-slate-700" title="{{ d.matched_rules }}">{{ d.matched_rules }}</td>
-                <td class="px-3 py-2">
-                    {% if d.rejected %}
-                    <span class="badge bg-red-100 text-red-800">rejeitado</span>
-                    {% else %}
-                    <span class="badge bg-emerald-100 text-emerald-800">mantido</span>
+<div class="card-hairline bg-bg-surface border border-border-default rounded-xl overflow-hidden">
+    <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+            <thead class="bg-bg-muted">
+                <tr class="text-left">
+                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Score</th>
+                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Provider</th>
+                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Release</th>
+                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Qualidade</th>
+                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Tamanho</th>
+                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Seeders</th>
+                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Regras</th>
+                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Status</th>
+                    {% if !arr_instances.is_empty() %}
+                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted text-right">Push</th>
                     {% endif %}
-                </td>
-                {% if !arr_instances.is_empty() %}
-                <td class="px-3 py-2 space-x-1 whitespace-nowrap">
-                    {% for a in arr_instances %}
-                    <button hx-post="/decisions/{{ d.id }}/push/{{ a.id }}"
-                            hx-target="#push-{{ d.id }}-{{ a.id }}"
-                            hx-swap="outerHTML"
-                            class="text-xs text-blue-700 hover:underline"
-                            title="Push para {{ a.name }} ({{ a.kind }})">
-                        → {{ a.name }}
-                    </button>
-                    <span id="push-{{ d.id }}-{{ a.id }}" class="text-xs text-slate-400 italic"></span>
-                    {% endfor %}
-                </td>
-                {% endif %}
-            </tr>
-        {% endfor %}
-        </tbody>
-    </table>
+                </tr>
+            </thead>
+            <tbody>
+            {% for d in decisions %}
+                <tr class="border-t border-border-default {% if d.rejected %}bg-danger-soft{% endif %}">
+                    {# Score cell — number + gradient mini-bar (score/10 %). #}
+                    <td class="px-4 py-3 w-[140px]">
+                        <p class="font-mono font-semibold text-base text-fg-primary leading-none">
+                            {{ d.score }}<span class="text-[10px] text-fg-muted font-normal">/1000</span>
+                        </p>
+                        <div class="mt-1.5 h-1 w-[110px] rounded-full bg-bg-muted overflow-hidden">
+                            <div class="brand-gradient h-full" style="width: {{ d.score / 10 }}%;"></div>
+                        </div>
+                    </td>
+
+                    <td class="px-4 py-3">
+                        <span class="font-medium text-fg-primary">{{ d.provider_name }}</span>
+                    </td>
+
+                    <td class="px-4 py-3 max-w-[360px]">
+                        <p class="text-sm font-medium text-fg-primary truncate">{{ d.release_name }}</p>
+                        {% if !d.tags.is_empty() %}
+                        <p class="text-[10px] text-fg-muted font-mono mt-0.5 truncate" title="{{ d.tags }}">{{ d.tags }}</p>
+                        {% endif %}
+                    </td>
+
+                    <td class="px-4 py-3 font-mono text-sm text-fg-primary">{{ d.resolution }}</td>
+                    <td class="px-4 py-3 font-mono text-xs text-fg-secondary">{{ d.size_human }}</td>
+                    <td class="px-4 py-3 font-mono text-sm text-fg-secondary">{{ d.seeders }}</td>
+
+                    <td class="px-4 py-3 text-xs text-fg-secondary max-w-[260px]">
+                        <span class="truncate block" title="{{ d.matched_rules }}">{{ d.matched_rules }}</span>
+                    </td>
+
+                    {# Status badge — soft + bordered, with leading
+                       check/x icon per Figma status-badge spec. #}
+                    <td class="px-4 py-3">
+                        {% if d.rejected %}
+                        <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-danger-soft text-danger-soft-fg border border-danger-solid">
+                            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+                            rejeitado
+                        </span>
+                        {% else %}
+                        <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-success-soft text-success-soft-fg border border-success-solid">
+                            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5L20 7"/></svg>
+                            mantido
+                        </span>
+                        {% endif %}
+                    </td>
+
+                    {# Per-instance push buttons. Gradient for Radarr,
+                       outlined for Sonarr — visually distinguishes
+                       movies vs series destination at a glance. #}
+                    {% if !arr_instances.is_empty() %}
+                    <td class="px-4 py-3 whitespace-nowrap">
+                        <div class="flex items-center justify-end gap-1.5 flex-wrap">
+                            {% for a in arr_instances %}
+                            <button hx-post="/decisions/{{ d.id }}/push/{{ a.id }}"
+                                    hx-target="#push-{{ d.id }}-{{ a.id }}"
+                                    hx-swap="outerHTML"
+                                    title="Push para {{ a.name }} ({{ a.kind }})"
+                                    class='{% if a.kind == "radarr" %}brand-gradient text-white{% else %}bg-bg-muted border border-border-strong text-fg-primary{% endif %} inline-flex items-center gap-1 px-2.5 h-7 rounded-md text-[11px] font-semibold'>
+                                <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor">
+                                    <path d="M13 2L4 14h6l-1 8 9-12h-6l1-8z"/>
+                                </svg>
+                                {{ a.name }}
+                            </button>
+                            <span id="push-{{ d.id }}-{{ a.id }}" class="text-[10px] text-fg-muted italic"></span>
+                            {% endfor %}
+                        </div>
+                    </td>
+                    {% endif %}
+                </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
 </div>
 {% endif %}
+
 {% endblock %}

@@ -43,9 +43,9 @@ use crate::search::run_tmdb_search;
 use crate::web::render::html;
 use crate::web::templates::{
     ArrInstanceView, ArrInstancesListPartial, ArrInstancesTemplate, DashboardTemplate,
-    DecisionView, LoginTemplate, ProviderView, ProvidersListPartial, ProvidersTemplate,
-    PushGroupView, PushHistoryView, PushesTemplate, RecentSearchView, ReleasesTemplate,
-    SearchDetailTemplate,
+    DecisionView, ErrorTemplate, LoginTemplate, ProviderView, ProvidersListPartial,
+    ProvidersTemplate, PushGroupView, PushHistoryView, PushesTemplate, RecentSearchView,
+    ReleasesTemplate, SearchDetailTemplate,
 };
 use crate::{AppError, AppState};
 use brarr_core::TmdbId;
@@ -93,8 +93,26 @@ pub fn router(state: AppState, static_dir: &std::path::Path) -> Router {
         .route("/login", get(login_get).post(login_post))
         .route("/healthz", get(healthz))
         .nest_service("/static", ServeDir::new(static_dir))
+        // Branded 404. Without this axum returns a bare `Nothing
+        // matched` text body; the fallback lets us reuse the same
+        // template that powers other error surfaces.
+        .fallback(not_found)
         .layer(TraceLayer::new_for_http())
         .with_state(state)
+}
+
+/// 404 handler — wired as the router's `.fallback`. Returns the
+/// branded error template with HTTP 404.
+async fn not_found() -> Result<Response, AppError> {
+    let mut resp = html(&ErrorTemplate {
+        code: "404".to_string(),
+        title: "Página não encontrada".to_string(),
+        message: "A rota que você acessou não existe ou foi movida.\n\
+                  Talvez você esteja procurando uma busca antiga que já foi limpa do histórico."
+            .to_string(),
+    })?;
+    *resp.status_mut() = StatusCode::NOT_FOUND;
+    Ok(resp)
 }
 
 /// Middleware that gates every protected route on the auth cookie.

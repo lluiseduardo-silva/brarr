@@ -1,57 +1,91 @@
 {% extends "base.html" %}
 {% block title %}*arr — brarr{% endblock %}
 {% block content %}
-<h1 class="text-2xl font-bold mb-1">*arr endpoints</h1>
-<p class="text-sm text-slate-600 mb-4">
-    Sonarr / Radarr para onde brarr empurra releases que cruzam o
-    threshold de score. Modelo autobrr: brarr decide, *arr só baixa.
-</p>
 
-<section class="bg-white rounded-lg shadow p-4 mb-6">
-    <h2 class="text-lg font-semibold mb-2">Adicionar instância</h2>
+<div class="flex items-center justify-between gap-4 mb-6">
+    <div>
+        <h1 class="font-semibold text-[28px] leading-9 text-fg-primary">*arr instances</h1>
+        <p class="text-base text-fg-secondary mt-1">
+            Endpoints Sonarr / Radarr. Modelo autobrr: brarr decide via score, o *arr só baixa.
+        </p>
+    </div>
+    <a href="#new-arr"
+       class="brand-gradient flex items-center gap-2 px-5 h-11 rounded-lg text-white text-base font-semibold whitespace-nowrap"
+       style="box-shadow: 0 8px 20px var(--color-glow);">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round">
+            <path d="M12 5v14M5 12h14"/>
+        </svg>
+        Adicionar instância
+    </a>
+</div>
+
+{# Forward-looking note on Quality Profiles. The current schema still
+   keys off push_threshold integer; P4 of the redesign migrates this
+   to per-profile rules + drops the column. #}
+<div class="flex items-start gap-3 px-4 py-3 mb-6 rounded-lg bg-info-soft border border-info-solid">
+    <div class="shrink-0 w-5 h-5 rounded-full bg-info-solid flex items-center justify-center mt-0.5">
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="3" stroke-linecap="round">
+            <circle cx="12" cy="12" r="10"/><path d="M12 11v6M12 7.5v.5"/>
+        </svg>
+    </div>
+    <p class="text-sm text-info-soft-fg">
+        Threshold integer ainda é a única opção. Quality Profiles
+        substituem este campo na próxima fase —
+        <a href="/profiles" class="font-semibold underline">veja a página em construção</a>.
+    </p>
+</div>
+
+<section id="new-arr" class="card-hairline bg-bg-surface border border-border-default rounded-xl mb-6">
+    <header class="px-5 py-4">
+        <h2 class="text-lg font-semibold text-fg-primary">Adicionar instância *arr</h2>
+    </header>
+    <div class="h-px bg-border-default"></div>
     <form hx-post="/arr-instances"
           hx-target="#arr-instances-list"
           hx-swap="outerHTML"
           hx-on::after-request="this.reset()"
-          class="grid grid-cols-1 md:grid-cols-6 gap-3 items-end">
-        <label class="text-xs uppercase tracking-wide text-slate-500">
-            Nome
-            <input name="name" required class="w-full mt-1 border rounded px-2 py-1 text-sm" placeholder="radarr-main">
+          class="grid grid-cols-1 md:grid-cols-6 gap-3 items-end px-5 py-4">
+        <label class="block">
+            <span class="block mb-1.5 text-xs font-medium uppercase tracking-[0.06em] text-fg-muted">Nome</span>
+            <input name="name" required placeholder="radarr-main"
+                   class="w-full px-3 h-10 rounded-md bg-bg-canvas border border-border-strong text-sm text-fg-primary placeholder:text-fg-muted focus:outline-none focus:border-accent-solid">
         </label>
-        <label class="text-xs uppercase tracking-wide text-slate-500">
-            Tipo
-            <select name="kind" required class="w-full mt-1 border rounded px-2 py-1 text-sm bg-white">
+        <label class="block">
+            <span class="block mb-1.5 text-xs font-medium uppercase tracking-[0.06em] text-fg-muted">Tipo</span>
+            <select name="kind" required
+                    class="w-full px-3 h-10 rounded-md bg-bg-canvas border border-border-strong text-sm text-fg-primary focus:outline-none focus:border-accent-solid">
                 <option value="radarr">Radarr (filmes)</option>
                 <option value="sonarr">Sonarr (séries)</option>
             </select>
         </label>
-        <label class="text-xs uppercase tracking-wide text-slate-500">
-            Base URL
-            <input name="base_url" required type="url" class="w-full mt-1 border rounded px-2 py-1 text-sm" placeholder="http://10.0.1.246:7878/">
+        <label class="block md:col-span-2">
+            <span class="block mb-1.5 text-xs font-medium uppercase tracking-[0.06em] text-fg-muted">Base URL</span>
+            <input name="base_url" required type="url" placeholder="http://10.0.1.246:7878/"
+                   class="w-full px-3 h-10 rounded-md bg-bg-canvas border border-border-strong text-sm text-fg-primary placeholder:text-fg-muted focus:outline-none focus:border-accent-solid">
         </label>
-        <label class="text-xs uppercase tracking-wide text-slate-500">
-            API key
-            <input name="api_key" required type="password" class="w-full mt-1 border rounded px-2 py-1 text-sm">
+        <label class="block">
+            <span class="block mb-1.5 text-xs font-medium uppercase tracking-[0.06em] text-fg-muted">API key</span>
+            <input name="api_key" required type="password"
+                   class="w-full px-3 h-10 rounded-md bg-bg-canvas border border-border-strong text-sm text-fg-primary focus:outline-none focus:border-accent-solid">
         </label>
-        <label class="text-xs uppercase tracking-wide text-slate-500">
-            Score mínimo
-            <input name="push_threshold" type="number" min="0" max="1000" value="150" class="w-full mt-1 border rounded px-2 py-1 text-sm">
-        </label>
-        <button type="submit" class="bg-amber-500 hover:bg-amber-600 text-white text-sm font-semibold px-3 py-2 rounded">
-            Salvar
-        </button>
+        <div class="flex items-end gap-2">
+            <label class="block flex-1">
+                <span class="block mb-1.5 text-xs font-medium uppercase tracking-[0.06em] text-fg-muted">Threshold</span>
+                <input name="push_threshold" type="number" min="0" max="1000" value="150"
+                       class="w-full px-3 h-10 rounded-md bg-bg-canvas border border-border-strong text-sm text-fg-primary font-mono focus:outline-none focus:border-accent-solid">
+            </label>
+            <button type="submit"
+                    class="brand-gradient h-10 px-4 rounded-md text-white text-sm font-semibold whitespace-nowrap">
+                Adicionar
+            </button>
+        </div>
     </form>
-    <p class="text-xs text-slate-500 mt-2">
-        <strong>Score mínimo</strong> (0..1000): só releases com score
-        ≥ esse valor disparam push. Default <strong>150</strong> ≈ "PT-BR
-        audio confirmado + 1 bônus (1080p ou seeders ≥ 50)". Baseline
-        scoring topa em ~230 (PT-BR audio 100 + PT-BR sub 50 + 2160p 20 +
-        HDR 10 + seeders cap 50). Use 0 pra empurrar tudo (debug).
-    </p>
-    <p class="text-xs text-slate-400 mt-1">
-        Base URL = raiz do *arr (ex. <code>http://radarr:7878/</code>).
-        API key = <em>Settings → General → Security → API Key</em> na UI do *arr.
-    </p>
+    <div class="px-5 pb-4 text-xs text-fg-muted leading-relaxed">
+        <strong class="text-fg-secondary">Threshold</strong> (0..1000): só releases com score ≥ esse valor disparam push automático.
+        Default <strong class="text-fg-secondary">150</strong> ≈ "PT-BR audio confirmado + 1 bônus (1080p ou seeders)".
+        Baseline topa em ~230 (PT-BR + leg + 2160p + HDR + seeders cap). Use <strong class="text-fg-secondary">0</strong> pra empurrar tudo (debug).
+        Veja a página <a href="/providers" class="text-accent-soft-fg font-semibold">Providers</a> pra tabela completa de scoring + presets prontos.
+    </div>
 </section>
 
 {% include "partials/arr_instances_list.html" %}

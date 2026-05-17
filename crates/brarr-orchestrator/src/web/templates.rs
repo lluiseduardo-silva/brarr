@@ -216,6 +216,21 @@ pub struct LoginTemplate {
     pub error_message: Option<String>,
 }
 
+/// Centered error page (404 + future 500). The fallback handler in
+/// the router constructs this with the HTTP code that triggered the
+/// fallback so the user sees a branded screen instead of axum's
+/// default `Nothing matched` body.
+#[derive(Debug, Template)]
+#[template(path = "error.html")]
+pub struct ErrorTemplate {
+    /// HTTP status code (e.g. `"404"`, `"500"`).
+    pub code: String,
+    /// Headline (e.g. `"Página não encontrada"`).
+    pub title: String,
+    /// Human-friendly explanation. Supports `\n` for hard wraps.
+    pub message: String,
+}
+
 /// Single-search view at `/searches/{id}`.
 #[derive(Debug, Template)]
 #[template(path = "search_detail.html")]

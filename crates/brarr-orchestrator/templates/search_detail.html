@@ -1,66 +1,139 @@
 {% extends "base.html" %}
 {% block title %}Busca {{ id }} — brarr{% endblock %}
 {% block content %}
-<h1 class="text-2xl font-bold mb-2">Busca</h1>
-<p class="text-sm text-slate-500 mb-4">
-    <span class="font-mono">{{ id }}</span> ·
-    TMDb {{ tmdb_id }} ·
-    submetida em <span class="font-mono">{{ submitted_at }}</span>
-</p>
 
+{# Breadcrumb. #}
+<div class="flex items-center gap-2 mb-3 text-xs text-fg-muted">
+    <a href="/releases" class="hover:text-fg-secondary">Releases</a>
+    <span>/</span>
+    <span class="font-mono font-medium text-fg-secondary">{{ id }}</span>
+</div>
+
+{# Search header card — metadata (TMDb / IMDb / timestamp) + summary
+   counts (total / kept / rejected) split inline. #}
+<section class="card-hairline bg-bg-surface border border-border-default rounded-xl mb-4">
+    <div class="flex items-center justify-between gap-6 px-5 py-5">
+        <div>
+            <div class="flex items-center gap-3 mb-2">
+                <h1 class="text-2xl font-semibold text-fg-primary">Busca</h1>
+                <span class="font-mono text-xs font-semibold px-2 py-0.5 rounded bg-bg-muted text-fg-secondary">{{ id }}</span>
+            </div>
+            <div class="flex items-center gap-2 text-sm">
+                <span class="font-mono text-xs px-2 py-1 rounded bg-bg-muted">
+                    <span class="text-fg-muted font-semibold">tmdb </span>
+                    <span class="text-fg-primary font-semibold">{{ tmdb_id }}</span>
+                </span>
+                <span class="text-fg-muted">·</span>
+                <span class="text-sm text-fg-secondary">submetida em <span class="font-mono text-xs">{{ submitted_at }}</span></span>
+            </div>
+        </div>
+
+        <div class="flex items-center divide-x divide-border-default">
+            <div class="px-6">
+                <p class="text-xs font-medium uppercase tracking-[0.06em] text-fg-muted">Total</p>
+                <p class="font-mono text-[22px] font-semibold text-fg-primary">{{ decisions.len() }}</p>
+            </div>
+            <div class="px-6">
+                <p class="text-xs font-medium uppercase tracking-[0.06em] text-fg-muted">Falhas</p>
+                <p class="font-mono text-[22px] font-semibold text-danger-soft-fg">{{ failures.len() }}</p>
+            </div>
+        </div>
+    </div>
+</section>
+
+{# Failure banner — only renders when at least one provider errored.
+   Stripe + circular icon + per-provider list inside. #}
 {% if !failures.is_empty() %}
-<section class="bg-amber-50 border border-amber-200 rounded-lg p-4 mb-6">
-    <h2 class="font-semibold text-amber-900 mb-2">Providers que falharam</h2>
-    <ul class="list-disc list-inside text-sm text-amber-900">
-        {% for f in failures %}
-        <li><span class="font-mono">{{ f.0 }}</span>: {{ f.1 }}</li>
-        {% endfor %}
-    </ul>
+<section class="flex items-stretch rounded-lg bg-warning-soft border border-warning-solid overflow-hidden mb-4">
+    <div class="w-1 bg-warning-solid shrink-0"></div>
+    <div class="flex items-start gap-3 px-4 py-3 flex-1">
+        <div class="shrink-0 w-8 h-8 rounded-full bg-warning-solid flex items-center justify-center">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5" stroke-linejoin="round">
+                <path d="M12 2L2 21h20L12 2z"/><path d="M12 9v5M12 17.5v.5" stroke-linecap="round"/>
+            </svg>
+        </div>
+        <div class="flex-1">
+            <p class="text-sm font-semibold text-warning-soft-fg mb-1">
+                {{ failures.len() }} provider(s) falharam nesta busca
+            </p>
+            <ul class="text-xs text-warning-soft-fg space-y-0.5">
+                {% for f in failures %}
+                <li><span class="font-mono font-semibold">{{ f.0 }}</span> → {{ f.1 }}</li>
+                {% endfor %}
+            </ul>
+        </div>
+    </div>
 </section>
 {% endif %}
 
 {% if decisions.is_empty() %}
-<p class="text-slate-500 italic">Nenhum release encontrado para esta busca.</p>
+<div class="card-hairline bg-bg-surface border border-border-default rounded-xl px-5 py-10 text-center">
+    <p class="text-fg-muted italic">Nenhum release encontrado para esta busca.</p>
+</div>
 {% else %}
-<div class="bg-white rounded-lg shadow overflow-x-auto">
-    <table class="w-full text-sm">
-        <thead class="bg-slate-100 text-left">
-            <tr>
-                <th class="px-3 py-2">Score</th>
-                <th class="px-3 py-2">Provider</th>
-                <th class="px-3 py-2">Release</th>
-                <th class="px-3 py-2">Tipo</th>
-                <th class="px-3 py-2">Resolução</th>
-                <th class="px-3 py-2">Tamanho</th>
-                <th class="px-3 py-2">Seeders</th>
-                <th class="px-3 py-2">Tags</th>
-                <th class="px-3 py-2">Regras casadas</th>
-                <th class="px-3 py-2">Status</th>
-            </tr>
-        </thead>
-        <tbody>
-        {% for d in decisions %}
-            <tr class="border-t {% if d.rejected %}bg-red-50{% endif %}">
-                <td class="px-3 py-2 font-bold">{{ d.score }}</td>
-                <td class="px-3 py-2">{{ d.provider_name }}</td>
-                <td class="px-3 py-2">{{ d.release_name }}</td>
-                <td class="px-3 py-2">{{ d.kind }}</td>
-                <td class="px-3 py-2">{{ d.resolution }}</td>
-                <td class="px-3 py-2 font-mono text-xs">{{ d.size_human }}</td>
-                <td class="px-3 py-2">{{ d.seeders }}</td>
-                <td class="px-3 py-2 text-xs">{{ d.tags }}</td>
-                <td class="px-3 py-2 text-xs text-slate-700" title="{{ d.matched_rules }}">{{ d.matched_rules }}</td>
-                <td class="px-3 py-2">
-                    {% if d.rejected %}
-                    <span class="badge bg-red-100 text-red-800">rejeitado</span>
-                    {% else %}
-                    <span class="badge bg-emerald-100 text-emerald-800">mantido</span>
-                    {% endif %}
-                </td>
-            </tr>
-        {% endfor %}
-        </tbody>
-    </table>
+<div class="card-hairline bg-bg-surface border border-border-default rounded-xl overflow-hidden">
+    <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+            <thead class="bg-bg-muted">
+                <tr class="text-left">
+                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Score</th>
+                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Provider</th>
+                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Release</th>
+                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Qualidade</th>
+                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Tamanho</th>
+                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Seeders</th>
+                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Regras</th>
+                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Status</th>
+                </tr>
+            </thead>
+            <tbody>
+            {% for d in decisions %}
+                <tr class="border-t border-border-default {% if d.rejected %}bg-danger-soft{% endif %}">
+                    <td class="px-4 py-3 w-[140px]">
+                        <p class="font-mono font-semibold text-base text-fg-primary leading-none">
+                            {{ d.score }}<span class="text-[10px] text-fg-muted font-normal">/1000</span>
+                        </p>
+                        <div class="mt-1.5 h-1 w-[110px] rounded-full bg-bg-muted overflow-hidden">
+                            <div class="brand-gradient h-full" style="width: {{ d.score / 10 }}%;"></div>
+                        </div>
+                    </td>
+
+                    <td class="px-4 py-3"><span class="font-medium text-fg-primary">{{ d.provider_name }}</span></td>
+
+                    <td class="px-4 py-3 max-w-[420px]">
+                        <p class="text-sm font-medium text-fg-primary truncate">{{ d.release_name }}</p>
+                        {% if !d.tags.is_empty() %}
+                        <p class="text-[10px] text-fg-muted font-mono mt-0.5 truncate" title="{{ d.tags }}">{{ d.tags }}</p>
+                        {% endif %}
+                    </td>
+
+                    <td class="px-4 py-3 font-mono text-sm text-fg-primary">{{ d.resolution }}</td>
+                    <td class="px-4 py-3 font-mono text-xs text-fg-secondary">{{ d.size_human }}</td>
+                    <td class="px-4 py-3 font-mono text-sm text-fg-secondary">{{ d.seeders }}</td>
+
+                    <td class="px-4 py-3 text-xs text-fg-secondary max-w-[280px]">
+                        <span class="truncate block" title="{{ d.matched_rules }}">{{ d.matched_rules }}</span>
+                    </td>
+
+                    <td class="px-4 py-3">
+                        {% if d.rejected %}
+                        <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-danger-soft text-danger-soft-fg border border-danger-solid">
+                            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+                            rejeitado
+                        </span>
+                        {% else %}
+                        <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-success-soft text-success-soft-fg border border-success-solid">
+                            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5L20 7"/></svg>
+                            mantido
+                        </span>
+                        {% endif %}
+                    </td>
+                </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
 </div>
 {% endif %}
+
 {% endblock %}

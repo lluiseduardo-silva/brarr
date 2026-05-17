@@ -1,108 +1,165 @@
 {% extends "base.html" %}
 {% block title %}Dashboard — brarr{% endblock %}
 {% block content %}
-<h1 class="text-2xl font-bold mb-4">Dashboard</h1>
 
-<div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
-    <div class="bg-white rounded-lg shadow p-4">
-        <p class="text-xs uppercase tracking-wide text-slate-500">Providers configurados</p>
-        <p class="text-3xl font-bold">{{ provider_count }}</p>
+{# Greet row + primary CTA. The CTA will swap to an HTMX-loaded modal
+   once the Nova Busca flow lands in P3; for now it points at the
+   submit endpoint with no body so the user still has a way to start
+   the redesign-only build. #}
+<div class="flex items-center justify-between gap-4 mb-6">
+    <div>
+        <h1 class="font-semibold text-[28px] leading-9 text-fg-primary">Bem-vindo de volta</h1>
+        <p class="text-base text-fg-secondary mt-1">Veja como seus providers e *arr estão performando hoje.</p>
     </div>
-    <div class="bg-white rounded-lg shadow p-4">
-        <p class="text-xs uppercase tracking-wide text-slate-500">Buscas recentes</p>
-        <p class="text-3xl font-bold">{{ search_count }}</p>
+    <a href="/#new-search"
+       class="brand-gradient flex items-center gap-2 px-5 h-11 rounded-lg text-white text-base font-semibold whitespace-nowrap"
+       style="box-shadow: 0 8px 20px var(--color-glow);">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="white">
+            <path d="M12 3l2 6 6 2-6 2-2 6-2-6-6-2 6-2z"/>
+        </svg>
+        Nova busca
+    </a>
+</div>
+
+{# Stat cards. Only the metrics we already compute server-side render
+   with a real value; the rest are placeholders pending instrumentation
+   (push success rate, week-over-week delta, sparkline buckets). #}
+<div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+    <div class="card-hairline bg-bg-surface border border-border-default rounded-xl p-5">
+        <div class="flex items-center justify-between mb-2">
+            <span class="text-xs font-medium uppercase tracking-[0.06em] text-fg-muted">Providers configurados</span>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="text-success-soft-fg">
+                <path d="M3 17l6-6 4 4 8-8M14 7h7v7"/>
+            </svg>
+        </div>
+        <p class="brand-gradient-text font-semibold text-[36px] leading-10 -tracking-[0.02em]">{{ provider_count }}</p>
+        <p class="text-xs text-fg-muted mt-1">Ativos no fan-out de busca</p>
     </div>
-    <div class="bg-white rounded-lg shadow p-4">
-        <form hx-post="/searches" hx-swap="none" class="space-y-2">
-            <div class="grid grid-cols-2 gap-2">
-                <div>
-                    <label class="text-xs uppercase tracking-wide text-slate-500" for="tmdb_id">TMDb</label>
-                    <input id="tmdb_id" name="tmdb_id" type="number" min="1"
-                           class="w-full mt-1 border rounded px-2 py-1 text-sm" placeholder="ex. 603">
-                </div>
-                <div>
-                    <label class="text-xs uppercase tracking-wide text-slate-500" for="imdb_id">IMDb</label>
-                    <input id="imdb_id" name="imdb_id" type="text"
-                           class="w-full mt-1 border rounded px-2 py-1 text-sm" placeholder="ex. tt0133093">
-                </div>
-            </div>
-            <button type="submit" class="w-full bg-amber-500 hover:bg-amber-600 text-white text-sm font-semibold px-3 py-1 rounded">
-                Buscar
-            </button>
-            <p class="text-xs text-slate-500">
-                Pelo menos um id. TMDb cobre UNIT3D; IMDb cobre Newznab/Torznab.
-            </p>
-        </form>
+
+    <div class="card-hairline bg-bg-surface border border-border-default rounded-xl p-5">
+        <div class="flex items-center justify-between mb-2">
+            <span class="text-xs font-medium uppercase tracking-[0.06em] text-fg-muted">Buscas registradas</span>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="text-success-soft-fg">
+                <path d="M3 17l6-6 4 4 8-8M14 7h7v7"/>
+            </svg>
+        </div>
+        <p class="brand-gradient-text font-semibold text-[36px] leading-10 -tracking-[0.02em]">{{ search_count }}</p>
+        <p class="text-xs text-fg-muted mt-1">Total no histórico SQLite</p>
+    </div>
+
+    <div class="card-hairline bg-bg-surface border border-border-default rounded-xl p-5">
+        <div class="flex items-center justify-between mb-2">
+            <span class="text-xs font-medium uppercase tracking-[0.06em] text-fg-muted">Decisões no painel</span>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="text-success-soft-fg">
+                <path d="M3 17l6-6 4 4 8-8M14 7h7v7"/>
+            </svg>
+        </div>
+        <p class="brand-gradient-text font-semibold text-[36px] leading-10 -tracking-[0.02em]">{{ recent_decisions.len() }}</p>
+        <p class="text-xs text-fg-muted mt-1">Mais recentes (todas as buscas)</p>
     </div>
 </div>
 
-<section class="mb-8">
-    <h2 class="text-lg font-semibold mb-2">Buscas recentes</h2>
-    {% if recent_searches.is_empty() %}
-    <p class="text-slate-500 italic">Ainda não há buscas registradas.</p>
-    {% else %}
-    <div class="bg-white rounded-lg shadow overflow-x-auto">
-        <table class="w-full text-sm">
-            <thead class="bg-slate-100 text-left">
-                <tr>
-                    <th class="px-3 py-2">Quando</th>
-                    <th class="px-3 py-2">TMDb</th>
-                    <th class="px-3 py-2">Resultados</th>
-                    <th class="px-3 py-2">ID</th>
-                </tr>
-            </thead>
-            <tbody>
-            {% for s in recent_searches %}
-                <tr class="border-t">
-                    <td class="px-3 py-2 font-mono text-xs">{{ s.submitted_at }}</td>
-                    <td class="px-3 py-2">{{ s.tmdb_id }}</td>
-                    <td class="px-3 py-2">{{ s.result_count }}</td>
-                    <td class="px-3 py-2 font-mono text-xs">
-                        <a class="text-blue-600 hover:underline" href="/searches/{{ s.id }}">{{ s.id }}</a>
-                    </td>
-                </tr>
-            {% endfor %}
-            </tbody>
-        </table>
-    </div>
-    {% endif %}
-</section>
+{# Two-column grid: Buscas recentes (left) · Decisões recentes (right).
+   On narrow screens the columns stack. #}
+<div class="grid grid-cols-1 md:grid-cols-2 gap-4">
 
-<section>
-    <h2 class="text-lg font-semibold mb-2">Decisões recentes</h2>
-    {% if recent_decisions.is_empty() %}
-    <p class="text-slate-500 italic">Ainda não há decisões persistidas.</p>
-    {% else %}
-    <div class="bg-white rounded-lg shadow overflow-x-auto">
-        <table class="w-full text-sm">
-            <thead class="bg-slate-100 text-left">
-                <tr>
-                    <th class="px-3 py-2">Score</th>
-                    <th class="px-3 py-2">Provider</th>
-                    <th class="px-3 py-2">Release</th>
-                    <th class="px-3 py-2">Resolução</th>
-                    <th class="px-3 py-2">Tamanho</th>
-                    <th class="px-3 py-2">Seeders</th>
-                    <th class="px-3 py-2">Tags</th>
-                    <th class="px-3 py-2">Regras</th>
-                </tr>
-            </thead>
-            <tbody>
-            {% for d in recent_decisions %}
-                <tr class="border-t">
-                    <td class="px-3 py-2 font-bold">{{ d.score }}</td>
-                    <td class="px-3 py-2">{{ d.provider_name }}</td>
-                    <td class="px-3 py-2">{{ d.release_name }}</td>
-                    <td class="px-3 py-2">{{ d.resolution }}</td>
-                    <td class="px-3 py-2 font-mono text-xs">{{ d.size_human }}</td>
-                    <td class="px-3 py-2">{{ d.seeders }}</td>
-                    <td class="px-3 py-2 text-xs">{{ d.tags }}</td>
-                    <td class="px-3 py-2 text-xs text-slate-700" title="{{ d.matched_rules }}">{{ d.matched_rules }}</td>
-                </tr>
-            {% endfor %}
-            </tbody>
-        </table>
+    <div class="card-hairline bg-bg-surface border border-border-default rounded-xl">
+        <div class="flex items-center justify-between px-5 py-4">
+            <h2 class="text-lg font-semibold text-fg-primary">Buscas recentes</h2>
+            <span class="text-xs text-fg-muted">últimas {{ recent_searches.len() }}</span>
+        </div>
+        <div class="h-px bg-border-default"></div>
+        {% if recent_searches.is_empty() %}
+        <p class="px-5 py-6 text-sm italic text-fg-muted">Ainda não há buscas registradas.</p>
+        {% else %}
+        <ul>
+        {% for s in recent_searches %}
+            <li class="flex items-center justify-between gap-3 px-5 py-3 {% if !loop.first %}border-t border-border-default{% endif %}">
+                <div class="flex items-center gap-3 min-w-0">
+                    <span class="font-mono text-xs text-fg-muted whitespace-nowrap">{{ s.submitted_at }}</span>
+                    <span class="font-mono text-[11px] px-2 py-0.5 rounded bg-bg-muted text-fg-secondary whitespace-nowrap">tmdb:{{ s.tmdb_id }}</span>
+                    <span class="text-sm text-fg-primary font-medium whitespace-nowrap">{{ s.result_count }} resultados</span>
+                </div>
+                <a href="/searches/{{ s.id }}"
+                   class="font-mono text-xs text-accent-soft-fg hover:text-accent-solid truncate max-w-[120px]">{{ s.id }}</a>
+            </li>
+        {% endfor %}
+        </ul>
+        {% endif %}
     </div>
-    {% endif %}
-</section>
+
+    <div class="card-hairline bg-bg-surface border border-border-default rounded-xl">
+        <div class="flex items-center justify-between px-5 py-4">
+            <h2 class="text-lg font-semibold text-fg-primary">Decisões recentes</h2>
+            <span class="text-xs text-fg-muted">últimas {{ recent_decisions.len() }}</span>
+        </div>
+        <div class="h-px bg-border-default"></div>
+        {% if recent_decisions.is_empty() %}
+        <p class="px-5 py-6 text-sm italic text-fg-muted">Ainda não há decisões persistidas.</p>
+        {% else %}
+        <ul>
+        {% for d in recent_decisions %}
+            <li class="flex items-center gap-3 px-5 py-3 {% if !loop.first %}border-t border-border-default{% endif %}">
+                <div class="shrink-0 w-[68px]">
+                    <p class="font-mono text-sm font-semibold text-fg-primary leading-none">{{ d.score }}</p>
+                    <div class="mt-1 h-1 w-full rounded-full bg-bg-muted overflow-hidden">
+                        {# 4px gradient bar scaled to score/1000. Width
+                           is inline because we do not pre-compute the
+                           fraction server-side; Tailwind cannot generate
+                           arbitrary CSS calc() utilities at compile time
+                           and the dashboard ships at most 10 rows so
+                           inline style is the smaller call. #}
+                        {# Inline width = score/10 (integer %); parent
+                           clips overflow so scores above 1000 saturate
+                           at 100% instead of breaking the layout. #}
+                        <div class="brand-gradient h-full" style="width: {{ d.score / 10 }}%;"></div>
+                    </div>
+                </div>
+                <div class="flex-1 min-w-0">
+                    <p class="text-sm font-medium text-fg-primary truncate">{{ d.release_name }}</p>
+                    <p class="text-xs text-fg-muted truncate">{{ d.provider_name }} · {{ d.resolution }} · {{ d.size_human }}</p>
+                </div>
+                {% if !d.rejected %}
+                <span class="shrink-0 inline-flex items-center gap-1 px-2 py-1 rounded text-[10px] font-semibold bg-success-soft text-success-soft-fg">
+                    <span class="w-1.5 h-1.5 rounded-full bg-success-solid"></span>
+                    mantido
+                </span>
+                {% else %}
+                <span class="shrink-0 inline-flex items-center gap-1 px-2 py-1 rounded text-[10px] font-semibold bg-danger-soft text-danger-soft-fg">
+                    <span class="w-1.5 h-1.5 rounded-full bg-danger-solid"></span>
+                    rejeitado
+                </span>
+                {% endif %}
+            </li>
+        {% endfor %}
+        </ul>
+        {% endif %}
+    </div>
+
+</div>
+
+{# Inline quick-search form preserved while the Nova Busca modal (P3)
+   is not yet wired. Renders below the fold so the hero CTA above is
+   the primary entry point. #}
+<details id="new-search" class="mt-6 card-hairline bg-bg-surface border border-border-default rounded-xl">
+    <summary class="px-5 py-4 cursor-pointer text-sm font-semibold text-fg-primary">Quick search (form inline)</summary>
+    <div class="h-px bg-border-default"></div>
+    <form hx-post="/searches" hx-swap="none" class="px-5 py-4 flex items-end gap-3">
+        <label class="flex-1">
+            <span class="block mb-1.5 text-xs font-medium uppercase tracking-[0.06em] text-fg-muted">TMDB ID</span>
+            <input name="tmdb_id" type="number" min="1" placeholder="ex. 603"
+                   class="w-full px-3 h-10 rounded-md bg-bg-canvas border border-border-strong text-sm text-fg-primary placeholder:text-fg-muted focus:outline-none focus:border-accent-solid">
+        </label>
+        <label class="flex-1">
+            <span class="block mb-1.5 text-xs font-medium uppercase tracking-[0.06em] text-fg-muted">IMDB ID</span>
+            <input name="imdb_id" type="text" placeholder="ex. tt0133093"
+                   class="w-full px-3 h-10 rounded-md bg-bg-canvas border border-border-strong text-sm text-fg-primary placeholder:text-fg-muted focus:outline-none focus:border-accent-solid">
+        </label>
+        <button type="submit"
+                class="brand-gradient flex items-center gap-2 h-10 px-4 rounded-md text-white text-sm font-semibold whitespace-nowrap">
+            Buscar
+        </button>
+    </form>
+</details>
+
 {% endblock %}
