@@ -366,6 +366,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn preset_rules_score_releases_identically_to_engine_baseline() {
+        // Stronger assertion than the count check: build an engine from
+        // each preset's persisted rules and verify it produces the same
+        // score as Engine::baseline() across a representative grid of
+        // releases. Locks the migration's hand-rolled JSON to the
+        // Rust-side `RuleSet::baseline()` contract so a future tweak
+        // to either side fails loud.
+        use brarr_core::{
+            Language, Release, ReleaseEnrichment, ReleaseKind, Resolution, TrackerSource,
+        };
+        use brarr_decision_service::Engine;
+
+        let pool = open_memory().await.unwrap();
+        let presets = list_all(&pool).await.unwrap();
+        let tracker =
+            TrackerSource::new("t", url::Url::parse("https://t.example/").unwrap()).unwrap();
+        let mut grid = Vec::new();
+        for (lang_set, resolution, hdr) in [
+            (vec![Language::PtBr], Resolution::P1080, false),
+            (vec![Language::PtBr, Language::En], Resolution::P2160, true),
+            (vec![Language::Pt], Resolution::P720, false),
+            (vec![Language::En], Resolution::P1080, false),
+            (vec![], Resolution::Sd, false),
+        ] {
+            let mut r =
+                Release::new("1", tracker.clone(), "x", ReleaseKind::WebDl, resolution, 0).unwrap();
+            r.seeders = 0;
+            r.enrichment = Some(ReleaseEnrichment {
+                audio_languages: lang_set,
+                subtitle_languages: vec![],
+                has_hdr: hdr,
+                ..ReleaseEnrichment::default()
+            });
+            grid.push(r);
+        }
+
+        let baseline = Engine::baseline();
+        for preset in &presets {
+            let preset_engine = Engine::from_profile_rules(preset.rules.clone());
+            for (i, release) in grid.iter().enumerate() {
+                let expected = baseline.evaluate(release).score.get();
+                let got = preset_engine.evaluate(release).score.get();
+                assert_eq!(
+                    got, expected,
+                    "preset {} grid[{}]: backfilled rules scored {} but baseline scored {}",
+                    preset.name, i, got, expected,
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn update_rules_persists_and_roundtrips() {
         use brarr_decision_service::{Condition, Rule, RuleSet};
         let pool = open_memory().await.unwrap();
