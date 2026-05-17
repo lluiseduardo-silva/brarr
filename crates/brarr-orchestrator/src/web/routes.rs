@@ -44,7 +44,8 @@ use crate::web::render::html;
 use crate::web::templates::{
     ArrInstanceView, ArrInstancesListPartial, ArrInstancesTemplate, DashboardTemplate,
     DecisionView, LoginTemplate, ProviderView, ProvidersListPartial, ProvidersTemplate,
-    PushHistoryView, PushesTemplate, RecentSearchView, ReleasesTemplate, SearchDetailTemplate,
+    PushGroupView, PushHistoryView, PushesTemplate, RecentSearchView, ReleasesTemplate,
+    SearchDetailTemplate,
 };
 use crate::{AppError, AppState};
 use brarr_core::TmdbId;
@@ -634,9 +635,67 @@ fn render_push_badge(
 }
 
 async fn pushes_index(State(state): State<AppState>) -> Result<Response, AppError> {
-    let rows = push_history::recent(state.pool(), 100).await?;
-    let pushes = rows.into_iter().map(push_history_view).collect();
-    html(&PushesTemplate { pushes })
+    let rows = push_history::recent(state.pool(), 500).await?;
+    let groups = group_pushes(rows);
+    html(&PushesTemplate { groups })
+}
+
+/// Group flat push_history rows by (release_name, arr_instance_name)
+/// so repeat attempts on the same content cluster under one header
+/// in the UI. Order: groups by latest attempt DESC, attempts inside
+/// each group newest-first.
+fn group_pushes(rows: Vec<crate::db::push_history::PushHistoryRow>) -> Vec<PushGroupView> {
+    use std::collections::BTreeMap;
+
+    // Key preserves first-seen order; we rebuild order at the end by
+    // the freshest attempt timestamp per group.
+    let mut by_key: BTreeMap<(String, String), Vec<crate::db::push_history::PushHistoryRow>> =
+        BTreeMap::new();
+    for row in rows {
+        let key = (row.release_name.clone(), row.arr_instance_name.clone());
+        by_key.entry(key).or_default().push(row);
+    }
+    let mut groups: Vec<PushGroupView> = by_key
+        .into_iter()
+        .map(|((release_name, arr_name), mut attempts)| {
+            // Newest attempt first inside the group.
+            attempts.sort_by_key(|a| std::cmp::Reverse(a.pushed_at));
+            let attempt_count = attempts.len();
+            let latest = attempts
+                .iter()
+                .map(|a| a.pushed_at)
+                .max()
+                .unwrap_or_else(brarr_core::OffsetDateTime::now_utc);
+            let any_ok = attempts
+                .iter()
+                .any(|a| matches!(a.status, crate::db::push_history::PushStatus::Ok));
+            let provider_name = attempts
+                .first()
+                .map(|a| a.provider_name.clone())
+                .unwrap_or_default();
+            let arr_kind = attempts
+                .first()
+                .map(|a| a.arr_kind.label().to_string())
+                .unwrap_or_default();
+            let attempts = attempts.into_iter().map(push_history_view).collect();
+            PushGroupView {
+                release_name,
+                provider_name,
+                arr_name,
+                arr_kind,
+                attempt_count,
+                latest_at: latest
+                    .format(&Iso8601::DEFAULT)
+                    .unwrap_or_else(|_| String::from("?")),
+                latest_at_unix: latest.unix_timestamp(),
+                any_ok,
+                attempts,
+            }
+        })
+        .collect();
+    // Freshest group first.
+    groups.sort_by_key(|g| std::cmp::Reverse(g.latest_at_unix));
+    groups
 }
 
 fn push_history_view(row: crate::db::push_history::PushHistoryRow) -> PushHistoryView {

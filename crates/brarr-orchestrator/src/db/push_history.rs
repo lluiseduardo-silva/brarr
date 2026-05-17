@@ -86,6 +86,16 @@ pub struct PushHistoryRow {
     /// means brarr couldn't parse the body (legacy rows, transport
     /// errors, or *arr-side error pages).
     pub rejections: Option<Vec<String>>,
+    /// Release title pulled from the parent `decisions` row via JOIN.
+    /// Used by the `/pushes` UI to group multiple attempts of the same
+    /// release under a single header — same release pushed three times
+    /// = one collapsible row, not three siblings cluttering the table.
+    /// Empty string only when the decision was deleted before the row
+    /// was read (shouldn't happen in practice — `ON DELETE CASCADE`
+    /// drops push_history first).
+    pub release_name: String,
+    /// Provider name snapshot from the parent `decisions` row.
+    pub provider_name: String,
 }
 
 /// Bundle of values used to insert one push history row.
@@ -141,18 +151,36 @@ pub async fn insert(pool: &Pool, new: NewPushHistory<'_>) -> Result<PushHistoryR
     .bind(rejections_json.as_deref())
     .execute(pool)
     .await?;
-    Ok(PushHistoryRow {
-        id,
-        decision_id: new.decision_id,
-        arr_instance_id: Some(new.arr_instance_id),
-        arr_instance_name: new.arr_instance_name.to_string(),
-        arr_kind: new.arr_kind,
-        pushed_at: now,
-        status: new.status,
-        http_status: new.http_status,
-        response_body: new.response_body.map(String::from),
-        rejections: new.rejections,
-    })
+    // Re-read the row through `get_by_id` so the JOIN-derived
+    // release_name / provider_name fields are populated. Cheap (PK
+    // lookup) and keeps the in-memory row identical to what a later
+    // /pushes page query would surface.
+    get_by_id(pool, id).await
+}
+
+/// Fetch one row by id. Used internally by `insert` to refresh the
+/// row through the JOIN that populates `release_name` /
+/// `provider_name`.
+///
+/// # Errors
+///
+/// Returns [`AppError::NotFound`] when the id is missing,
+/// [`AppError::Database`] on SQL failure.
+pub async fn get_by_id(pool: &Pool, id: Uuid) -> Result<PushHistoryRow, AppError> {
+    let row_opt = sqlx::query(
+        "SELECT id, decision_id, arr_instance_id, arr_instance_name, arr_kind, \
+                pushed_at, status, http_status, response_body, rejections_json, \
+                (SELECT release_name FROM decisions WHERE id = decision_id) AS release_name, \
+                (SELECT provider_name FROM decisions WHERE id = decision_id) AS provider_name \
+         FROM push_history WHERE id = ?",
+    )
+    .bind(id.to_string())
+    .fetch_optional(pool)
+    .await?;
+    match row_opt {
+        Some(row) => row_to_push(&row),
+        None => Err(AppError::NotFound(format!("push_history {id}"))),
+    }
 }
 
 /// Most recent `limit` push rows across all decisions. Used by the
@@ -169,7 +197,9 @@ pub async fn recent(pool: &Pool, limit: u32) -> Result<Vec<PushHistoryRow>, AppE
     };
     let rows = sqlx::query(
         "SELECT id, decision_id, arr_instance_id, arr_instance_name, arr_kind, \
-                pushed_at, status, http_status, response_body, rejections_json \
+                pushed_at, status, http_status, response_body, rejections_json, \
+                (SELECT release_name FROM decisions WHERE id = decision_id) AS release_name, \
+                (SELECT provider_name FROM decisions WHERE id = decision_id) AS provider_name \
          FROM push_history ORDER BY pushed_at DESC LIMIT ?",
     )
     .bind(i64::from(limit))
@@ -189,7 +219,9 @@ pub async fn list_for_decision(
 ) -> Result<Vec<PushHistoryRow>, AppError> {
     let rows = sqlx::query(
         "SELECT id, decision_id, arr_instance_id, arr_instance_name, arr_kind, \
-                pushed_at, status, http_status, response_body, rejections_json \
+                pushed_at, status, http_status, response_body, rejections_json, \
+                (SELECT release_name FROM decisions WHERE id = decision_id) AS release_name, \
+                (SELECT provider_name FROM decisions WHERE id = decision_id) AS provider_name \
          FROM push_history WHERE decision_id = ? ORDER BY pushed_at ASC",
     )
     .bind(decision_id.to_string())
@@ -316,6 +348,8 @@ fn row_to_push(row: &SqliteRow) -> Result<PushHistoryRow, AppError> {
         http_status,
         response_body: row.try_get("response_body")?,
         rejections,
+        release_name: row.try_get("release_name").unwrap_or_default(),
+        provider_name: row.try_get("provider_name").unwrap_or_default(),
     })
 }
 

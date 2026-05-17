@@ -133,12 +133,40 @@ pub struct ArrInstancesListPartial {
     pub instances: Vec<ArrInstanceView>,
 }
 
-/// `/pushes` view — recent push attempts to any configured *arr.
+/// `/pushes` view — recent push attempts grouped by release + *arr.
 #[derive(Debug, Template)]
 #[template(path = "pushes.html")]
 pub struct PushesTemplate {
-    /// Most recent rows from `push_history`, newest first.
-    pub pushes: Vec<PushHistoryView>,
+    /// One entry per (release, *arr) pair, newest cluster first.
+    /// Repeat attempts on the same content render as a single
+    /// collapsible group instead of N sibling rows in the table.
+    pub groups: Vec<PushGroupView>,
+}
+
+/// Cluster of push attempts targeting the same `(release, *arr)`.
+#[derive(Debug)]
+pub struct PushGroupView {
+    /// Release title (from `decisions.release_name`).
+    pub release_name: String,
+    /// Provider that supplied this release.
+    pub provider_name: String,
+    /// *arr instance the cluster pushed to.
+    pub arr_name: String,
+    /// `"sonarr"` / `"radarr"`.
+    pub arr_kind: String,
+    /// Total attempts in the cluster.
+    pub attempt_count: usize,
+    /// ISO-8601 timestamp of the freshest attempt — used as the
+    /// visible header line.
+    pub latest_at: String,
+    /// Same as `latest_at` as Unix seconds — used internally for
+    /// sorting clusters newest-first.
+    pub latest_at_unix: i64,
+    /// `true` when at least one attempt in the cluster succeeded
+    /// (HTTP 200, no `rejections`). Drives the badge colour.
+    pub any_ok: bool,
+    /// Individual attempts, newest first.
+    pub attempts: Vec<PushHistoryView>,
 }
 
 /// Single row in the push history page.

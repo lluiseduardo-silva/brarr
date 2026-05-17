@@ -3,76 +3,84 @@
 {% block content %}
 <h1 class="text-2xl font-bold mb-1">Histórico de push</h1>
 <p class="text-sm text-slate-600 mb-4">
-    Cada linha = uma vez que brarr empurrou uma decisão pra um *arr.
-    Status <code>ok</code> = *arr aceitou; <code>http</code> = *arr
-    rejeitou (veja motivo no tooltip); <code>net</code> = brarr não
-    conseguiu falar com o *arr.
+    Agrupado por release × *arr. Clica num grupo pra ver tentativas
+    individuais. Status <code>ok</code> = *arr aceitou; <code>http</code> = *arr
+    rejeitou (motivo nas tentativas); <code>net</code> = brarr não conseguiu
+    falar com o *arr.
 </p>
 
-<section class="bg-white rounded-lg shadow overflow-x-auto">
-    {% if pushes.is_empty() %}
-    <p class="p-4 text-slate-500 italic">Nenhum push registrado ainda. Use o botão <em>push</em> em <a href="/releases" class="text-blue-600 hover:underline">releases</a> ou aguarde o auto-push do scheduler.</p>
-    {% else %}
-    <table class="w-full text-sm">
-        <thead class="bg-slate-100 text-left">
-            <tr>
-                <th class="px-3 py-2">Quando</th>
-                <th class="px-3 py-2">*arr</th>
-                <th class="px-3 py-2">Decision</th>
-                <th class="px-3 py-2">Status</th>
-                <th class="px-3 py-2">HTTP</th>
-                <th class="px-3 py-2">Resposta</th>
-            </tr>
-        </thead>
-        <tbody>
-        {% for p in pushes %}
-            <tr class="border-t">
-                <td class="px-3 py-2 font-mono text-xs">{{ p.pushed_at }}</td>
-                <td class="px-3 py-2">
-                    <span class="font-medium">{{ p.arr_instance_name }}</span>
-                    <span class="text-xs text-slate-500 ml-1">({{ p.arr_kind }})</span>
-                </td>
-                <td class="px-3 py-2 font-mono text-xs text-slate-500">
-                    {{ p.decision_id }}
-                </td>
-                <td class="px-3 py-2">
-                    {% if p.status == "ok" %}
-                    <span class="badge bg-emerald-100 text-emerald-800">ok</span>
-                    {% else if p.status == "http_error" %}
-                    <span class="badge bg-red-100 text-red-800">http</span>
-                    {% else %}
-                    <span class="badge bg-amber-100 text-amber-800">net</span>
-                    {% endif %}
-                </td>
-                <td class="px-3 py-2 font-mono text-xs">
-                    {% match p.http_status %}
-                    {% when Some with (s) %}{{ s }}
-                    {% when None %}—
-                    {% endmatch %}
-                </td>
-                <td class="px-3 py-2 text-xs max-w-md">
-                    {% if p.rejections.is_empty() %}
+{% if groups.is_empty() %}
+<p class="text-slate-500 italic bg-white rounded-lg shadow p-4">Nenhum push registrado ainda. Use o botão <em>push</em> em <a href="/releases" class="text-blue-600 hover:underline">releases</a> ou aguarde o auto-push do scheduler.</p>
+{% else %}
+<div class="space-y-2">
+{% for g in groups %}
+<details class="bg-white rounded-lg shadow">
+    <summary class="cursor-pointer px-4 py-3 flex items-center gap-3 hover:bg-slate-50">
+        {% if g.any_ok %}
+        <span class="badge bg-emerald-100 text-emerald-800">ok</span>
+        {% else %}
+        <span class="badge bg-red-100 text-red-800">{{ g.attempt_count }}× sem sucesso</span>
+        {% endif %}
+        <span class="font-medium truncate" title="{{ g.release_name }}">{{ g.release_name }}</span>
+        <span class="text-xs text-slate-500">→</span>
+        <span class="text-xs font-medium">{{ g.arr_name }}</span>
+        <span class="text-xs text-slate-500">({{ g.arr_kind }})</span>
+        <span class="text-xs text-slate-400">via {{ g.provider_name }}</span>
+        <span class="text-xs text-slate-400 ml-auto font-mono">{{ g.latest_at }}</span>
+        <span class="text-xs text-slate-500">{{ g.attempt_count }} tentativa{% if g.attempt_count != 1 %}s{% endif %}</span>
+    </summary>
+    <div class="border-t overflow-x-auto">
+        <table class="w-full text-sm">
+            <thead class="bg-slate-50 text-left">
+                <tr>
+                    <th class="px-3 py-2">Quando</th>
+                    <th class="px-3 py-2">Status</th>
+                    <th class="px-3 py-2">HTTP</th>
+                    <th class="px-3 py-2">Resposta</th>
+                </tr>
+            </thead>
+            <tbody>
+            {% for p in g.attempts %}
+                <tr class="border-t">
+                    <td class="px-3 py-2 font-mono text-xs whitespace-nowrap">{{ p.pushed_at }}</td>
+                    <td class="px-3 py-2">
                         {% if p.status == "ok" %}
-                        <span class="text-emerald-700 italic">*arr aceitou — grab disparado</span>
+                        <span class="badge bg-emerald-100 text-emerald-800">ok</span>
+                        {% else if p.status == "http_error" %}
+                        <span class="badge bg-red-100 text-red-800">http</span>
                         {% else %}
-                        <span class="text-slate-500 italic truncate" title="{{ p.response_body }}">{{ p.response_body }}</span>
+                        <span class="badge bg-amber-100 text-amber-800">net</span>
                         {% endif %}
-                    {% else %}
-                    <details>
-                        <summary class="cursor-pointer text-red-700">{{ p.rejections.len() }} rejection{% if p.rejections.len() != 1 %}s{% endif %} do *arr</summary>
-                        <ul class="mt-1 ml-3 list-disc text-slate-700 space-y-1">
+                    </td>
+                    <td class="px-3 py-2 font-mono text-xs">
+                        {% match p.http_status %}
+                        {% when Some with (s) %}{{ s }}
+                        {% when None %}—
+                        {% endmatch %}
+                    </td>
+                    <td class="px-3 py-2 text-xs max-w-md">
+                        {% if p.rejections.is_empty() %}
+                            {% if p.status == "ok" %}
+                            <span class="text-emerald-700 italic">*arr aceitou — grab disparado</span>
+                            {% else %}
+                            <span class="text-slate-500 italic truncate" title="{{ p.response_body }}">{{ p.response_body }}</span>
+                            {% endif %}
+                        {% else %}
+                        <ul class="ml-3 list-disc text-slate-700 space-y-1">
                             {% for r in p.rejections %}
                             <li>{{ r }}</li>
                             {% endfor %}
                         </ul>
-                    </details>
-                    {% endif %}
-                </td>
-            </tr>
-        {% endfor %}
-        </tbody>
-    </table>
-    {% endif %}
-</section>
+                        {% endif %}
+                    </td>
+                </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</details>
+{% endfor %}
+</div>
+{% endif %}
 
 {% endblock %}
