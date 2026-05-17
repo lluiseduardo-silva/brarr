@@ -183,32 +183,19 @@ async fn run_once_radarr(state: &AppState, arr: &ArrInstanceRow) -> Result<PollS
         summary.searched += 1;
         match run_search(state, keys).await {
             Ok(outcome) => {
-                if let Some(decision) = outcome
-                    .decisions
-                    .iter()
-                    .find(|d| d.score >= arr.push_threshold)
-                {
-                    if push_history::already_pushed(state.pool(), decision.id, arr.id).await? {
-                        debug!(
+                if let Some(decision) = pick_pushable(state, arr, &outcome.decisions).await? {
+                    match push_decision(state, decision, arr, &base_url).await {
+                        Ok(row) => {
+                            if matches!(row.status, push_history::PushStatus::Ok) {
+                                summary.pushed += 1;
+                            }
+                        }
+                        Err(e) => warn!(
                             target: "brarr_orchestrator::poll",
                             decision_id = %decision.id,
-                            arr_name = %arr.name,
-                            "already pushed, skipping"
-                        );
-                    } else {
-                        match push_decision(state, decision, arr, &base_url).await {
-                            Ok(row) => {
-                                if matches!(row.status, push_history::PushStatus::Ok) {
-                                    summary.pushed += 1;
-                                }
-                            }
-                            Err(e) => warn!(
-                                target: "brarr_orchestrator::poll",
-                                decision_id = %decision.id,
-                                error = %e,
-                                "push failed at DB layer"
-                            ),
-                        }
+                            error = %e,
+                            "push failed at DB layer"
+                        ),
                     }
                 }
             }
@@ -229,6 +216,82 @@ async fn run_once_radarr(state: &AppState, arr: &ArrInstanceRow) -> Result<PollS
         }
     }
     Ok(summary)
+}
+
+/// Pick the highest-scoring decision that's eligible for push.
+///
+/// Eligibility cascade (cheapest checks first):
+///   1. Score must meet `arr.push_threshold`. Decisions come sorted
+///      DESC so anything below threshold short-circuits.
+///   2. Dead torrents (`provider_kind != newznab` and `seeders == 0`)
+///      are skipped — *arr can't grab a release with no seeders.
+///   3. Releases brarr already tried for this `(provider, release,
+///      arr)` triple are skipped (regardless of past outcome), so a
+///      failed grab (stalled torrent, missing NZB articles, *arr
+///      rejection) doesn't loop forever on the same dead-end pick.
+///   4. Decisions without a `provider_id` snapshot (legacy rows) are
+///      skipped — brarr can't dedup what it can't trace back.
+///
+/// Returns the first matching decision, or `None` when the whole list
+/// is exhausted.
+async fn pick_pushable<'a>(
+    state: &AppState,
+    arr: &ArrInstanceRow,
+    decisions: &'a [crate::db::decisions::DecisionRow],
+) -> Result<Option<&'a crate::db::decisions::DecisionRow>, AppError> {
+    for d in decisions
+        .iter()
+        .take_while(|d| d.score >= arr.push_threshold)
+    {
+        if !meets_quality(d) {
+            debug!(
+                target: "brarr_orchestrator::poll",
+                decision_id = %d.id,
+                release = %d.release_name,
+                seeders = d.seeders,
+                "skip dead torrent"
+            );
+            continue;
+        }
+        let Some(provider_id) = d.provider_id else {
+            continue;
+        };
+        if push_history::already_tried_release(
+            state.pool(),
+            provider_id,
+            d.release_id_remote,
+            arr.id,
+        )
+        .await?
+        {
+            debug!(
+                target: "brarr_orchestrator::poll",
+                decision_id = %d.id,
+                release = %d.release_name,
+                arr_name = %arr.name,
+                "already tried this release, picking next"
+            );
+            continue;
+        }
+        return Ok(Some(d));
+    }
+    Ok(None)
+}
+
+/// Drop torrent releases that won't be grabbable — zero seeders means
+/// the *arr's download client will queue a stuck transfer forever.
+/// Newznab (Usenet) releases skip this check; Usenet completability
+/// is article-level, not peer-level, and brarr has no per-release
+/// retention signal to predict it.
+fn meets_quality(d: &crate::db::decisions::DecisionRow) -> bool {
+    let is_torrent = d
+        .provider_kind
+        .as_deref()
+        .is_some_and(|k| !k.eq_ignore_ascii_case("newznab"));
+    if is_torrent && d.seeders == 0 {
+        return false;
+    }
+    true
 }
 
 /// Sonarr poll: walk `/wanted/missing`, search per episode by
@@ -274,32 +337,19 @@ async fn run_once_sonarr(state: &AppState, arr: &ArrInstanceRow) -> Result<PollS
         summary.searched += 1;
         match run_search(state, keys).await {
             Ok(outcome) => {
-                if let Some(decision) = outcome
-                    .decisions
-                    .iter()
-                    .find(|d| d.score >= arr.push_threshold)
-                {
-                    if push_history::already_pushed(state.pool(), decision.id, arr.id).await? {
-                        debug!(
+                if let Some(decision) = pick_pushable(state, arr, &outcome.decisions).await? {
+                    match push_decision(state, decision, arr, &base_url).await {
+                        Ok(row) => {
+                            if matches!(row.status, push_history::PushStatus::Ok) {
+                                summary.pushed += 1;
+                            }
+                        }
+                        Err(e) => warn!(
                             target: "brarr_orchestrator::poll",
                             decision_id = %decision.id,
-                            arr_name = %arr.name,
-                            "already pushed, skipping"
-                        );
-                    } else {
-                        match push_decision(state, decision, arr, &base_url).await {
-                            Ok(row) => {
-                                if matches!(row.status, push_history::PushStatus::Ok) {
-                                    summary.pushed += 1;
-                                }
-                            }
-                            Err(e) => warn!(
-                                target: "brarr_orchestrator::poll",
-                                decision_id = %decision.id,
-                                error = %e,
-                                "push failed at DB layer"
-                            ),
-                        }
+                            error = %e,
+                            "push failed at DB layer"
+                        ),
                     }
                 }
             }
@@ -477,6 +527,57 @@ mod tests {
                 monitored: true,
             }),
         }
+    }
+
+    fn decision_with(kind: Option<&str>, seeders: u32) -> crate::db::decisions::DecisionRow {
+        crate::db::decisions::DecisionRow {
+            id: uuid::Uuid::nil(),
+            search_id: uuid::Uuid::nil(),
+            provider_id: None,
+            provider_name: "p".into(),
+            release_name: "r".into(),
+            release_id_remote: 1,
+            score: 200,
+            rejected: false,
+            tags: vec![],
+            matched_rules: vec![],
+            seeders,
+            leechers: 0,
+            size_bytes: 1,
+            resolution: "1080p".into(),
+            kind: "WEB-DL".into(),
+            download_url: None,
+            details_url: None,
+            provider_kind: kind.map(String::from),
+            published_at: None,
+            decided_at: brarr_core::OffsetDateTime::now_utc(),
+        }
+    }
+
+    #[test]
+    fn meets_quality_keeps_torrents_with_seeders() {
+        assert!(meets_quality(&decision_with(Some("unit3d"), 5)));
+        assert!(meets_quality(&decision_with(Some("torznab"), 1)));
+        assert!(meets_quality(&decision_with(Some("plugin"), 3)));
+    }
+
+    #[test]
+    fn meets_quality_drops_zero_seeders_torrents() {
+        assert!(!meets_quality(&decision_with(Some("unit3d"), 0)));
+        assert!(!meets_quality(&decision_with(Some("torznab"), 0)));
+    }
+
+    #[test]
+    fn meets_quality_keeps_newznab_even_with_zero_seeders() {
+        // NZB has no seeders concept — `seeders == 0` is the default.
+        assert!(meets_quality(&decision_with(Some("newznab"), 0)));
+    }
+
+    #[test]
+    fn meets_quality_keeps_legacy_kind_with_seeders() {
+        // Legacy rows have None provider_kind — treat as not-torrent
+        // (default branch) so they aren't accidentally dropped.
+        assert!(meets_quality(&decision_with(None, 0)));
     }
 
     #[test]

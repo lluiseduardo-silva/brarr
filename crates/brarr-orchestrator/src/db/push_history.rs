@@ -198,6 +198,54 @@ pub async fn list_for_decision(
     rows.iter().map(row_to_push).collect()
 }
 
+/// Has any release with the same `(provider_id, release_id_remote)`
+/// already been pushed to this `arr_instance_id`?
+///
+/// Counts **all** attempts (success, *arr rejection, transport
+/// failure) — once brarr handed a specific upstream release to a
+/// specific *arr, the same release won't be re-pushed regardless of
+/// outcome. The next poll cycle will pick the next-best decision
+/// instead. Use this when the downstream download outcome matters:
+/// a "successful push" that resulted in a stuck/dead/missing-articles
+/// grab should not be retried with the same release.
+///
+/// Joins through `decisions` because brarr's `push_history` snapshots
+/// `decision_id` (a UUID per poll), not the upstream release id.
+///
+/// # Errors
+///
+/// Returns [`AppError::Database`] on SQL failure.
+pub async fn already_tried_release(
+    pool: &Pool,
+    provider_id: Uuid,
+    release_id_remote: u64,
+    arr_instance_id: Uuid,
+) -> Result<bool, AppError> {
+    let release_id_signed = i64_from_u64(release_id_remote);
+    let row = sqlx::query(
+        "SELECT COUNT(*) AS n \
+         FROM push_history ph \
+         JOIN decisions d ON d.id = ph.decision_id \
+         WHERE d.provider_id = ? AND d.release_id_remote = ? AND ph.arr_instance_id = ?",
+    )
+    .bind(provider_id.to_string())
+    .bind(release_id_signed)
+    .bind(arr_instance_id.to_string())
+    .fetch_one(pool)
+    .await?;
+    let n: i64 = row.try_get("n")?;
+    Ok(n > 0)
+}
+
+/// SQLite has no native u64; we store u64 reinterpreted as i64.
+#[allow(
+    clippy::cast_possible_wrap,
+    reason = "release ids comfortably fit in i64 positive range"
+)]
+const fn i64_from_u64(v: u64) -> i64 {
+    v as i64
+}
+
 /// Has this `(decision_id, arr_instance_id)` pair already been pushed
 /// successfully? Used by the auto-push path to avoid double-grabbing
 /// the same release when the search reruns.
