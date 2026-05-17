@@ -462,9 +462,14 @@ impl ArrClient {
 }
 
 /// Cap the body slice we keep in errors / log lines so a chatty *arr
-/// instance doesn't blow the log volume on a 5xx page.
+/// instance doesn't blow the log volume on a 5xx page. 8 KiB fits the
+/// full `/release/push` response (typically ~1.5 KiB of release fields
+/// plus a `rejections` array at the end) — the rejections array is the
+/// part operators need to see when a 200 push silently produced no
+/// grab, so the cap must sit *past* the trailing fields rather than
+/// inside the verbose middle.
 fn truncate_body(body: &str) -> String {
-    const MAX: usize = 1024;
+    const MAX: usize = 8192;
     if body.len() <= MAX {
         return body.to_string();
     }
@@ -569,9 +574,16 @@ mod tests {
 
     #[test]
     fn truncate_body_caps_long_strings() {
-        let s = "x".repeat(2000);
+        let s = "x".repeat(20_000);
         let t = truncate_body(&s);
         assert!(t.len() < s.len());
         assert!(t.ends_with("[truncated]"));
+    }
+
+    #[test]
+    fn truncate_body_passes_through_when_under_cap() {
+        let s = "x".repeat(2000);
+        let t = truncate_body(&s);
+        assert_eq!(t, s, "2KB body must not be truncated");
     }
 }
