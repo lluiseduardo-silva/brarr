@@ -18,6 +18,15 @@ pub struct SearchRow {
     pub tmdb_id: Option<u32>,
     /// IMDb id used in the request (if any). Reserved for future use.
     pub imdb_id: Option<String>,
+    /// TVDB id used in the request (if any). Populated on the TV-axis
+    /// path so an operator can query "did brarr run a search for this
+    /// series episode?".
+    pub tvdb_id: Option<u32>,
+    /// TV season filter (when tvdb is set). `None` = series-wide.
+    pub season: Option<u16>,
+    /// TV episode filter (when tvdb + season are set). `None` =
+    /// season-wide (also catches season packs).
+    pub episode: Option<u16>,
     /// Submission timestamp (UTC).
     pub submitted_at: OffsetDateTime,
     /// How many decision rows resulted (after filtering rejects). Updated
@@ -30,12 +39,23 @@ pub struct SearchRow {
 /// Serialized form of the original request, kept in the DB for replay
 /// and audit. Matches the gRPC `SearchRequest` semantically but stays
 /// independent of the proto-generated types.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SearchRequestJson {
     /// External media id (TMDb) if provided.
+    #[serde(default)]
     pub tmdb_id: Option<u32>,
     /// IMDb id if provided.
+    #[serde(default)]
     pub imdb_id: Option<String>,
+    /// TVDB id if provided (TV axis).
+    #[serde(default)]
+    pub tvdb_id: Option<u32>,
+    /// TV season filter.
+    #[serde(default)]
+    pub season: Option<u16>,
+    /// TV episode filter.
+    #[serde(default)]
+    pub episode: Option<u16>,
 }
 
 /// Create a new search row in the `submitted` state (result_count = 0).
@@ -51,12 +71,15 @@ pub async fn create(pool: &Pool, request: SearchRequestJson) -> Result<SearchRow
     let request_json_text = serde_json::to_string(&request)?;
 
     sqlx::query(
-        "INSERT INTO searches (id, tmdb_id, imdb_id, submitted_at, result_count, request_json) \
-         VALUES (?, ?, ?, ?, 0, ?)",
+        "INSERT INTO searches (id, tmdb_id, imdb_id, tvdb_id, season, episode, submitted_at, result_count, request_json) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)",
     )
     .bind(id.to_string())
     .bind(request.tmdb_id.map(i64::from))
     .bind(request.imdb_id.as_deref())
+    .bind(request.tvdb_id.map(i64::from))
+    .bind(request.season.map(i64::from))
+    .bind(request.episode.map(i64::from))
     .bind(now.unix_timestamp())
     .bind(&request_json_text)
     .execute(pool)
@@ -66,6 +89,9 @@ pub async fn create(pool: &Pool, request: SearchRequestJson) -> Result<SearchRow
         id,
         tmdb_id: request.tmdb_id,
         imdb_id: request.imdb_id.clone(),
+        tvdb_id: request.tvdb_id,
+        season: request.season,
+        episode: request.episode,
         submitted_at: now,
         result_count: 0,
         request_json: request,
@@ -99,7 +125,7 @@ pub async fn set_result_count(pool: &Pool, id: Uuid, count: u32) -> Result<(), A
 pub async fn recent(pool: &Pool, limit: u32) -> Result<Vec<SearchRow>, AppError> {
     let limit = clamp_limit(limit);
     let rows = sqlx::query(
-        "SELECT id, tmdb_id, imdb_id, submitted_at, result_count, request_json \
+        "SELECT id, tmdb_id, imdb_id, tvdb_id, season, episode, submitted_at, result_count, request_json \
          FROM searches ORDER BY submitted_at DESC LIMIT ?",
     )
     .bind(i64::from(limit))
@@ -115,7 +141,7 @@ pub async fn recent(pool: &Pool, limit: u32) -> Result<Vec<SearchRow>, AppError>
 /// Returns [`AppError::NotFound`] if no row matches.
 pub async fn get_by_id(pool: &Pool, id: Uuid) -> Result<SearchRow, AppError> {
     let row_opt = sqlx::query(
-        "SELECT id, tmdb_id, imdb_id, submitted_at, result_count, request_json \
+        "SELECT id, tmdb_id, imdb_id, tvdb_id, season, episode, submitted_at, result_count, request_json \
          FROM searches WHERE id = ?",
     )
     .bind(id.to_string())
@@ -141,6 +167,10 @@ fn row_to_search(row: &SqliteRow) -> Result<SearchRow, AppError> {
         .map_err(|e| AppError::InvalidInput(format!("invalid uuid in searches.id: {e}")))?;
     let tmdb_db: Option<i64> = row.try_get("tmdb_id")?;
     let imdb: Option<String> = row.try_get("imdb_id")?;
+    // TV axis columns are NULL on legacy rows; `try_get` returns Ok(None).
+    let tvdb_raw: Option<i64> = row.try_get("tvdb_id").ok().flatten();
+    let season_raw: Option<i64> = row.try_get("season").ok().flatten();
+    let episode_raw: Option<i64> = row.try_get("episode").ok().flatten();
     let submitted_unix: i64 = row.try_get("submitted_at")?;
     let submitted_at = OffsetDateTime::from_unix_timestamp(submitted_unix)
         .map_err(|e| AppError::InvalidInput(format!("invalid timestamp: {e}")))?;
@@ -151,6 +181,9 @@ fn row_to_search(row: &SqliteRow) -> Result<SearchRow, AppError> {
         id,
         tmdb_id: tmdb_db.and_then(|v| u32::try_from(v).ok()),
         imdb_id: imdb,
+        tvdb_id: tvdb_raw.and_then(|v| u32::try_from(v).ok()),
+        season: season_raw.and_then(|v| u16::try_from(v).ok()),
+        episode: episode_raw.and_then(|v| u16::try_from(v).ok()),
         submitted_at,
         result_count: u32::try_from(count_db).unwrap_or(0),
         request_json,
@@ -169,7 +202,7 @@ mod tests {
         let pool = open_memory().await.unwrap();
         let req = SearchRequestJson {
             tmdb_id: Some(603),
-            imdb_id: None,
+            ..SearchRequestJson::default()
         };
         let row = create(&pool, req.clone()).await.unwrap();
         assert_eq!(row.tmdb_id, Some(603));
@@ -188,7 +221,7 @@ mod tests {
             &pool,
             SearchRequestJson {
                 tmdb_id: Some(1),
-                imdb_id: None,
+                ..SearchRequestJson::default()
             },
         )
         .await
@@ -215,7 +248,7 @@ mod tests {
                 &pool,
                 SearchRequestJson {
                     tmdb_id: Some(i),
-                    imdb_id: None,
+                    ..SearchRequestJson::default()
                 },
             )
             .await
@@ -236,7 +269,7 @@ mod tests {
             &pool,
             SearchRequestJson {
                 tmdb_id: Some(1),
-                imdb_id: None,
+                ..SearchRequestJson::default()
             },
         )
         .await
@@ -247,7 +280,7 @@ mod tests {
             &pool,
             SearchRequestJson {
                 tmdb_id: Some(2),
-                imdb_id: None,
+                ..SearchRequestJson::default()
             },
         )
         .await

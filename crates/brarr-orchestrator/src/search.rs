@@ -145,6 +145,9 @@ pub async fn run_search(state: &AppState, keys: SearchKeys) -> Result<SearchRunO
     let request = SearchRequestJson {
         tmdb_id: keys.tmdb.map(TmdbId::get),
         imdb_id: keys.imdb.map(|i| i.get().to_string()),
+        tvdb_id: keys.tvdb.map(TvdbId::get),
+        season: keys.season,
+        episode: keys.episode,
     };
     let search = searches::create(pool, request).await?;
     info!(

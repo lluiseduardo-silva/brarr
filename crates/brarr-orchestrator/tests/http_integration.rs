@@ -376,7 +376,7 @@ async fn decisions_push_records_transport_failure_against_dead_arr() {
         pool,
         searches::SearchRequestJson {
             tmdb_id: Some(603),
-            imdb_id: None,
+            ..searches::SearchRequestJson::default()
         },
     )
     .await

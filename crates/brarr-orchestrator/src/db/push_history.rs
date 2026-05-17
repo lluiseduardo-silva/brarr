@@ -370,7 +370,7 @@ mod tests {
             pool,
             SearchRequestJson {
                 tmdb_id: Some(603),
-                imdb_id: None,
+                ..SearchRequestJson::default()
             },
         )
         .await
