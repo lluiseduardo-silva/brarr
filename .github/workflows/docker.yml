@@ -43,11 +43,13 @@ jobs:
   build-push:
     name: build + push
     runs-on: ubuntu-latest
-    # GITHUB_TOKEN needs `packages: write` to push to GHCR. Read
-    # access on `contents` covers the checkout step.
+    # GITHUB_TOKEN needs `packages: write` to push to GHCR, plus
+    # `actions: write` for the type=gha cache backend to write blob
+    # entries. `contents: read` covers the checkout step.
     permissions:
       contents: read
       packages: write
+      actions: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -79,13 +81,18 @@ jobs:
           #   - any branch HEAD     → `<branch>`
           #   - any v* git tag      → `1.2.3`, `1.2`, `1`
           #   - every push          → `sha-<short>` for pinning
+          # The `{{is_default_branch}}` token is metadata-action's own
+          # template (NOT GitHub Actions' `${{ }}` syntax) — keeps the
+          # `latest` tag scoped to the repo's default branch without a
+          # fragile `github.ref == format(...)` comparison evaluated by
+          # the workflow engine.
           tags: |
             type=ref,event=branch
             type=ref,event=pr
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
-            type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+            type=raw,value=latest,enable={{is_default_branch}}
             type=sha,format=short
 
       - name: Build and push
