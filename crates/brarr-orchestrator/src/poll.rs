@@ -380,6 +380,61 @@ fn title_looks_like_tv(title: &str) -> bool {
     false
 }
 
+/// `true` when `title` looks like a release packaging *all* (or a
+/// range) of season `season`'s episodes — `S01` without an `E##`
+/// marker for that season. Used by the Sonarr poll cycle to prefer a
+/// single season-pack push over twelve individual-episode pushes when
+/// the operator's *arr has many wanted episodes from the same season.
+///
+/// Accepts both zero-padded (`S01`) and bare (`S1`) forms. A
+/// multi-season pack like `S01-S03.Complete` matches for any of the
+/// covered seasons. The check disqualifies titles that contain
+/// `S<season>E<digit>` (specific episode of *this* season) but is
+/// fine with a pack title that happens to also list a different
+/// season's episode marker.
+fn title_looks_like_season_pack(title: &str, season: u16) -> bool {
+    let lower = title.to_lowercase();
+    let needles = [format!("s{season:02}"), format!("s{season}")];
+    for needle in &needles {
+        if season_marker_is_pack(&lower, needle) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Scan `lower` for `needle` (e.g. `"s01"`) and decide whether each
+/// occurrence reads as a pack marker (not a per-episode marker for
+/// that season, not the prefix of a longer season number).
+///
+/// Word-boundary handling:
+/// - The byte *before* `needle` must not be alphanumeric (rules out
+///   `"vs01"`, `"ss01"`).
+/// - The byte *after* `needle` must not extend it into:
+///   * `E\d+` — that's `S01E05`, specific episode, NOT a pack.
+///   * Another `\d` — `S1` accidentally matching `S10`. The
+///     zero-padded form `s01` already covers two-digit seasons, so
+///     the bare form needs the strict boundary.
+fn season_marker_is_pack(lower: &str, needle: &str) -> bool {
+    let bytes = lower.as_bytes();
+    let mut start = 0;
+    while let Some(rel) = lower[start..].find(needle) {
+        let abs = start + rel;
+        let after = abs + needle.len();
+        let prev_ok = abs == 0 || !bytes[abs - 1].is_ascii_alphanumeric();
+        let next_ok = match bytes.get(after) {
+            None => true,
+            Some(&b'e') => bytes.get(after + 1).is_none_or(|c| !c.is_ascii_digit()),
+            Some(c) => !c.is_ascii_digit(),
+        };
+        if prev_ok && next_ok {
+            return true;
+        }
+        start = abs + 1;
+    }
+    false
+}
+
 /// Per-release threshold floor used by [`pick_pushable`].
 ///
 /// Torrents get bumped by +1 so a release scoring *exactly* the
@@ -424,9 +479,25 @@ fn meets_quality(d: &crate::db::decisions::DecisionRow) -> bool {
     true
 }
 
-/// Sonarr poll: walk `/wanted/missing`, search per episode by
-/// tvdb+season+episode, push the top decision crossing the threshold.
-/// Same throttling/dedup story as the Radarr path.
+/// Sonarr poll: walk `/wanted/missing`, group missing episodes by
+/// (series, season), try a season-pack search first per group, then
+/// fall back to per-episode searches for any season pack that didn't
+/// produce a viable candidate.
+#[allow(
+    clippy::too_many_lines,
+    reason = "pack-vs-episode flow reads cleaner as one function with both branches inline — \
+              splitting into helpers per branch obscures the early-skip-when-pack-found path."
+)]
+///
+/// Pack pass rationale: Newznab's `tvsearch` with `&ep=N` filters
+/// indexer-side, so a single torrent covering S01 never shows up
+/// across per-episode polls. Grouping by season lets the pipeline
+/// emit one query (`tvsearch&tvdbid=X&season=N`) per (series, season)
+/// instead of one per episode — fewer indexer hits and *the* path
+/// where pack releases become reachable. When a pack lands above the
+/// profile threshold, the per-episode fallback is skipped for that
+/// season; Sonarr accepts the pack and marks every wanted episode
+/// covered.
 async fn run_once_sonarr(state: &AppState, arr: &ArrInstanceRow) -> Result<PollSummary, AppError> {
     let mut summary = PollSummary::default();
     let client = match ArrClient::new(arr.to_arr_instance()) {
@@ -455,51 +526,178 @@ async fn run_once_sonarr(state: &AppState, arr: &ArrInstanceRow) -> Result<PollS
     };
     let base_url = poll_base_url();
 
-    let mut iter = episodes.into_iter();
-    while let Some(ep) = iter.next() {
+    // Group the wanted episodes by (series_id, season_number). The
+    // BTreeMap keeps a stable iteration order (series asc, season
+    // asc) which makes the logs deterministic across runs.
+    let mut by_season: std::collections::BTreeMap<(u64, u16), Vec<WantedEpisode>> =
+        std::collections::BTreeMap::new();
+    for ep in episodes {
         summary.considered += 1;
         if !is_pollable_episode(&ep) {
             continue;
         }
-        let Some(keys) = build_keys_for_episode(&ep) else {
+        let Some(series) = ep.series.as_ref() else {
             continue;
         };
-        summary.searched += 1;
-        match run_search(state, keys).await {
-            Ok(outcome) => {
-                if let Some(decision) = pick_pushable(state, arr, &outcome.decisions).await? {
-                    match push_decision(state, decision, arr, &base_url).await {
-                        Ok(row) => {
-                            if matches!(row.status, push_history::PushStatus::Ok) {
-                                summary.pushed += 1;
-                            }
-                        }
-                        Err(e) => warn!(
-                            target: "brarr_orchestrator::poll",
-                            decision_id = %decision.id,
-                            error = %e,
-                            "push failed at DB layer"
-                        ),
-                    }
+        if series.tvdb_id == 0 {
+            continue;
+        }
+        let key = (series.id, ep.season_number);
+        by_season.entry(key).or_default().push(ep);
+    }
+
+    let group_count = by_season.len();
+    let mut groups_processed = 0_usize;
+    for ((series_id, season), group) in by_season {
+        groups_processed += 1;
+        let series_title: String = group
+            .first()
+            .and_then(|ep| ep.series.as_ref())
+            .map_or_else(|| "?".to_string(), |s| s.title.clone());
+
+        // Pass 1 — season pack search. Skip when the group has only a
+        // single episode wanted (no point in pulling a 12-ep pack for
+        // 1 missing — Sonarr happily takes either, but a 1-ep search
+        // is cheaper and more likely to find a single-ep release on
+        // any tracker).
+        let mut pack_pushed = false;
+        if group.len() >= 2 {
+            match run_season_pack_pass(state, arr, series_id, season, &group, &base_url).await {
+                Ok(Some(_)) => {
+                    summary.pushed += 1;
+                    pack_pushed = true;
+                    info!(
+                        target: "brarr_orchestrator::poll",
+                        arr_name = %arr.name,
+                        series = %series_title,
+                        season = season,
+                        episodes_covered = group.len(),
+                        "season pack pushed; skipping per-episode fallback"
+                    );
+                }
+                Ok(None) => {
+                    debug!(
+                        target: "brarr_orchestrator::poll",
+                        arr_name = %arr.name,
+                        series = %series_title,
+                        season = season,
+                        "no season pack candidate; falling back to per-episode"
+                    );
+                }
+                Err(e) => {
+                    summary.search_errors += 1;
+                    warn!(
+                        target: "brarr_orchestrator::poll",
+                        arr_name = %arr.name,
+                        series = %series_title,
+                        season = season,
+                        error = %e,
+                        "season pack search failed"
+                    );
                 }
             }
-            Err(e) => {
-                summary.search_errors += 1;
-                warn!(
-                    target: "brarr_orchestrator::poll",
-                    series = %ep.series.as_ref().map_or("?", |s| s.title.as_str()),
-                    season = ep.season_number,
-                    episode = ep.episode_number,
-                    error = %e,
-                    "search failed"
-                );
+        }
+
+        if pack_pushed {
+            if groups_processed < group_count {
+                time::sleep(PER_MOVIE_DELAY).await;
+            }
+            continue;
+        }
+
+        // Pass 2 — per-episode fallback.
+        let mut ep_iter = group.into_iter().peekable();
+        while let Some(ep) = ep_iter.next() {
+            let Some(keys) = build_keys_for_episode(&ep) else {
+                continue;
+            };
+            summary.searched += 1;
+            match run_search(state, keys).await {
+                Ok(outcome) => {
+                    if let Some(decision) = pick_pushable(state, arr, &outcome.decisions).await? {
+                        match push_decision(state, decision, arr, &base_url).await {
+                            Ok(row) => {
+                                if matches!(row.status, push_history::PushStatus::Ok) {
+                                    summary.pushed += 1;
+                                }
+                            }
+                            Err(e) => warn!(
+                                target: "brarr_orchestrator::poll",
+                                decision_id = %decision.id,
+                                error = %e,
+                                "push failed at DB layer"
+                            ),
+                        }
+                    }
+                }
+                Err(e) => {
+                    summary.search_errors += 1;
+                    warn!(
+                        target: "brarr_orchestrator::poll",
+                        series = %series_title,
+                        season = ep.season_number,
+                        episode = ep.episode_number,
+                        error = %e,
+                        "search failed"
+                    );
+                }
+            }
+            if ep_iter.peek().is_some() {
+                time::sleep(PER_MOVIE_DELAY).await;
             }
         }
-        if iter.len() > 0 {
+        if groups_processed < group_count {
             time::sleep(PER_MOVIE_DELAY).await;
         }
     }
     Ok(summary)
+}
+
+/// Run one `tvsearch&season=N` (no `&ep=`) search per series-season
+/// group and try to push the strongest pack-shaped candidate.
+///
+/// Returns `Ok(Some(decision_id))` if a pack was pushed,
+/// `Ok(None)` when no candidate passed the threshold + pack-title
+/// check, and `Err(_)` on DB / push-pipeline failure (search-level
+/// failures bubble up so the caller can record them in the summary).
+async fn run_season_pack_pass(
+    state: &AppState,
+    arr: &ArrInstanceRow,
+    _series_id: u64,
+    season: u16,
+    group: &[WantedEpisode],
+    base_url: &str,
+) -> Result<Option<uuid::Uuid>, AppError> {
+    let series = group
+        .first()
+        .and_then(|ep| ep.series.as_ref())
+        .ok_or_else(|| AppError::InvalidInput("empty season group".to_string()))?;
+    let tvdb = TvdbId::new(series.tvdb_id)
+        .map_err(|e| AppError::InvalidInput(format!("invalid tvdb id: {e}")))?;
+    let keys = SearchKeys::from_tvdb(tvdb, Some(season), None);
+    let outcome = run_search(state, keys).await?;
+    // Filter the search outcome down to releases whose title reads as
+    // a season pack covering THIS season. Without this filter the
+    // per-episode releases the search incidentally returns (Newznab
+    // ignores the missing &ep= and may include arbitrary episodes
+    // anyway) would compete on score with the pack and possibly win.
+    let pack_candidates: Vec<crate::db::decisions::DecisionRow> = outcome
+        .decisions
+        .into_iter()
+        .filter(|d| title_looks_like_season_pack(&d.release_name, season))
+        .collect();
+    let Some(decision) = pick_pushable(state, arr, &pack_candidates).await? else {
+        return Ok(None);
+    };
+    let row = push_decision(state, decision, arr, base_url).await?;
+    if matches!(row.status, push_history::PushStatus::Ok) {
+        Ok(Some(decision.id))
+    } else {
+        // Push attempted, *arr-side rejection or transport error
+        // already recorded in push_history. Treat as not-pushed so
+        // the per-episode fallback runs.
+        Ok(None)
+    }
 }
 
 /// Externally-reachable origin used to build push proxy URLs. Same
@@ -731,6 +929,79 @@ mod tests {
         // accidentally grab a stale 0-seeder candidate.
         let legacy = decision_with(None, 0);
         assert_eq!(pick_threshold_for(&legacy, 330), 331);
+    }
+
+    #[test]
+    fn title_pack_detects_zero_padded_and_bare_forms() {
+        assert!(title_looks_like_season_pack("Show.S01.1080p.WEB-DL", 1));
+        assert!(title_looks_like_season_pack("Show.S1.1080p.WEB-DL", 1));
+        assert!(title_looks_like_season_pack("Show S01 Complete", 1));
+        assert!(title_looks_like_season_pack("Show S08 BluRay", 8));
+    }
+
+    #[test]
+    fn title_pack_rejects_episode_marker_for_same_season() {
+        assert!(!title_looks_like_season_pack("Show.S01E05.1080p", 1));
+        assert!(!title_looks_like_season_pack("Show.s01e05.web", 1));
+        assert!(!title_looks_like_season_pack("Show S01E12 WEB", 1));
+    }
+
+    #[test]
+    fn title_pack_rejects_wrong_season() {
+        // S02 release should not match season=1 wanted.
+        assert!(!title_looks_like_season_pack("Show.S02.Complete", 1));
+        assert!(!title_looks_like_season_pack("Show.S10.WEB-DL", 1));
+    }
+
+    #[test]
+    fn title_pack_handles_multi_season_packs() {
+        // "S01-S03 Complete" covers seasons 1, 2, and 3 — return true
+        // for any of them. The Sonarr poll cycle picks the relevant
+        // season and the pack covers it.
+        assert!(title_looks_like_season_pack(
+            "Show.S01-S03.Complete.1080p",
+            1
+        ));
+        assert!(title_looks_like_season_pack(
+            "Show.S01-S03.Complete.1080p",
+            3
+        ));
+    }
+
+    #[test]
+    fn title_pack_strict_word_boundary() {
+        // Avoid false-positive on "ss01" or "vs01" tokens hidden in
+        // group / source names.
+        assert!(!title_looks_like_season_pack("Showvs01.1080p", 1));
+        // Bare `s1` shouldn't match against `s10`.
+        assert!(!title_looks_like_season_pack("Show.S10.WEB", 1));
+    }
+
+    #[test]
+    fn season_grouping_keeps_eps_by_season_and_dedups_seasons() {
+        // The Sonarr poll loop groups wanted episodes by
+        // (series_id, season). Verify the BTreeMap semantics directly
+        // — duplicate (series, season) pairs collapse into one group;
+        // distinct seasons get distinct groups; ordering is stable.
+        let mut by_season: std::collections::BTreeMap<(u64, u16), Vec<WantedEpisode>> =
+            std::collections::BTreeMap::new();
+        let s1e1 = ep(true, false, 100, 1, 1);
+        let s1e2 = ep(true, false, 100, 1, 2);
+        let s1e3 = ep(true, false, 100, 1, 3);
+        let s2e1 = ep(true, false, 100, 2, 1);
+        for e in [s1e1, s1e2, s1e3, s2e1] {
+            let series = e.series.as_ref().unwrap().id;
+            by_season
+                .entry((series, e.season_number))
+                .or_default()
+                .push(e);
+        }
+        assert_eq!(by_season.len(), 2, "S1 + S2 = 2 groups");
+        assert_eq!(by_season[&(10, 1)].len(), 3, "S1 has 3 wanted eps");
+        assert_eq!(by_season[&(10, 2)].len(), 1, "S2 has 1 wanted ep");
+        // BTreeMap iter order: (series asc, season asc).
+        let keys: Vec<_> = by_season.keys().collect();
+        assert_eq!(keys, vec![&(10, 1), &(10, 2)]);
     }
 
     #[test]
