@@ -341,7 +341,7 @@ dependencies = [
 
 [[package]]
 name = "brarr-arr"
-version = "0.1.0"
+version = "0.1.3"
 dependencies = [
  "reqwest",
  "serde",
@@ -356,7 +356,7 @@ dependencies = [
 
 [[package]]
 name = "brarr-cli"
-version = "0.1.0"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "brarr-core",
@@ -385,7 +385,7 @@ dependencies = [
 
 [[package]]
 name = "brarr-core"
-version = "0.1.0"
+version = "0.1.3"
 dependencies = [
  "serde",
  "thiserror 2.0.18",
@@ -396,7 +396,7 @@ dependencies = [
 
 [[package]]
 name = "brarr-decision-service"
-version = "0.1.0"
+version = "0.1.3"
 dependencies = [
  "brarr-core",
  "serde",
@@ -408,7 +408,7 @@ dependencies = [
 
 [[package]]
 name = "brarr-mediainfo"
-version = "0.1.0"
+version = "0.1.3"
 dependencies = [
  "brarr-core",
  "thiserror 2.0.18",
@@ -416,7 +416,7 @@ dependencies = [
 
 [[package]]
 name = "brarr-orchestrator"
-version = "0.1.0"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "askama",
@@ -455,7 +455,7 @@ dependencies = [
 
 [[package]]
 name = "brarr-plugin-host"
-version = "0.1.0"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "brarr-core",
@@ -473,7 +473,7 @@ dependencies = [
 
 [[package]]
 name = "brarr-tracker-newznab"
-version = "0.1.0"
+version = "0.1.3"
 dependencies = [
  "brarr-core",
  "quick-xml",
@@ -489,7 +489,7 @@ dependencies = [
 
 [[package]]
 name = "brarr-tracker-unit3d"
-version = "0.1.0"
+version = "0.1.3"
 dependencies = [
  "brarr-core",
  "brarr-mediainfo",
