@@ -432,10 +432,15 @@ async fn handle_api_inner(
     // appearing in their UI as "no results found" even when the feed
     // body has plenty of items.
     let base_url = derive_base_url(&headers);
+    // Embed `?apikey=<token>` into every brarr-side proxy URL the feed
+    // emits. *arr download clients only carry credentials in the query
+    // string, not headers — without this the apikey middleware returns
+    // 401 when they later dereference an `<enclosure url>`.
+    let apikey = state.auth().token();
 
     match t.as_str() {
         "caps" => Ok(xml_response(StatusCode::OK, render_caps()?)),
-        "movie" => handle_movie(&state, &q, &base_url, protocol).await,
+        "movie" => handle_movie(&state, &q, &base_url, protocol, apikey).await,
         "search" => {
             debug!(
                 target: "brarr_orchestrator::torznab",
@@ -444,10 +449,10 @@ async fn handle_api_inner(
             );
             Ok(xml_response(
                 StatusCode::OK,
-                render_placeholder_feed(&base_url, protocol)?,
+                render_placeholder_feed(&base_url, protocol, apikey)?,
             ))
         }
-        "tvsearch" | "tv-search" => handle_tvsearch(&state, &q, &base_url, protocol).await,
+        "tvsearch" | "tv-search" => handle_tvsearch(&state, &q, &base_url, protocol, apikey).await,
         other => {
             warn!(
                 target: "brarr_orchestrator::torznab",
@@ -469,6 +474,7 @@ async fn handle_movie(
     q: &ApiQuery,
     base_url: &str,
     protocol: Protocol,
+    apikey: Option<&str>,
 ) -> Result<Response, AppError> {
     let imdb = parse_imdb(q.imdbid.as_deref())?;
     let tmdb_raw = parse_u32_param(q.tmdbid.as_ref(), "tmdbid")?;
@@ -490,7 +496,7 @@ async fn handle_movie(
         );
         return Ok(xml_response(
             StatusCode::OK,
-            render_placeholder_feed(base_url, protocol)?,
+            render_placeholder_feed(base_url, protocol, apikey)?,
         ));
     }
 
@@ -528,7 +534,7 @@ async fn handle_movie(
 
     Ok(xml_response(
         StatusCode::OK,
-        render_feed(&items, base_url, offset, total, protocol)?,
+        render_feed(&items, base_url, offset, total, protocol, apikey)?,
     ))
 }
 
@@ -537,6 +543,7 @@ async fn handle_tvsearch(
     q: &ApiQuery,
     base_url: &str,
     protocol: Protocol,
+    apikey: Option<&str>,
 ) -> Result<Response, AppError> {
     let tvdb_raw = parse_u32_param(q.tvdbid.as_ref(), "tvdbid")?;
     let tvdb = tvdb_raw
@@ -555,7 +562,7 @@ async fn handle_tvsearch(
         );
         return Ok(xml_response(
             StatusCode::OK,
-            render_placeholder_feed(base_url, protocol)?,
+            render_placeholder_feed(base_url, protocol, apikey)?,
         ));
     }
     let season = parse_u32_param(q.season.as_ref(), "season")?
@@ -596,7 +603,7 @@ async fn handle_tvsearch(
 
     Ok(xml_response(
         StatusCode::OK,
-        render_feed(&items, base_url, offset, total, protocol)?,
+        render_feed(&items, base_url, offset, total, protocol, apikey)?,
     ))
 }
 
@@ -814,6 +821,7 @@ fn render_feed_inner(
     offset: usize,
     total: usize,
     protocol: Protocol,
+    apikey: Option<&str>,
 ) -> Result<Vec<u8>, AppError> {
     let mut writer = Writer::new(Cursor::new(Vec::with_capacity(2048)));
     writer
@@ -853,7 +861,7 @@ fn render_feed_inner(
             cw.create_element("language")
                 .write_text_content(BytesText::new("pt-BR"))?;
             for item in items {
-                write_item(cw, item, base_url, protocol)?;
+                write_item(cw, item, base_url, protocol, apikey)?;
             }
             Ok(())
         })
@@ -867,7 +875,7 @@ fn render_feed_inner(
 
 #[cfg(test)]
 fn render_empty_feed() -> Result<Vec<u8>, AppError> {
-    render_feed_inner(&[], "http://127.0.0.1:3000", 0, 0, Protocol::Torrent)
+    render_feed_inner(&[], "http://127.0.0.1:3000", 0, 0, Protocol::Torrent, None)
 }
 
 /// Build an RSS feed with a single sentinel item so Sonarr / Radarr's
@@ -888,9 +896,17 @@ fn render_empty_feed() -> Result<Vec<u8>, AppError> {
 ///   Search instantly recognizes its synthetic nature.
 /// - Size is 1 byte and the enclosure URL resolves to a 404 through
 ///   the download proxy, so an accidental grab fails fast and clearly.
-fn render_placeholder_feed(base_url: &str, protocol: Protocol) -> Result<Vec<u8>, AppError> {
+fn render_placeholder_feed(
+    base_url: &str,
+    protocol: Protocol,
+    apikey: Option<&str>,
+) -> Result<Vec<u8>, AppError> {
+    let apikey_qs = match apikey {
+        Some(k) if !k.is_empty() => format!("?apikey={k}"),
+        _ => String::new(),
+    };
     let sentinel_url = format!(
-        "{base_url}{prefix}/download/00000000-0000-0000-0000-000000000000",
+        "{base_url}{prefix}/download/00000000-0000-0000-0000-000000000000{apikey_qs}",
         prefix = protocol.path_prefix(),
     );
     let mut writer = Writer::new(Cursor::new(Vec::with_capacity(1024)));
@@ -982,8 +998,9 @@ fn render_feed(
     offset: usize,
     total: usize,
     protocol: Protocol,
+    apikey: Option<&str>,
 ) -> Result<Vec<u8>, AppError> {
-    render_feed_inner(items, base_url, offset, total, protocol)
+    render_feed_inner(items, base_url, offset, total, protocol, apikey)
 }
 
 fn write_item<W: std::io::Write>(
@@ -991,6 +1008,7 @@ fn write_item<W: std::io::Write>(
     item: &FeedItem,
     base_url: &str,
     protocol: Protocol,
+    apikey: Option<&str>,
 ) -> std::io::Result<()> {
     let r = &item.release;
     // The feed routes split torrent / nzb providers by protocol, so the
@@ -1015,10 +1033,19 @@ fn write_item<W: std::io::Write>(
     // headers — required because Sonarr/Radarr silently drop items
     // with a relative `<enclosure url>` (their RSS parser refuses to
     // resolve it even against the configured indexer URL).
+    // *arr download clients only carry credentials in the URL query
+    // string, not headers. Sonarr/Radarr store this URL verbatim from
+    // the RSS feed and later GET it to fetch the .torrent/.nzb — without
+    // an embedded apikey the proxy returns 401. Empty/None token (auth
+    // disabled) omits the query string entirely.
+    let apikey_qs = match apikey {
+        Some(k) if !k.is_empty() => format!("?apikey={k}"),
+        _ => String::new(),
+    };
     let download_url = format!(
-        "{base_url}{prefix}/download/{id}",
+        "{base_url}{prefix}/download/{id}{apikey_qs}",
         prefix = protocol.path_prefix(),
-        id = r.tracker_release_id
+        id = r.tracker_release_id,
     );
     let details_url = r
         .urls
@@ -1266,7 +1293,8 @@ mod tests {
     #[test]
     fn feed_emits_newznab_response_offset_and_total() {
         let items = vec![sample_feed_item("1", None)];
-        let bytes = render_feed(&items, "http://h:3000", 100, 110, Protocol::Torrent).unwrap();
+        let bytes =
+            render_feed(&items, "http://h:3000", 100, 110, Protocol::Torrent, None).unwrap();
         let xml = String::from_utf8(bytes).unwrap();
         assert!(
             xml.contains(r#"<newznab:response offset="100" total="110""#),
@@ -1286,7 +1314,7 @@ mod tests {
         // 2023-11-15 12:34:56 UTC
         let ts = OffsetDateTime::from_unix_timestamp(1_700_051_696).unwrap();
         let items = vec![sample_feed_item("1", Some(ts))];
-        let bytes = render_feed(&items, "http://h:3000", 0, 1, Protocol::Torrent).unwrap();
+        let bytes = render_feed(&items, "http://h:3000", 0, 1, Protocol::Torrent, None).unwrap();
         let xml = String::from_utf8(bytes).unwrap();
         assert!(
             xml.contains("<pubDate>Wed, 15 Nov 2023 12:34:56 +0000</pubDate>"),
@@ -1297,7 +1325,7 @@ mod tests {
     #[test]
     fn feed_falls_back_to_now_when_published_at_missing() {
         let items = vec![sample_feed_item("1", None)];
-        let bytes = render_feed(&items, "http://h:3000", 0, 1, Protocol::Torrent).unwrap();
+        let bytes = render_feed(&items, "http://h:3000", 0, 1, Protocol::Torrent, None).unwrap();
         let xml = String::from_utf8(bytes).unwrap();
         // Just confirm a pubDate element shows up — the value is "now"
         // and we don't pin a specific timestamp.
@@ -1330,7 +1358,7 @@ mod tests {
     #[test]
     fn torrent_protocol_emits_bittorrent_enclosure_and_torznab_path() {
         let items = vec![sample_feed_item("123", None)];
-        let bytes = render_feed(&items, "http://h:3000", 0, 1, Protocol::Torrent).unwrap();
+        let bytes = render_feed(&items, "http://h:3000", 0, 1, Protocol::Torrent, None).unwrap();
         let xml = String::from_utf8(bytes).unwrap();
         assert!(xml.contains(r#"type="application/x-bittorrent""#), "{xml}");
         assert!(xml.contains("http://h:3000/torznab/download/123"), "{xml}");
@@ -1340,11 +1368,52 @@ mod tests {
     #[test]
     fn nzb_protocol_emits_nzb_enclosure_and_newznab_path() {
         let items = vec![sample_feed_item("123", None)];
-        let bytes = render_feed(&items, "http://h:3000", 0, 1, Protocol::Nzb).unwrap();
+        let bytes = render_feed(&items, "http://h:3000", 0, 1, Protocol::Nzb, None).unwrap();
         let xml = String::from_utf8(bytes).unwrap();
         assert!(xml.contains(r#"type="application/x-nzb""#), "{xml}");
         assert!(xml.contains("http://h:3000/newznab/download/123"), "{xml}");
         assert!(!xml.contains("/torznab/download/"), "{xml}");
+    }
+
+    #[test]
+    fn feed_embeds_apikey_when_provided() {
+        // *arr download clients carry credentials only in the URL query
+        // string. The proxy returns 401 when the enclosure URL lacks
+        // ?apikey=<token>; this regression test pins the fix in place
+        // for both `<enclosure url>` and `<link>` (which falls back to
+        // the proxy URL when no upstream details URL is present).
+        let items = vec![sample_feed_item("abc", None)];
+        let bytes =
+            render_feed(&items, "http://h:3000", 0, 1, Protocol::Nzb, Some("s3cret")).unwrap();
+        let xml = String::from_utf8(bytes).unwrap();
+        assert!(
+            xml.contains("http://h:3000/newznab/download/abc?apikey=s3cret"),
+            "enclosure/link missing apikey: {xml}"
+        );
+    }
+
+    #[test]
+    fn feed_omits_apikey_when_disabled_or_empty() {
+        let items = vec![sample_feed_item("abc", None)];
+        // None — auth disabled at startup.
+        let bytes = render_feed(&items, "http://h:3000", 0, 1, Protocol::Torrent, None).unwrap();
+        let xml = String::from_utf8(bytes).unwrap();
+        assert!(!xml.contains("apikey"), "should omit apikey: {xml}");
+        // Empty string — token slot present but unset; treat as disabled.
+        let bytes =
+            render_feed(&items, "http://h:3000", 0, 1, Protocol::Torrent, Some("")).unwrap();
+        let xml = String::from_utf8(bytes).unwrap();
+        assert!(!xml.contains("apikey"), "empty token should omit: {xml}");
+    }
+
+    #[test]
+    fn placeholder_feed_embeds_apikey_when_provided() {
+        let bytes = render_placeholder_feed("http://h:3000", Protocol::Nzb, Some("tok")).unwrap();
+        let xml = String::from_utf8(bytes).unwrap();
+        assert!(
+            xml.contains("/newznab/download/00000000-0000-0000-0000-000000000000?apikey=tok"),
+            "sentinel URL missing apikey: {xml}"
+        );
     }
 
     #[test]
