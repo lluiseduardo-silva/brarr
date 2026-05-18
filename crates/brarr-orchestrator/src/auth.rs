@@ -58,6 +58,18 @@ impl AuthConfig {
         matches!(self, Self::Enabled(_))
     }
 
+    /// Borrow the configured token, if any. Used by the push pipeline
+    /// to embed `?apikey=<token>` into download URLs *arr will hit
+    /// later — without this the proxy returns 401 when the *arr
+    /// download client tries to grab the .torrent / .nzb.
+    #[must_use]
+    pub fn token(&self) -> Option<&str> {
+        match self {
+            Self::Disabled => None,
+            Self::Enabled(t) => Some(t.as_str()),
+        }
+    }
+
     /// Compare `candidate` to the configured token in constant time.
     /// Always `true` when auth is disabled.
     #[must_use]

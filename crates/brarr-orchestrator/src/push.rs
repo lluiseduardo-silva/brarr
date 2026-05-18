@@ -66,7 +66,12 @@ pub async fn push_decision(
     arr_instance: &ArrInstanceRow,
     public_base_url: &str,
 ) -> Result<PushOutcome, AppError> {
-    let payload = build_payload(decision, public_base_url);
+    // Embed brarr's own apikey into the download URL so *arr can fetch
+    // the .torrent / .nzb later without 401ing against brarr's auth
+    // middleware. The *arr download client doesn't carry headers when
+    // dereferencing the URL — only the query string survives.
+    let apikey = state.auth().token();
+    let payload = build_payload(decision, public_base_url, apikey);
     let client = match ArrClient::new(arr_instance.to_arr_instance()) {
         Ok(c) => c,
         Err(e) => {
@@ -188,7 +193,11 @@ pub async fn push_decision(
 /// the brarr-side download proxy URL. Path prefix flips between
 /// `/torznab/download/{id}` and `/newznab/download/{id}` so the *arr
 /// download client routes to the matching protocol-specific handler.
-fn build_payload(row: &DecisionRow, public_base_url: &str) -> PushReleasePayload {
+fn build_payload(
+    row: &DecisionRow,
+    public_base_url: &str,
+    apikey: Option<&str>,
+) -> PushReleasePayload {
     let is_nzb = row
         .provider_kind
         .as_deref()
@@ -198,8 +207,12 @@ fn build_payload(row: &DecisionRow, public_base_url: &str) -> PushReleasePayload
     } else {
         (ArrProtocol::Torrent, "/torznab")
     };
+    let apikey_qs = match apikey {
+        Some(k) if !k.is_empty() => format!("?apikey={k}"),
+        _ => String::new(),
+    };
     let download_url = format!(
-        "{base}{prefix}/download/{id}",
+        "{base}{prefix}/download/{id}{apikey_qs}",
         base = public_base_url.trim_end_matches('/'),
         id = row.id,
     );
@@ -312,7 +325,7 @@ pub(crate) fn build_payload_for_test(
     row: &DecisionRow,
     public_base_url: &str,
 ) -> PushReleasePayload {
-    build_payload(row, public_base_url)
+    build_payload(row, public_base_url, None)
 }
 
 #[allow(
@@ -363,7 +376,7 @@ mod tests {
 
     #[test]
     fn payload_routes_torrent_through_torznab_prefix() {
-        let p = build_payload(&decision_row(Some("unit3d")), "http://h:3000");
+        let p = build_payload(&decision_row(Some("unit3d")), "http://h:3000", None);
         assert_eq!(p.protocol, ArrProtocol::Torrent);
         assert!(
             p.download_url.contains("/torznab/download/"),
@@ -376,7 +389,7 @@ mod tests {
 
     #[test]
     fn payload_routes_nzb_through_newznab_prefix() {
-        let p = build_payload(&decision_row(Some("newznab")), "http://h:3000");
+        let p = build_payload(&decision_row(Some("newznab")), "http://h:3000", None);
         assert_eq!(p.protocol, ArrProtocol::Usenet);
         assert!(
             p.download_url.contains("/newznab/download/"),
@@ -388,7 +401,7 @@ mod tests {
 
     #[test]
     fn payload_trims_trailing_slash_on_base_url() {
-        let p = build_payload(&decision_row(None), "http://h:3000/");
+        let p = build_payload(&decision_row(None), "http://h:3000/", None);
         // No double slash before /torznab/.
         assert!(!p.download_url.contains("//torznab"), "{}", p.download_url);
         assert!(p.download_url.starts_with("http://h:3000/torznab/"));
@@ -398,14 +411,14 @@ mod tests {
     fn payload_falls_back_to_decided_at_when_published_at_missing() {
         let mut row = decision_row(Some("unit3d"));
         row.published_at = None;
-        let p = build_payload(&row, "http://h");
+        let p = build_payload(&row, "http://h", None);
         assert_eq!(p.publish_date, row.decided_at);
     }
 
     #[test]
     fn payload_uses_published_at_when_provider_carried_it() {
         let row = decision_row(Some("unit3d"));
-        let p = build_payload(&row, "http://h");
+        let p = build_payload(&row, "http://h", None);
         assert_eq!(p.publish_date.unix_timestamp(), 1_700_000_000);
     }
 
@@ -453,11 +466,37 @@ mod tests {
     }
 
     #[test]
+    fn payload_embeds_apikey_in_download_url_when_auth_enabled() {
+        let p = build_payload(
+            &decision_row(Some("unit3d")),
+            "http://brarr:3000",
+            Some("supersecret123"),
+        );
+        assert!(
+            p.download_url.contains("?apikey=supersecret123"),
+            "{}",
+            p.download_url
+        );
+    }
+
+    #[test]
+    fn payload_omits_apikey_query_when_disabled() {
+        let p = build_payload(&decision_row(Some("unit3d")), "http://brarr:3000", None);
+        assert!(!p.download_url.contains("apikey"), "{}", p.download_url);
+    }
+
+    #[test]
+    fn payload_omits_apikey_query_when_empty_token() {
+        let p = build_payload(&decision_row(Some("unit3d")), "http://brarr:3000", Some(""));
+        assert!(!p.download_url.contains("apikey"), "{}", p.download_url);
+    }
+
+    #[test]
     fn legacy_provider_kind_none_routes_to_torrent() {
         // Decisions persisted before the provider_kind migration have
         // None — they should default to torrent since brarr's
         // historical default was UNIT3D.
-        let p = build_payload(&decision_row(None), "http://h");
+        let p = build_payload(&decision_row(None), "http://h", None);
         assert_eq!(p.protocol, ArrProtocol::Torrent);
     }
 }
