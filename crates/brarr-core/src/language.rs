@@ -113,27 +113,43 @@ impl Language {
     }
 }
 
+/// Strip a parenthesised region suffix from a language tag so
+/// `"Japanese (JP)"` and `"Chinese (CN)"` reach the matcher as
+/// `"japanese"` / `"chinese"`. Several UNIT3D forks (capybarabr in
+/// particular) emit `MediaInfo` with the ISO code wrapped in parens
+/// next to the English name. Without this normalisation the language
+/// falls into [`Language::Other`] and the rule engine's
+/// `audio: "jp"` filter never matches the release.
+fn normalize_language_tag(lang: &str) -> String {
+    let mut s = lang.trim().to_ascii_lowercase();
+    if let Some(open) = s.find('(') {
+        s.truncate(open);
+    }
+    s.trim().to_string()
+}
+
 /// Reconhece um campo `Language` do `MediaInfo` como Japonês. Cobre as
 /// formas que aparecem na prática: nome em inglês (`Japanese`), código
-/// ISO 639-1 (`ja`) e 639-2 (`jpn`), além do alias popular `jp`.
+/// ISO 639-1 (`ja`) e 639-2 (`jpn`), o alias popular `jp`, e o formato
+/// `Japanese (JP)` que UNIT3D forks BR usam.
 fn is_japanese_tag(lang: &str) -> bool {
-    let lc = lang.to_ascii_lowercase();
-    matches!(lc.as_str(), "japanese" | "ja" | "jp" | "jpn")
+    let base = normalize_language_tag(lang);
+    matches!(base.as_str(), "japanese" | "ja" | "jp" | "jpn")
 }
 
 /// Reconhece um campo `Language` do `MediaInfo` como Chinês. Aceita o
 /// nome em inglês, as variantes faladas mais comuns (Mandarim,
 /// Cantonês), o código ISO 639-1 (`zh`) com sufixos regionais (`zh-CN`,
-/// `zh-TW`) e o ISO 639-2 (`zho` / `chi`).
+/// `zh-TW`), o ISO 639-2 (`zho` / `chi`), e o formato `Chinese (CN)`.
 fn is_chinese_tag(lang: &str) -> bool {
-    let lc = lang.to_ascii_lowercase();
+    let base = normalize_language_tag(lang);
     if matches!(
-        lc.as_str(),
+        base.as_str(),
         "chinese" | "mandarin" | "cantonese" | "zh" | "zho" | "chi"
     ) {
         return true;
     }
-    lc.starts_with("zh-") || lc.starts_with("zh_") || lc.starts_with("chinese ")
+    base.starts_with("zh-") || base.starts_with("zh_") || base.starts_with("chinese ")
 }
 
 #[cfg(test)]
@@ -248,6 +264,22 @@ mod tests {
         assert_eq!(Language::from_mediainfo("ja", None), Language::Jp);
         assert_eq!(Language::from_mediainfo("JP", None), Language::Jp);
         assert_eq!(Language::from_mediainfo("jpn", None), Language::Jp);
+        // Parenthesised region suffixes — what capybarabr's MediaInfo
+        // emits in practice. Without normalisation these slip into
+        // Other(...) and the rule engine's `audio: "jp"` filter
+        // silently never matches.
+        assert_eq!(
+            Language::from_mediainfo("Japanese (JP)", None),
+            Language::Jp
+        );
+        assert_eq!(
+            Language::from_mediainfo("Japanese (jp)", None),
+            Language::Jp
+        );
+        assert_eq!(
+            Language::from_mediainfo("japanese (ja)", None),
+            Language::Jp
+        );
     }
 
     #[test]
@@ -260,6 +292,13 @@ mod tests {
         assert_eq!(Language::from_mediainfo("zh-TW", None), Language::Zh);
         assert_eq!(Language::from_mediainfo("zho", None), Language::Zh);
         assert_eq!(Language::from_mediainfo("chi", None), Language::Zh);
+        // Parenthesised region suffixes from UNIT3D fork output.
+        assert_eq!(Language::from_mediainfo("Chinese (CN)", None), Language::Zh);
+        assert_eq!(Language::from_mediainfo("Chinese (TW)", None), Language::Zh);
+        assert_eq!(
+            Language::from_mediainfo("Mandarin (CN)", None),
+            Language::Zh
+        );
     }
 
     #[test]

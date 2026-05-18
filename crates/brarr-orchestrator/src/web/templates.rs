@@ -59,6 +59,11 @@ pub struct DecisionView {
     /// `None` when the baseline already wins (no profile re-evaluation
     /// produced a higher number).
     pub winning_profile: Option<String>,
+    /// `true` when the operator explicitly chose a profile via the
+    /// `?profile=<uuid>` query param on the search detail URL. In that
+    /// case the score is the profile's exact output (no max-with-baseline
+    /// clamp) so the operator can read the literal A/B value.
+    pub profile_locked: bool,
     /// Rejected flag.
     pub rejected: bool,
     /// Comma-joined tags.
@@ -298,6 +303,10 @@ pub struct NewSearchModalPartial {
     /// Number of provider rows currently enabled — copy in the
     /// footer reads "Buscará em N providers ativos".
     pub provider_count: usize,
+    /// Persisted Quality Profiles — populates the "Avaliar com"
+    /// dropdown so the operator can A/B a profile's scoring against
+    /// the same search result set. Empty hides the dropdown entirely.
+    pub profiles: Vec<ProfileView>,
 }
 
 /// Quality Profiles index at `/profiles`.

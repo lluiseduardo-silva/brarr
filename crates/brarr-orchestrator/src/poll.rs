@@ -245,7 +245,26 @@ async fn pick_pushable<'a>(
     // resolver also handles the FK-orphan edge case (profile deleted
     // mid-poll) by falling back to the raw `push_threshold`.
     let threshold = crate::db::arr_instances::effective_threshold(state.pool(), arr).await?;
-    for d in decisions.iter().take_while(|d| d.score >= threshold) {
+    // Per-ARR score lookup: when a profile is attached, the decision's
+    // score under THAT profile drives the threshold gate (not the
+    // baseline score persisted in `d.score`). This is the missing half
+    // of the Quality Profile contract — without it, a strict anime
+    // profile attached to Sonarr would silently fall back to baseline
+    // scoring and either over-grab or under-grab.
+    let effective_score = |d: &crate::db::decisions::DecisionRow| -> u32 {
+        arr.profile_id
+            .and_then(|pid| d.profile_scores.get(&pid).copied())
+            .unwrap_or(d.score)
+    };
+    // `take_while` no longer works — sorted-by-baseline doesn't imply
+    // sorted-by-profile, so a release that fails the profile check
+    // can still hide a stronger candidate later in the list. Switch to
+    // a per-row `if score < threshold continue` so the scan is
+    // exhaustive.
+    for d in decisions {
+        if effective_score(d) < pick_threshold_for(d, threshold) {
+            continue;
+        }
         if !meets_quality(d) {
             debug!(
                 target: "brarr_orchestrator::poll",
@@ -359,6 +378,34 @@ fn title_looks_like_tv(title: &str) -> bool {
         i += 1;
     }
     false
+}
+
+/// Per-release threshold floor used by [`pick_pushable`].
+///
+/// Torrents get bumped by +1 so a release scoring *exactly* the
+/// profile's threshold doesn't slip through when the score sum is
+/// `rules + 0 seeders`. The engine adds `seeders.min(50)` to every
+/// score unconditionally, so a torrent landing on the threshold could
+/// equally be 0-seeders + over-tuned rules. Bumping by 1 forces the
+/// rules-or-seeders contribution to clear the gate strictly — which,
+/// combined with [`meets_quality`]'s 0-seeder skip, gives a
+/// belt-and-suspenders guarantee that auto-push picks a live torrent.
+///
+/// Usenet (Newznab) provider rows have no seeder concept, so the
+/// floor stays at the raw threshold.
+fn pick_threshold_for(d: &crate::db::decisions::DecisionRow, threshold: u32) -> u32 {
+    // Legacy rows pre-dating the `provider_kind` migration carry None
+    // — default to the safer "torrent" branch so a 0-seeder release
+    // can't slip through if the row is missing its provenance tag.
+    let is_usenet = d
+        .provider_kind
+        .as_deref()
+        .is_some_and(|k| k.eq_ignore_ascii_case("newznab"));
+    if is_usenet {
+        threshold
+    } else {
+        threshold.saturating_add(1)
+    }
 }
 
 /// Drop torrent releases that won't be grabbable — zero seeders means
@@ -657,6 +704,42 @@ mod tests {
     fn meets_quality_keeps_newznab_even_with_zero_seeders() {
         // NZB has no seeders concept — `seeders == 0` is the default.
         assert!(meets_quality(&decision_with(Some("newznab"), 0)));
+    }
+
+    #[test]
+    fn pick_threshold_bumps_torrent_by_one() {
+        // Torrents need to clear threshold strictly so a 0-seeder /
+        // exactly-on-threshold release doesn't auto-grab.
+        let unit3d = decision_with(Some("unit3d"), 0);
+        let torznab = decision_with(Some("torznab"), 0);
+        let plugin = decision_with(Some("plugin"), 0);
+        assert_eq!(pick_threshold_for(&unit3d, 330), 331);
+        assert_eq!(pick_threshold_for(&torznab, 330), 331);
+        assert_eq!(pick_threshold_for(&plugin, 330), 331);
+    }
+
+    #[test]
+    fn pick_threshold_keeps_usenet_at_base() {
+        let newznab = decision_with(Some("newznab"), 0);
+        assert_eq!(pick_threshold_for(&newznab, 330), 330);
+    }
+
+    #[test]
+    fn pick_threshold_handles_legacy_unset_provider_kind_as_torrent() {
+        // Legacy rows pre-dating the provider_kind migration carry
+        // None — treat the safer way (torrent semantics) so we don't
+        // accidentally grab a stale 0-seeder candidate.
+        let legacy = decision_with(None, 0);
+        assert_eq!(pick_threshold_for(&legacy, 330), 331);
+    }
+
+    #[test]
+    fn pick_threshold_saturates_at_u32_max() {
+        // Edge case: threshold already at the upper bound. Saturate
+        // instead of wrap, so the gate stays unreachable rather than
+        // collapsing to zero.
+        let torrent = decision_with(Some("unit3d"), 0);
+        assert_eq!(pick_threshold_for(&torrent, u32::MAX), u32::MAX);
     }
 
     #[test]

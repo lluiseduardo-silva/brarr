@@ -111,7 +111,17 @@
                 <span class="text-[10px] font-semibold uppercase tracking-[0.06em] text-fg-muted">
                     SCORE
                     {% if let Some(profile) = d.winning_profile %}
-                    <span class="text-accent-soft-fg normal-case font-medium" title="Profile {{ profile }} pontuou mais que o baseline ({{ d.baseline_score }}).">· via {{ profile }}</span>
+                        {% if d.profile_locked %}
+                            {# Operator forced this profile via ?profile= — show
+                               explicit lens + baseline delta so the A/B reads. #}
+                            <span class="text-accent-soft-fg normal-case font-medium"
+                                  title="Profile {{ profile }} ativo via filtro. Baseline daria {{ d.baseline_score }}.">
+                                · via {{ profile }}
+                                <span class="text-fg-muted">· baseline {{ d.baseline_score }}</span>
+                            </span>
+                        {% else %}
+                            <span class="text-accent-soft-fg normal-case font-medium" title="Profile {{ profile }} pontuou mais que o baseline ({{ d.baseline_score }}).">· via {{ profile }}</span>
+                        {% endif %}
                     {% endif %}
                 </span>
                 <span class="flex items-baseline gap-1">

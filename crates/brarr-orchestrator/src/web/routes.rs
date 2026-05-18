@@ -935,6 +935,11 @@ struct CreateSearchForm {
     season: Option<String>,
     #[serde(default)]
     episode: Option<String>,
+    /// Optional Quality Profile UUID — when set, the post-search
+    /// redirect carries `?profile=<uuid>` so the detail page renders
+    /// scores under that profile's engine. Empty string = baseline.
+    #[serde(default)]
+    profile_id: Option<String>,
 }
 
 #[allow(
@@ -975,7 +980,15 @@ async fn searches_create(
     // discarded by `hx-swap="none"`, and the user is left staring at
     // the dashboard wondering why nothing happened.
     let mut headers = HeaderMap::new();
-    let location = format!("/searches/{}", outcome.search.id);
+    let profile_qs = form
+        .profile_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .and_then(|s| Uuid::parse_str(s).ok())
+        .map(|u| format!("?profile={u}"))
+        .unwrap_or_default();
+    let location = format!("/searches/{}{}", outcome.search.id, profile_qs);
     headers.insert(
         "HX-Redirect",
         HeaderValue::from_str(&location).unwrap_or_else(|_| HeaderValue::from_static("/")),
@@ -1045,7 +1058,21 @@ async fn new_search_modal(State(state): State<AppState>) -> Result<Response, App
         .into_iter()
         .filter(|p| p.enabled)
         .count();
-    html(&NewSearchModalPartial { provider_count })
+    let profiles = quality_profiles::list_all(state.pool())
+        .await?
+        .into_iter()
+        .map(|p| ProfileView {
+            id: p.id.to_string(),
+            name: p.name,
+            description: p.description,
+            push_threshold: p.push_threshold,
+            is_preset: p.is_preset,
+        })
+        .collect();
+    html(&NewSearchModalPartial {
+        provider_count,
+        profiles,
+    })
 }
 
 // ─── Quality Profiles ─────────────────────────────────────────────
@@ -1363,18 +1390,35 @@ async fn profiles_update(
     Ok(resp)
 }
 
+#[derive(Debug, Deserialize)]
+struct SearchDetailQuery {
+    /// Optional profile UUID — when supplied, decision_view scores
+    /// against this profile's persisted score map instead of taking
+    /// the max-across-all-profiles default. Carries baseline as a
+    /// secondary annotation so the operator can compare deltas.
+    #[serde(default)]
+    profile: Option<String>,
+}
+
 async fn search_detail(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<SearchDetailQuery>,
 ) -> Result<Response, AppError> {
     let uuid = Uuid::parse_str(&id)
         .map_err(|e| AppError::InvalidInput(format!("invalid search id: {e}")))?;
     let search = searches::get_by_id(state.pool(), uuid).await?;
     let decisions_rows = decisions::list_for_search(state.pool(), uuid).await?;
     let profile_names = profile_name_map(state.pool()).await?;
+    let preferred_profile: Option<Uuid> = q
+        .profile
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .and_then(|s| Uuid::parse_str(s).ok());
     let decisions = decisions_rows
         .into_iter()
-        .map(|d| decision_view(d, &profile_names))
+        .map(|d| decision_view_with_profile(d, &profile_names, preferred_profile))
         .collect();
     let arr_rows = arr_instances::list_enabled(state.pool()).await?;
     let arr_instances = arr_rows.into_iter().map(arr_instance_view).collect();
@@ -1421,6 +1465,24 @@ fn decision_view(
     d: crate::db::decisions::DecisionRow,
     profile_names: &std::collections::HashMap<Uuid, String>,
 ) -> DecisionView {
+    decision_view_with_profile(d, profile_names, None)
+}
+
+/// Build a [`DecisionView`] honouring an operator-picked profile lock.
+///
+/// When `preferred_profile` is `None`, the displayed score is the
+/// max-across-baseline-and-every-profile (sensible default for the
+/// dashboard / releases / search detail without `?profile=`).
+///
+/// When `preferred_profile` is `Some(id)`, the score is *strictly* the
+/// chosen profile's output — even if it scores lower than baseline.
+/// That's the whole point of the profile lock: the operator wants to
+/// see what THIS rule list produces, not the best-of-N.
+fn decision_view_with_profile(
+    d: crate::db::decisions::DecisionRow,
+    profile_names: &std::collections::HashMap<Uuid, String>,
+    preferred_profile: Option<Uuid>,
+) -> DecisionView {
     let rule_chips: Vec<(String, String)> = d
         .matched_rules
         .iter()
@@ -1431,16 +1493,31 @@ fn decision_view(
     let subtitle_chips = subtitle_chips_from_languages(&d.subtitle_languages);
     let provider_initial = first_alpha_initial(&d.provider_name);
     let age = humanize_age(d.decided_at);
-    // Resolve the displayed score by taking the max of the baseline
-    // engine output + every per-profile score persisted at search time.
-    // Tracks the winning profile id so the template can show its name.
     let baseline_score = d.score;
-    let (display_score, winning_profile_id) = d
-        .profile_scores
-        .iter()
-        .max_by_key(|&(_, score)| *score)
-        .filter(|&(_, score)| *score > baseline_score)
-        .map_or((baseline_score, None), |(id, score)| (*score, Some(*id)));
+    let (display_score, winning_profile_id, profile_locked) = match preferred_profile {
+        Some(pid) => {
+            // Profile lock: read the exact persisted score for that
+            // profile (falls back to baseline if the search ran before
+            // the profile existed — search rows aren't retroactively
+            // re-scored). Always set the winning_profile name so the
+            // template surfaces which lens the operator's looking
+            // through, even when the profile ties or loses to baseline.
+            let pscore = d
+                .profile_scores
+                .get(&pid)
+                .copied()
+                .unwrap_or(baseline_score);
+            (pscore, Some(pid), true)
+        }
+        None => d
+            .profile_scores
+            .iter()
+            .max_by_key(|&(_, score)| *score)
+            .filter(|&(_, score)| *score > baseline_score)
+            .map_or((baseline_score, None, false), |(id, score)| {
+                (*score, Some(*id), false)
+            }),
+    };
     let winning_profile = winning_profile_id.and_then(|id| profile_names.get(&id).cloned());
     DecisionView {
         id: d.id.to_string(),
@@ -1449,6 +1526,7 @@ fn decision_view(
         score: display_score,
         baseline_score,
         winning_profile,
+        profile_locked,
         rejected: d.rejected,
         tags: d.tags.join(", "),
         matched_rules,
