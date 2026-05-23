@@ -428,6 +428,7 @@ dependencies = [
  "brarr-tracker-newznab",
  "brarr-tracker-unit3d",
  "futures",
+ "ipnet",
  "prost",
  "protoc-bin-vendored",
  "quick-xml",

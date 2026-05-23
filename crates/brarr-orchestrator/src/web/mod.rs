@@ -4,6 +4,7 @@
 //! updates. Tailwind ships via CDN per the project spec — no frontend
 //! build pipeline.
 
+pub mod ip;
 pub mod render;
 pub mod routes;
 pub mod templates;

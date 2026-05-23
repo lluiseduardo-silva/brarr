@@ -129,12 +129,29 @@ async fn not_found() -> Result<Response, AppError> {
 
 /// Middleware that gates every protected route on the auth cookie.
 /// When `AuthConfig::Disabled` is in effect it always passes through.
+///
+/// Bypass: if the caller IP (direct peer, or the original client when
+/// the peer is a trusted reverse proxy) matches a rule in
+/// `BypassConfig::peers`, auth is skipped. This is logged at `info!`
+/// so the bypass is auditable.
 async fn auth_middleware(
     State(state): State<AppState>,
     req: Request,
     next: Next,
 ) -> Result<Response, Response> {
     if !state.auth().is_enabled() {
+        return Ok(next.run(req).await);
+    }
+    let bypass = state.bypass();
+    if !bypass.peers.is_empty()
+        && let Some(ip) = crate::web::ip::caller_ip(&req, &bypass.proxies)
+        && bypass.peers.contains(ip)
+    {
+        info!(
+            target: "brarr_orchestrator::auth",
+            peer = %ip,
+            "auth bypass via trusted peer"
+        );
         return Ok(next.run(req).await);
     }
     let cookie = AuthConfig::cookie_from_headers(req.headers());
@@ -160,7 +177,16 @@ pub async fn serve(
     info!(target: "brarr_orchestrator::web", %addr, "starting HTTP server");
     let app = router(state, static_dir);
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await.map_err(AppError::Io)?;
+    // `into_make_service_with_connect_info` attaches a
+    // `ConnectInfo<SocketAddr>` extension to every request so the
+    // bypass middleware can see the actual peer (or, when wired with a
+    // trusted proxy, the original client via `X-Forwarded-For`).
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+    .map_err(AppError::Io)?;
     Ok(())
 }
 

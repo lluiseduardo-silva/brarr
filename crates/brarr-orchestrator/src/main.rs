@@ -13,6 +13,8 @@
 //! | `BRARR_GRPC_ADDR`              | `127.0.0.1:50051`            | bind address for the gRPC service    |
 //! | `BRARR_STATIC_DIR`             | `crates/brarr-orchestrator/static` | static asset directory         |
 //! | `BRARR_AUTH_TOKEN`             | _(unset, auth disabled)_     | shared admin token for UI + gRPC     |
+//! | `BRARR_BYPASS_AUTH_FROM`       | _(unset, no bypass)_         | trusted peer allowlist (CIDR/`loopback`/`private`) |
+//! | `BRARR_TRUSTED_PROXIES`        | _(unset, XFF ignored)_       | reverse proxies whose `X-Forwarded-For` we honor   |
 //! | `BRARR_PUBLIC_URL`             | _(derived from request)_     | external origin for *arr push URLs   |
 //! | `BRARR_ARR_POLL_INTERVAL_SECS` | `1800`                       | autobrr-style auto-push cadence      |
 //! | `RUST_LOG`                     | `info`                       | tracing-subscriber env filter        |
@@ -24,7 +26,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use brarr_decision_service::Engine;
-use brarr_orchestrator::{AppState, AuthConfig, db, grpc, poll, web};
+use brarr_orchestrator::{AppState, AuthConfig, BypassConfig, TrustedPeers, db, grpc, poll, web};
 use tracing::warn;
 use tracing_subscriber::EnvFilter;
 
@@ -54,7 +56,16 @@ async fn main() -> Result<()> {
             "BRARR_AUTH_TOKEN is unset — admin UI and gRPC are unauthenticated. Set it for production deployments."
         );
     }
-    let state = AppState::with_auth(pool, Engine::baseline(), auth.clone());
+    let bypass = load_bypass()?;
+    if !bypass.is_disabled() {
+        tracing::info!(
+            target: "brarr_orchestrator",
+            peer_rules = bypass.peers.len(),
+            proxy_rules = bypass.proxies.len(),
+            "auth bypass configured — requests from listed peers will skip the cookie/apikey check"
+        );
+    }
+    let state = AppState::with_auth_and_bypass(pool, Engine::baseline(), auth.clone(), bypass);
 
     println!("brarr-orchestrator");
     println!("  http  → http://{http_addr}");
@@ -68,6 +79,16 @@ async fn main() -> Result<()> {
             "DISABLED (dev mode)"
         }
     );
+    let bypass_summary = if state.bypass().is_disabled() {
+        "off".to_string()
+    } else {
+        format!(
+            "{} peer rule(s), {} proxy rule(s)",
+            state.bypass().peers.len(),
+            state.bypass().proxies.len()
+        )
+    };
+    println!("  bypass → {bypass_summary}");
     let poll_interval = poll::interval_from_env();
     println!(
         "  poll  → every {}s (set BRARR_ARR_POLL_INTERVAL_SECS to tune)",
@@ -108,6 +129,26 @@ fn init_tracing() {
 
 fn env_or(name: &str, default: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| default.to_string())
+}
+
+/// Build the [`BypassConfig`] from the two env vars
+/// (`BRARR_BYPASS_AUTH_FROM`, `BRARR_TRUSTED_PROXIES`). Unset vars
+/// produce empty lists. Bad entries crash startup with a clear message
+/// so misconfiguration is loud.
+fn load_bypass() -> Result<BypassConfig> {
+    let peers = match std::env::var("BRARR_BYPASS_AUTH_FROM").ok() {
+        Some(spec) if !spec.trim().is_empty() => TrustedPeers::parse(&spec)
+            .map_err(|e| anyhow::anyhow!(e))
+            .context("BRARR_BYPASS_AUTH_FROM")?,
+        _ => TrustedPeers::default(),
+    };
+    let proxies = match std::env::var("BRARR_TRUSTED_PROXIES").ok() {
+        Some(spec) if !spec.trim().is_empty() => TrustedPeers::parse(&spec)
+            .map_err(|e| anyhow::anyhow!(e))
+            .context("BRARR_TRUSTED_PROXIES")?,
+        _ => TrustedPeers::default(),
+    };
+    Ok(BypassConfig { peers, proxies })
 }
 
 async fn shutdown_signal() {

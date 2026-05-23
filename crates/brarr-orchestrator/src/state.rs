@@ -23,7 +23,7 @@ use brarr_decision_service::Engine;
 use brarr_plugin_host::{DEFAULT_TICK_INTERVAL, WasmEpochTicker};
 use wasmtime::{Config, Engine as WasmEngine};
 
-use crate::auth::AuthConfig;
+use crate::auth::{AuthConfig, BypassConfig};
 use crate::db::Pool;
 
 /// Cheaply cloneable handle to shared orchestrator state.
@@ -41,6 +41,7 @@ struct Inner {
     /// task aborts when the last `AppState` clone is dropped.
     wasm_ticker: WasmEpochTicker,
     auth: AuthConfig,
+    bypass: Arc<BypassConfig>,
 }
 
 impl AppState {
@@ -60,6 +61,9 @@ impl AppState {
     /// The wasm engine is created with `async_support(true)` so plugins
     /// can use the async host imports (`host_fetch`, etc.).
     ///
+    /// Bypass defaults to empty — use [`Self::with_auth_and_bypass`] to
+    /// wire the trusted-peer allowlist.
+    ///
     /// # Panics
     ///
     /// Panics if `wasmtime::Engine::new` fails — that only happens on
@@ -67,6 +71,22 @@ impl AppState {
     /// worth crashing on rather than papering over.
     #[must_use]
     pub fn with_auth(pool: Pool, engine: Engine, auth: AuthConfig) -> Self {
+        Self::with_auth_and_bypass(pool, engine, auth, BypassConfig::default())
+    }
+
+    /// Build a state handle with both [`AuthConfig`] and a
+    /// [`BypassConfig`] (trusted-peer allowlist + trusted-proxy list).
+    ///
+    /// # Panics
+    ///
+    /// Same as [`Self::with_auth`].
+    #[must_use]
+    pub fn with_auth_and_bypass(
+        pool: Pool,
+        engine: Engine,
+        auth: AuthConfig,
+        bypass: BypassConfig,
+    ) -> Self {
         let mut wasm_cfg = Config::new();
         wasm_cfg.async_support(true);
         wasm_cfg.epoch_interruption(true);
@@ -81,6 +101,7 @@ impl AppState {
                 wasm_engine,
                 wasm_ticker,
                 auth,
+                bypass: Arc::new(bypass),
             }),
         }
     }
@@ -96,6 +117,14 @@ impl AppState {
     #[must_use]
     pub fn auth(&self) -> &AuthConfig {
         &self.inner.auth
+    }
+
+    /// Borrow the bypass configuration (trusted peers + trusted
+    /// proxies). Always present — defaults to empty when not
+    /// configured, which means no requests are bypassed.
+    #[must_use]
+    pub fn bypass(&self) -> &BypassConfig {
+        &self.inner.bypass
     }
 
     /// Borrow the connection pool.

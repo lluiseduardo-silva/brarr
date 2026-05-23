@@ -295,6 +295,18 @@ async fn apikey_middleware(
     if !state.auth().is_enabled() {
         return Ok(next.run(req).await);
     }
+    let bypass = state.bypass();
+    if !bypass.peers.is_empty()
+        && let Some(ip) = crate::web::ip::caller_ip(&req, &bypass.proxies)
+        && bypass.peers.contains(ip)
+    {
+        tracing::info!(
+            target: "brarr_orchestrator::auth",
+            peer = %ip,
+            "torznab apikey bypass via trusted peer"
+        );
+        return Ok(next.run(req).await);
+    }
     let from_query = AuthConfig::apikey_from_query(req.uri().query());
     let from_header = AuthConfig::bearer_from_headers(req.headers());
     let candidate = from_query.or(from_header).unwrap_or("");

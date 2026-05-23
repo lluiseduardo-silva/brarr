@@ -60,6 +60,6 @@ pub mod search;
 pub mod state;
 pub mod web;
 
-pub use auth::AuthConfig;
+pub use auth::{AuthConfig, BypassConfig, TrustedPeers};
 pub use error::AppError;
 pub use state::AppState;
