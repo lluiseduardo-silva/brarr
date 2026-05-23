@@ -1,0 +1,15 @@
+{
+  "eventType": "Test",
+  "instanceName": "Sonarr",
+  "applicationUrl": "",
+  "series": {
+    "id": 1,
+    "title": "Test Title",
+    "path": "C:\\testpath",
+    "tvdbId": 0,
+    "tvMazeId": 0,
+    "imdbId": "",
+    "type": "standard",
+    "year": 1970
+  }
+}

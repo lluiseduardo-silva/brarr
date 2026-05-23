@@ -9,6 +9,7 @@ pub mod render;
 pub mod routes;
 pub mod templates;
 pub mod torznab;
+pub mod webhooks;
 
 pub use routes::router;
 pub use routes::serve;

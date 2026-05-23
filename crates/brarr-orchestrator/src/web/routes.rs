@@ -98,10 +98,16 @@ pub fn router(state: AppState, static_dir: &std::path::Path) -> Router {
     // of the UI session cookie).
     let torznab = crate::web::torznab::router(state.clone());
 
+    // Inbound Radarr/Sonarr Connect webhooks. Same machine-facing
+    // auth model as Torznab (apikey query / bearer header / trusted
+    // peer bypass).
+    let webhooks = crate::web::webhooks::router(state.clone());
+
     // Open routes — login form, health, static files.
     Router::new()
         .merge(protected)
         .merge(torznab)
+        .merge(webhooks)
         .route("/login", get(login_get).post(login_post))
         .route("/healthz", get(healthz))
         .nest_service("/static", ServeDir::new(static_dir))

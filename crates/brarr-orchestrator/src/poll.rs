@@ -234,7 +234,22 @@ async fn run_once_radarr(state: &AppState, arr: &ArrInstanceRow) -> Result<PollS
 ///
 /// Returns the first matching decision, or `None` when the whole list
 /// is exhausted.
-async fn pick_pushable<'a>(
+/// Pick the top decision worth pushing to `arr`, applying the
+/// instance's effective threshold and `already_tried_release` /
+/// `already_pushed` dedup guards. Returns `None` when no decision
+/// clears the bar or every candidate has already been attempted.
+///
+/// Exposed at `pub(crate)` so the webhook handler can reuse the exact
+/// same gating logic the poller uses — three inline call sites in
+/// this file (`run_once_radarr`, `run_once_sonarr`,
+/// `run_once_season_pack`) plus the webhook share one implementation
+/// rather than each duplicating it.
+///
+/// # Errors
+///
+/// Surfaces [`AppError::Database`] on SQL failure (threshold lookup
+/// or dedup query).
+pub(crate) async fn pick_pushable<'a>(
     state: &AppState,
     arr: &ArrInstanceRow,
     decisions: &'a [crate::db::decisions::DecisionRow],

@@ -1,0 +1,16 @@
+{
+  "eventType": "MovieAdded",
+  "instanceName": "Radarr",
+  "applicationUrl": "https://radarr.example.com",
+  "addMethod": "manual",
+  "movie": {
+    "id": 42,
+    "title": "The Matrix",
+    "year": 1999,
+    "releaseDate": "1999-03-31",
+    "folderPath": "/movies/The Matrix (1999)",
+    "tmdbId": 603,
+    "imdbId": "tt0133093",
+    "overview": "Set in the 22nd century, The Matrix tells the story of a computer hacker..."
+  }
+}

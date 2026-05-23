@@ -1,0 +1,24 @@
+{
+  "eventType": "EpisodeAdded",
+  "instanceName": "Sonarr",
+  "applicationUrl": "https://sonarr.example.com",
+  "series": {
+    "id": 42,
+    "title": "Breaking Bad",
+    "path": "/tv/Breaking Bad",
+    "tvdbId": 81189,
+    "tvMazeId": 169,
+    "imdbId": "tt0903747",
+    "type": "standard",
+    "year": 2008
+  },
+  "episodes": [
+    {
+      "id": 1001,
+      "episodeNumber": 1,
+      "seasonNumber": 1,
+      "title": "Pilot",
+      "overview": "When chemistry teacher Walter White is diagnosed..."
+    }
+  ]
+}

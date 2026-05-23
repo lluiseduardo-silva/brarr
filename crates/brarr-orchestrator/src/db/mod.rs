@@ -13,6 +13,7 @@ pub mod providers;
 pub mod push_history;
 pub mod quality_profiles;
 pub mod searches;
+pub mod webhook_events;
 
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{ConnectOptions, SqlitePool};
