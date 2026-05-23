@@ -63,7 +63,9 @@ async fn dashboard_renders_with_zero_state() {
     let body = resp.text().await.unwrap();
     assert!(body.contains("Dashboard"));
     assert!(body.contains("Providers configurados"));
-    assert!(body.contains("Ainda não há buscas"));
+    // Shared empty-state text from `partials/search_row_list.html`
+    // (dashboard + /searches now render through the same partial).
+    assert!(body.contains("Nenhuma busca encontrada"));
 }
 
 #[tokio::test]

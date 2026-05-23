@@ -92,10 +92,29 @@ impl Brarr for BrarrService {
         &self,
         request: Request<RecentSearchesRequest>,
     ) -> Result<Response<RecentSearchesReply>, Status> {
-        let limit = request.into_inner().limit;
-        let rows = searches::recent(self.state.pool(), limit)
-            .await
-            .map_err(Status::from)?;
+        let req = request.into_inner();
+        let rows = if request_has_filters(&req) {
+            let params = searches::FilterParams {
+                tmdb_id: req.tmdb_id,
+                imdb_id: req.imdb_id.as_ref().filter(|s| !s.is_empty()).cloned(),
+                tvdb_id: req.tvdb_id,
+                season: req.season.and_then(|s| u16::try_from(s).ok()),
+                episode: req.episode.and_then(|e| u16::try_from(e).ok()),
+                from_unix: req.from_unix,
+                to_unix: req.to_unix,
+                has_kept_decision: req.has_kept_decision,
+                limit: req.limit,
+                offset: req.offset,
+            };
+            searches::filter(self.state.pool(), params)
+                .await
+                .map_err(Status::from)?
+        } else {
+            searches::recent(self.state.pool(), req.limit)
+                .await
+                .map_err(Status::from)?
+        };
+
         let mut out = Vec::with_capacity(rows.len());
         for r in rows {
             // Pull live decision count rather than trusting the
@@ -111,10 +130,30 @@ impl Brarr for BrarrService {
                 tmdb_id: r.tmdb_id.unwrap_or(0),
                 submitted_at_unix: r.submitted_at.unix_timestamp(),
                 result_count: count,
+                imdb_id: r.imdb_id.unwrap_or_default(),
+                tvdb_id: r.tvdb_id.unwrap_or(0),
+                season: r.season.map_or(0, u32::from),
+                episode: r.episode.map_or(0, u32::from),
             });
         }
         Ok(Response::new(RecentSearchesReply { searches: out }))
     }
+}
+
+/// Any filter field set ⇒ run the filtered path (which respects
+/// `offset` for pagination); otherwise stay on the cheap
+/// `searches::recent` path so existing clients see no behavior
+/// change.
+fn request_has_filters(req: &RecentSearchesRequest) -> bool {
+    req.tmdb_id.is_some()
+        || req.imdb_id.as_ref().is_some_and(|s| !s.is_empty())
+        || req.tvdb_id.is_some()
+        || req.season.is_some()
+        || req.episode.is_some()
+        || req.from_unix.is_some()
+        || req.to_unix.is_some()
+        || req.has_kept_decision.is_some()
+        || req.offset > 0
 }
 
 /// Start the gRPC server on `addr` and serve until shutdown is signalled.

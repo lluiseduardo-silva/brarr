@@ -48,7 +48,7 @@ use crate::web::templates::{
     DecisionView, ErrorTemplate, LoginTemplate, NewProfileModalPartial, NewSearchModalPartial,
     ProfileEditorTemplate, ProfileView, ProfilesTemplate, ProviderView, ProvidersListPartial,
     ProvidersTemplate, PushGroupView, PushHistoryView, PushesTemplate, RecentSearchView,
-    ReleasesTemplate, SearchDetailTemplate,
+    ReleasesTemplate, SearchDetailTemplate, SearchesFilterView, SearchesIndexTemplate,
 };
 use crate::{AppError, AppState};
 use brarr_core::TmdbId;
@@ -87,7 +87,7 @@ pub fn router(state: AppState, static_dir: &std::path::Path) -> Router {
         .route("/profiles/{id}/edit", get(profiles_edit))
         .route("/profiles/{id}/preview", post(profiles_preview))
         .route("/releases", get(releases_index))
-        .route("/searches", post(searches_create))
+        .route("/searches", get(searches_index).post(searches_create))
         .route("/searches/new", get(new_search_modal))
         .route("/searches/{id}", get(search_detail))
         .route("/logout", post(logout))
@@ -263,12 +263,7 @@ async fn dashboard(State(state): State<AppState>) -> Result<Response, AppError> 
 
     let recent_searches = recent_search_rows
         .into_iter()
-        .map(|s| RecentSearchView {
-            id: s.id.to_string(),
-            tmdb_id: s.tmdb_id.map_or_else(|| "-".to_string(), |v| v.to_string()),
-            submitted_at: format_ts(s.submitted_at),
-            result_count: s.result_count,
-        })
+        .map(search_row_view)
         .collect();
 
     let profile_names = profile_name_map(pool).await?;
@@ -1465,6 +1460,225 @@ async fn search_detail(
         failures: Vec::new(), // live failures aren't persisted today
     };
     html(&tmpl)
+}
+
+fn search_row_view(s: searches::SearchRow) -> RecentSearchView {
+    RecentSearchView {
+        id: s.id.to_string(),
+        tmdb_id: s.tmdb_id.map_or_else(|| "-".to_string(), |v| v.to_string()),
+        imdb_id: s.imdb_id.unwrap_or_else(|| "-".to_string()),
+        tvdb_id: s.tvdb_id.map_or_else(|| "-".to_string(), |v| v.to_string()),
+        season: s.season.map_or_else(String::new, |v| v.to_string()),
+        episode: s.episode.map_or_else(String::new, |v| v.to_string()),
+        submitted_at: format_ts(s.submitted_at),
+        result_count: s.result_count,
+    }
+}
+
+/// Query string for `GET /searches`. Every filter is optional; absent
+/// or empty values don't constrain. `page` is 1-indexed, `size` is
+/// clamped to [`MIN_SEARCHES_PAGE_SIZE`]..=200 with the page-size
+/// `<select>` defaulting to 50.
+#[derive(Debug, Default, Deserialize)]
+struct SearchesIndexQuery {
+    #[serde(default)]
+    tmdb_id: Option<String>,
+    #[serde(default)]
+    imdb_id: Option<String>,
+    #[serde(default)]
+    tvdb_id: Option<String>,
+    #[serde(default)]
+    season: Option<String>,
+    #[serde(default)]
+    episode: Option<String>,
+    #[serde(default)]
+    from: Option<String>,
+    #[serde(default)]
+    to: Option<String>,
+    #[serde(default)]
+    has_kept_decision: Option<String>,
+    #[serde(default)]
+    page: Option<u32>,
+    #[serde(default)]
+    size: Option<u32>,
+}
+
+const DEFAULT_SEARCHES_PAGE_SIZE: u32 = 50;
+const MIN_SEARCHES_PAGE_SIZE: u32 = 10;
+const MAX_SEARCHES_PAGE_SIZE: u32 = 200;
+
+#[allow(
+    clippy::similar_names,
+    reason = "tmdb/tvdb/imdb are domain-canonical identifier triplets; renaming hurts readability more than the lint helps"
+)]
+async fn searches_index(
+    State(state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<SearchesIndexQuery>,
+) -> Result<Response, AppError> {
+    let pool = state.pool();
+
+    let tmdb = nonblank(q.tmdb_id.as_deref()).and_then(|s| s.parse::<u32>().ok());
+    let imdb_raw = nonblank(q.imdb_id.as_deref()).map(str::to_string);
+    let tvdb = nonblank(q.tvdb_id.as_deref()).and_then(|s| s.parse::<u32>().ok());
+    let season = nonblank(q.season.as_deref()).and_then(|s| s.parse::<u16>().ok());
+    let episode = nonblank(q.episode.as_deref()).and_then(|s| s.parse::<u16>().ok());
+    let from_unix = nonblank(q.from.as_deref()).and_then(parse_iso_date_start);
+    let to_unix = nonblank(q.to.as_deref()).and_then(parse_iso_date_end);
+    let kept_choice = nonblank(q.has_kept_decision.as_deref()).unwrap_or("any");
+    let has_kept_decision = match kept_choice {
+        "yes" => Some(true),
+        "no" => Some(false),
+        _ => None,
+    };
+
+    let page = q.page.unwrap_or(1).max(1);
+    let size = q
+        .size
+        .unwrap_or(DEFAULT_SEARCHES_PAGE_SIZE)
+        .clamp(MIN_SEARCHES_PAGE_SIZE, MAX_SEARCHES_PAGE_SIZE);
+    let offset = page.saturating_sub(1).saturating_mul(size);
+
+    let params = searches::FilterParams {
+        tmdb_id: tmdb,
+        imdb_id: imdb_raw.clone(),
+        tvdb_id: tvdb,
+        season,
+        episode,
+        from_unix,
+        to_unix,
+        has_kept_decision,
+        limit: size,
+        offset,
+    };
+
+    let total_count = searches::count_filtered(pool, &params).await?;
+    let rows = searches::filter(pool, params).await?;
+    let recent_searches: Vec<RecentSearchView> = rows.into_iter().map(search_row_view).collect();
+
+    let total_pages = {
+        let size_u64 = u64::from(size);
+        let raw = total_count.div_ceil(size_u64);
+        u32::try_from(raw.max(1)).unwrap_or(u32::MAX)
+    };
+    let page = page.min(total_pages);
+    let has_prev = page > 1;
+    let has_next = page < total_pages;
+
+    let filters = SearchesFilterView {
+        tmdb_id: q.tmdb_id.clone().unwrap_or_default(),
+        imdb_id: q.imdb_id.clone().unwrap_or_default(),
+        tvdb_id: q.tvdb_id.clone().unwrap_or_default(),
+        season: q.season.clone().unwrap_or_default(),
+        episode: q.episode.clone().unwrap_or_default(),
+        from_date: q.from.clone().unwrap_or_default(),
+        to_date: q.to.clone().unwrap_or_default(),
+        has_kept_decision: kept_choice.to_string(),
+        page_size: size.to_string(),
+    };
+
+    let base_query = build_search_filter_query(&q, size);
+    let prev_href = if has_prev {
+        format!("/searches?{base_query}&page={}", page - 1)
+    } else {
+        String::new()
+    };
+    let next_href = if has_next {
+        format!("/searches?{base_query}&page={}", page + 1)
+    } else {
+        String::new()
+    };
+
+    let tmpl = SearchesIndexTemplate {
+        recent_searches,
+        filters,
+        page,
+        total_pages,
+        has_prev,
+        has_next,
+        prev_href,
+        next_href,
+        total_count,
+    };
+    html(&tmpl)
+}
+
+/// Convert `Option<&str>` to `Option<&str>` only when the trimmed
+/// value is non-empty. Centralises the "empty form input = no
+/// filter" treatment.
+fn nonblank(s: Option<&str>) -> Option<&str> {
+    s.map(str::trim).filter(|t| !t.is_empty())
+}
+
+/// Parse a `YYYY-MM-DD` form input to the Unix timestamp at the start
+/// of that day (UTC). Used for the `from=` filter lower bound.
+fn parse_iso_date_start(raw: &str) -> Option<i64> {
+    let date = time::Date::parse(
+        raw,
+        time::macros::format_description!("[year]-[month]-[day]"),
+    )
+    .ok()?;
+    Some(date.midnight().assume_utc().unix_timestamp())
+}
+
+/// Parse a `YYYY-MM-DD` form input to the Unix timestamp at the end
+/// of that day (UTC, 23:59:59). Used for the `to=` filter upper
+/// bound so the day boundary is inclusive.
+fn parse_iso_date_end(raw: &str) -> Option<i64> {
+    let date = time::Date::parse(
+        raw,
+        time::macros::format_description!("[year]-[month]-[day]"),
+    )
+    .ok()?;
+    let next = date.next_day()?;
+    Some(next.midnight().assume_utc().unix_timestamp() - 1)
+}
+
+/// Re-encode the filter portion of the search-index query so the
+/// pagination links preserve every active filter except `page`.
+fn build_search_filter_query(q: &SearchesIndexQuery, size: u32) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(v) = nonblank(q.tmdb_id.as_deref()) {
+        parts.push(format!("tmdb_id={}", urlencoding(v)));
+    }
+    if let Some(v) = nonblank(q.imdb_id.as_deref()) {
+        parts.push(format!("imdb_id={}", urlencoding(v)));
+    }
+    if let Some(v) = nonblank(q.tvdb_id.as_deref()) {
+        parts.push(format!("tvdb_id={}", urlencoding(v)));
+    }
+    if let Some(v) = nonblank(q.season.as_deref()) {
+        parts.push(format!("season={}", urlencoding(v)));
+    }
+    if let Some(v) = nonblank(q.episode.as_deref()) {
+        parts.push(format!("episode={}", urlencoding(v)));
+    }
+    if let Some(v) = nonblank(q.from.as_deref()) {
+        parts.push(format!("from={}", urlencoding(v)));
+    }
+    if let Some(v) = nonblank(q.to.as_deref()) {
+        parts.push(format!("to={}", urlencoding(v)));
+    }
+    if let Some(v) = nonblank(q.has_kept_decision.as_deref()) {
+        parts.push(format!("has_kept_decision={}", urlencoding(v)));
+    }
+    parts.push(format!("size={size}"));
+    parts.join("&")
+}
+
+/// Minimal URL-component encoder for the small set of characters
+/// these filter values may contain. Avoids pulling in a dedicated
+/// crate for what's effectively numeric + ISO-date strings.
+fn urlencoding(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for byte in s.bytes() {
+        let safe = byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~' | b':');
+        if safe {
+            out.push(byte as char);
+        } else {
+            let _ = std::fmt::Write::write_fmt(&mut out, format_args!("%{byte:02X}"));
+        }
+    }
+    out
 }
 
 fn provider_view(p: crate::db::providers::ProviderRow) -> ProviderView {

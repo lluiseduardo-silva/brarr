@@ -24,13 +24,24 @@ pub struct DashboardTemplate {
     pub recent_decisions: Vec<DecisionView>,
 }
 
-/// Compact search summary for the dashboard list.
+/// Compact search summary for the dashboard list AND the
+/// `/searches` filtered history page. Both surfaces include the
+/// shared `partials/search_row_list.html` partial — extending this
+/// struct with a new field reflects automatically in both.
 #[derive(Debug)]
 pub struct RecentSearchView {
     /// Stringified UUID.
     pub id: String,
     /// TMDb id used in the request (formatted as `"-"` if absent).
     pub tmdb_id: String,
+    /// IMDb id used in the request (formatted as `"-"` if absent).
+    pub imdb_id: String,
+    /// TVDB id used in the request (formatted as `"-"` if absent).
+    pub tvdb_id: String,
+    /// Season filter (formatted; empty when not set).
+    pub season: String,
+    /// Episode filter (formatted; empty when not set).
+    pub episode: String,
     /// ISO-8601 timestamp.
     pub submitted_at: String,
     /// Number of kept results.
@@ -362,6 +373,62 @@ pub struct ProfileEditorTemplate {
     /// HTML-rendered breakdown returned by the preview endpoint. Empty
     /// on first render; populated by the HTMX preview swap target.
     pub preview_html: String,
+}
+
+/// Filtered + paginated history at `/searches`.
+#[derive(Debug, Template)]
+#[template(path = "searches_index.html")]
+pub struct SearchesIndexTemplate {
+    /// Search rows for the current page. Rendered by the shared
+    /// `partials/search_row_list.html` partial (same one the dashboard
+    /// uses).
+    pub recent_searches: Vec<RecentSearchView>,
+    /// Filter values currently applied. Used to pre-fill the form so
+    /// the page is bookmarkable / reloadable.
+    pub filters: SearchesFilterView,
+    /// 1-indexed current page.
+    pub page: u32,
+    /// Total page count (>= 1 even when `recent_searches` is empty so
+    /// the footer doesn't divide by zero).
+    pub total_pages: u32,
+    /// Whether to render the "previous page" link.
+    pub has_prev: bool,
+    /// Whether to render the "next page" link.
+    pub has_next: bool,
+    /// Rendered URL for the previous page. Empty when `has_prev` is
+    /// false. The handler builds these so the template doesn't have
+    /// to know the filter query string format.
+    pub prev_href: String,
+    /// Rendered URL for the next page.
+    pub next_href: String,
+    /// Total matches across all pages (denominator in the footer).
+    pub total_count: u64,
+}
+
+/// Per-field current filter state for [`SearchesIndexTemplate`].
+/// Every field is a string so the template can stuff it into `<input
+/// value="...">` without further formatting. Empty strings mean "no
+/// filter".
+#[derive(Debug, Default)]
+pub struct SearchesFilterView {
+    /// TMDb id (numeric string or empty).
+    pub tmdb_id: String,
+    /// IMDb id (with or without `tt` prefix, or empty).
+    pub imdb_id: String,
+    /// TVDB id (numeric or empty).
+    pub tvdb_id: String,
+    /// Season number (or empty).
+    pub season: String,
+    /// Episode number (or empty).
+    pub episode: String,
+    /// ISO date `YYYY-MM-DD` for the lower bound (or empty).
+    pub from_date: String,
+    /// ISO date `YYYY-MM-DD` for the upper bound (or empty).
+    pub to_date: String,
+    /// `"any"` (default) | `"yes"` | `"no"`.
+    pub has_kept_decision: String,
+    /// Selected page size as a string for the `<select>` binding.
+    pub page_size: String,
 }
 
 /// Single-search view at `/searches/{id}`.

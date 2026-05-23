@@ -96,28 +96,13 @@
     <div class="card-hairline bg-bg-surface border border-border-default rounded-xl">
         <div class="flex items-center justify-between px-5 py-4">
             <h2 class="text-lg font-semibold text-fg-primary">Buscas recentes</h2>
-            <span class="text-xs text-fg-muted">últimas {{ recent_searches.len() }}</span>
+            <div class="flex items-center gap-3">
+                <span class="text-xs text-fg-muted">últimas {{ recent_searches.len() }}</span>
+                <a href="/searches" class="text-xs text-accent-soft-fg hover:text-accent-solid">ver tudo →</a>
+            </div>
         </div>
         <div class="h-px bg-border-default"></div>
-        {% if recent_searches.is_empty() %}
-        <p class="px-5 py-6 text-sm italic text-fg-muted">Ainda não há buscas registradas.</p>
-        {% else %}
-        <ul>
-        {% for s in recent_searches %}
-            <li class="flex items-center justify-between gap-3 px-5 py-3 {% if !loop.first %}border-t border-border-default{% endif %}">
-                <div class="flex items-center gap-3 min-w-0">
-                    <time class="font-mono text-xs text-fg-muted whitespace-nowrap"
-                          data-datetime="{{ s.submitted_at }}"
-                          data-datetime-style="short">{{ s.submitted_at }}</time>
-                    <span class="font-mono text-[11px] px-2 py-0.5 rounded bg-bg-muted text-fg-secondary whitespace-nowrap">tmdb:{{ s.tmdb_id }}</span>
-                    <span class="text-sm text-fg-primary font-medium whitespace-nowrap">{{ s.result_count }} resultados</span>
-                </div>
-                <a href="/searches/{{ s.id }}"
-                   class="font-mono text-xs text-accent-soft-fg hover:text-accent-solid truncate max-w-[120px]">{{ s.id }}</a>
-            </li>
-        {% endfor %}
-        </ul>
-        {% endif %}
+        {% include "partials/search_row_list.html" %}
     </div>
 
     <div class="card-hairline bg-bg-surface border border-border-default rounded-xl">

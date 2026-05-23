@@ -62,6 +62,24 @@ message ProviderSummary {
 
 message RecentSearchesRequest {
   uint32 limit = 1; // 0 → server default (20). Capped server-side at 200.
+
+  // Optional filters. When any field is set, the server runs a
+  // filtered query instead of the simple recent-N path. All filters
+  // are AND-combined. Empty / unset fields don't constrain.
+  optional uint32 tmdb_id = 2;
+  optional string imdb_id = 3;
+  optional uint32 tvdb_id = 4;
+  optional uint32 season = 5;
+  optional uint32 episode = 6;
+  optional int64 from_unix = 7;
+  optional int64 to_unix = 8;
+  // Tri-state: omit = any, true = only searches with at least one
+  // non-rejected decision, false = only searches with zero kept
+  // decisions.
+  optional bool has_kept_decision = 9;
+  // Row offset for pagination. Combined with `limit` to fetch
+  // subsequent pages.
+  uint32 offset = 10;
 }
 message RecentSearchesReply {
   repeated SearchSummary searches = 1;
@@ -72,4 +90,11 @@ message SearchSummary {
   uint32 tmdb_id = 2;
   int64 submitted_at_unix = 3;
   uint32 result_count = 4;
+
+  // Non-TMDb axis fields. Empty string for IMDb means unset; zero
+  // for tvdb/season/episode means unset.
+  string imdb_id = 5;
+  uint32 tvdb_id = 6;
+  uint32 season = 7;
+  uint32 episode = 8;
 }

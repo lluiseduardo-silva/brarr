@@ -1,0 +1,34 @@
+{# Shared search-history row list. Used by both the dashboard's
+   "Buscas recentes" card and the /searches filtered history page so
+   both surfaces render identically when RecentSearchView gains new
+   fields. Parent context must expose `recent_searches:
+   Vec<RecentSearchView>`. #}
+{% if recent_searches.is_empty() %}
+<p class="px-5 py-6 text-sm italic text-fg-muted">Nenhuma busca encontrada.</p>
+{% else %}
+<ul>
+{% for s in recent_searches %}
+    <li class="flex items-center justify-between gap-3 px-5 py-3 {% if !loop.first %}border-t border-border-default{% endif %}">
+        <div class="flex items-center gap-3 min-w-0 flex-wrap">
+            <time class="font-mono text-xs text-fg-muted whitespace-nowrap"
+                  data-datetime="{{ s.submitted_at }}"
+                  data-datetime-style="short">{{ s.submitted_at }}</time>
+            {% if s.tmdb_id != "-" %}
+            <span class="font-mono text-[11px] px-2 py-0.5 rounded bg-bg-muted text-fg-secondary whitespace-nowrap">tmdb:{{ s.tmdb_id }}</span>
+            {% endif %}
+            {% if s.imdb_id != "-" %}
+            <span class="font-mono text-[11px] px-2 py-0.5 rounded bg-bg-muted text-fg-secondary whitespace-nowrap">imdb:{{ s.imdb_id }}</span>
+            {% endif %}
+            {% if s.tvdb_id != "-" %}
+            <span class="font-mono text-[11px] px-2 py-0.5 rounded bg-bg-muted text-fg-secondary whitespace-nowrap">
+                tvdb:{{ s.tvdb_id }}{% if !s.season.is_empty() %} · S{{ s.season }}{% if !s.episode.is_empty() %}E{{ s.episode }}{% endif %}{% endif %}
+            </span>
+            {% endif %}
+            <span class="text-sm text-fg-primary font-medium whitespace-nowrap">{{ s.result_count }} resultados</span>
+        </div>
+        <a href="/searches/{{ s.id }}"
+           class="font-mono text-xs text-accent-soft-fg hover:text-accent-solid truncate max-w-[120px]">{{ s.id }}</a>
+    </li>
+{% endfor %}
+</ul>
+{% endif %}

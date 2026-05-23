@@ -134,6 +134,144 @@ pub async fn recent(pool: &Pool, limit: u32) -> Result<Vec<SearchRow>, AppError>
     rows.iter().map(row_to_search).collect()
 }
 
+/// Filter expression for [`filter`] / [`count_filtered`]. Every field
+/// is optional — absent fields don't constrain the result set.
+///
+/// Note: `limit` / `offset` only apply to [`filter`]; [`count_filtered`]
+/// ignores them so the page counter reflects the unbounded total.
+#[derive(Debug, Clone, Default)]
+pub struct FilterParams {
+    /// Match `searches.tmdb_id` exactly.
+    pub tmdb_id: Option<u32>,
+    /// Match `searches.imdb_id` exactly (string comparison — the
+    /// stored form already includes the `tt` prefix or not as the
+    /// caller submitted it).
+    pub imdb_id: Option<String>,
+    /// Match `searches.tvdb_id` exactly.
+    pub tvdb_id: Option<u32>,
+    /// Match `searches.season` exactly. Only meaningful when combined
+    /// with `tvdb_id`.
+    pub season: Option<u16>,
+    /// Match `searches.episode` exactly. Only meaningful when combined
+    /// with `tvdb_id` + `season`.
+    pub episode: Option<u16>,
+    /// Lower bound on `submitted_at` (Unix seconds, inclusive).
+    pub from_unix: Option<i64>,
+    /// Upper bound on `submitted_at` (Unix seconds, inclusive).
+    pub to_unix: Option<i64>,
+    /// `Some(true)` keeps only searches that produced at least one
+    /// non-rejected decision. `Some(false)` keeps only searches that
+    /// produced no kept decisions (zero results or every release
+    /// rejected). `None` matches both.
+    pub has_kept_decision: Option<bool>,
+    /// Maximum rows to return (clamped 1..=200; 0 → 50 default).
+    pub limit: u32,
+    /// Row offset for pagination. Unbounded by design — SQLite handles
+    /// large offsets fine and the UI gates page size.
+    pub offset: u32,
+}
+
+/// Return the filtered + paginated subset of searches matching `p`.
+///
+/// Sort order is always `submitted_at DESC` (newest first); a future
+/// "sort by result count" would require an additional field.
+///
+/// # Performance note
+///
+/// No indexes exist on `tmdb_id` / `imdb_id` / `tvdb_id` today. The
+/// orchestrator's working set is small (thousands of searches at
+/// most), so SQLite scans the table in microseconds. Add partial
+/// indexes if EXPLAIN QUERY PLAN ever shows a hot spot.
+///
+/// # Errors
+///
+/// Surfaces a [`sqlx::Error`] on SQL failure.
+pub async fn filter(pool: &Pool, p: FilterParams) -> Result<Vec<SearchRow>, AppError> {
+    let limit = clamp_limit(p.limit);
+    let offset = p.offset;
+    let mut qb = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
+        "SELECT id, tmdb_id, imdb_id, tvdb_id, season, episode, submitted_at, result_count, request_json \
+         FROM searches",
+    );
+    push_filters(&mut qb, &p);
+    qb.push(" ORDER BY submitted_at DESC LIMIT ")
+        .push_bind(i64::from(limit))
+        .push(" OFFSET ")
+        .push_bind(i64::from(offset));
+    let rows = qb.build().fetch_all(pool).await?;
+    rows.iter().map(row_to_search).collect()
+}
+
+/// Total number of rows matching `p`, ignoring `limit` / `offset`.
+/// Used by the UI to compute total pages without a second roundtrip
+/// per page.
+///
+/// # Errors
+///
+/// Surfaces a [`sqlx::Error`] on SQL failure.
+pub async fn count_filtered(pool: &Pool, p: &FilterParams) -> Result<u64, AppError> {
+    let mut qb = sqlx::QueryBuilder::<sqlx::Sqlite>::new("SELECT COUNT(*) AS n FROM searches");
+    push_filters(&mut qb, p);
+    let row = qb.build().fetch_one(pool).await?;
+    let n: i64 = row.try_get("n")?;
+    Ok(u64::try_from(n).unwrap_or(0))
+}
+
+/// Append the `WHERE ...` clauses for `p`. Lives between `filter` and
+/// `count_filtered` so the two stay in sync — a filter that's
+/// honored by one but not the other is an immediate UI bug.
+fn push_filters(qb: &mut sqlx::QueryBuilder<'_, sqlx::Sqlite>, p: &FilterParams) {
+    let mut where_pushed = false;
+    let mut separator = |qb: &mut sqlx::QueryBuilder<'_, sqlx::Sqlite>| {
+        if where_pushed {
+            qb.push(" AND ");
+        } else {
+            qb.push(" WHERE ");
+            where_pushed = true;
+        }
+    };
+    if let Some(v) = p.tmdb_id {
+        separator(qb);
+        qb.push("tmdb_id = ").push_bind(i64::from(v));
+    }
+    if let Some(v) = &p.imdb_id {
+        separator(qb);
+        qb.push("imdb_id = ").push_bind(v.clone());
+    }
+    if let Some(v) = p.tvdb_id {
+        separator(qb);
+        qb.push("tvdb_id = ").push_bind(i64::from(v));
+    }
+    if let Some(v) = p.season {
+        separator(qb);
+        qb.push("season = ").push_bind(i64::from(v));
+    }
+    if let Some(v) = p.episode {
+        separator(qb);
+        qb.push("episode = ").push_bind(i64::from(v));
+    }
+    if let Some(v) = p.from_unix {
+        separator(qb);
+        qb.push("submitted_at >= ").push_bind(v);
+    }
+    if let Some(v) = p.to_unix {
+        separator(qb);
+        qb.push("submitted_at <= ").push_bind(v);
+    }
+    if let Some(v) = p.has_kept_decision {
+        separator(qb);
+        if v {
+            qb.push(
+                "EXISTS (SELECT 1 FROM decisions WHERE decisions.search_id = searches.id AND decisions.rejected = 0)",
+            );
+        } else {
+            qb.push(
+                "NOT EXISTS (SELECT 1 FROM decisions WHERE decisions.search_id = searches.id AND decisions.rejected = 0)",
+            );
+        }
+    }
+}
+
 /// Fetch a single search by id.
 ///
 /// # Errors
@@ -288,5 +426,309 @@ mod tests {
         let rows = recent(&pool, 10).await.unwrap();
         assert_eq!(rows[0].id, second.id);
         assert_eq!(rows[1].id, first.id);
+    }
+
+    // ---- filter() tests ------------------------------------------
+
+    async fn seed_filter_fixture(pool: &Pool) -> Vec<Uuid> {
+        // Three searches: one TMDb movie, one IMDb movie, one TV tuple.
+        let mut ids = Vec::new();
+        for req in [
+            SearchRequestJson {
+                tmdb_id: Some(603),
+                ..SearchRequestJson::default()
+            },
+            SearchRequestJson {
+                imdb_id: Some("tt0133093".to_string()),
+                ..SearchRequestJson::default()
+            },
+            SearchRequestJson {
+                tvdb_id: Some(81189),
+                season: Some(1),
+                episode: Some(1),
+                ..SearchRequestJson::default()
+            },
+        ] {
+            let row = create(pool, req).await.unwrap();
+            ids.push(row.id);
+            // Stagger timestamps so ORDER BY submitted_at DESC is
+            // deterministic (matters for the pagination tests).
+            tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+        }
+        ids
+    }
+
+    #[tokio::test]
+    async fn filter_with_no_constraints_returns_all() {
+        let pool = open_memory().await.unwrap();
+        seed_filter_fixture(&pool).await;
+        let rows = filter(
+            &pool,
+            FilterParams {
+                limit: 50,
+                ..FilterParams::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn filter_by_tmdb_isolates_movie_search() {
+        let pool = open_memory().await.unwrap();
+        seed_filter_fixture(&pool).await;
+        let rows = filter(
+            &pool,
+            FilterParams {
+                tmdb_id: Some(603),
+                limit: 50,
+                ..FilterParams::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].tmdb_id, Some(603));
+    }
+
+    #[tokio::test]
+    async fn filter_by_imdb_isolates_imdb_search() {
+        let pool = open_memory().await.unwrap();
+        seed_filter_fixture(&pool).await;
+        let rows = filter(
+            &pool,
+            FilterParams {
+                imdb_id: Some("tt0133093".to_string()),
+                limit: 50,
+                ..FilterParams::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].imdb_id.as_deref(), Some("tt0133093"));
+    }
+
+    #[tokio::test]
+    async fn filter_by_tvdb_season_episode_combines() {
+        let pool = open_memory().await.unwrap();
+        seed_filter_fixture(&pool).await;
+        let rows = filter(
+            &pool,
+            FilterParams {
+                tvdb_id: Some(81189),
+                season: Some(1),
+                episode: Some(1),
+                limit: 50,
+                ..FilterParams::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].tvdb_id, Some(81189));
+        assert_eq!(rows[0].season, Some(1));
+        assert_eq!(rows[0].episode, Some(1));
+    }
+
+    #[tokio::test]
+    async fn filter_date_window_excludes_outside() {
+        let pool = open_memory().await.unwrap();
+        seed_filter_fixture(&pool).await;
+        // Far-future bounds should match nothing.
+        let rows = filter(
+            &pool,
+            FilterParams {
+                from_unix: Some(99_999_999_999),
+                limit: 50,
+                ..FilterParams::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(rows.is_empty());
+        // Far-past upper bound also matches nothing.
+        let rows = filter(
+            &pool,
+            FilterParams {
+                to_unix: Some(0),
+                limit: 50,
+                ..FilterParams::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(rows.is_empty());
+    }
+
+    #[tokio::test]
+    async fn filter_pagination_limit_and_offset() {
+        let pool = open_memory().await.unwrap();
+        seed_filter_fixture(&pool).await;
+        let page1 = filter(
+            &pool,
+            FilterParams {
+                limit: 2,
+                offset: 0,
+                ..FilterParams::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(page1.len(), 2);
+        let page2 = filter(
+            &pool,
+            FilterParams {
+                limit: 2,
+                offset: 2,
+                ..FilterParams::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(page2.len(), 1);
+        // No overlap between pages.
+        assert!(page1.iter().all(|r| r.id != page2[0].id));
+    }
+
+    #[tokio::test]
+    async fn count_filtered_matches_filter_row_count_when_unpaginated() {
+        let pool = open_memory().await.unwrap();
+        seed_filter_fixture(&pool).await;
+        let p = FilterParams {
+            tvdb_id: Some(81189),
+            ..FilterParams::default()
+        };
+        assert_eq!(count_filtered(&pool, &p).await.unwrap(), 1);
+        let p_all = FilterParams::default();
+        assert_eq!(count_filtered(&pool, &p_all).await.unwrap(), 3);
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "two parallel insertion blocks keep the kept-vs-rejected fixture readable inline"
+    )]
+    async fn filter_has_kept_decision_distinguishes_with_and_without() {
+        use crate::db::decisions::{self, DecisionInsert};
+        use brarr_core::{ReleaseKind, Resolution};
+
+        let pool = open_memory().await.unwrap();
+        let with_kept = create(
+            &pool,
+            SearchRequestJson {
+                tmdb_id: Some(101),
+                ..SearchRequestJson::default()
+            },
+        )
+        .await
+        .unwrap();
+        let without = create(
+            &pool,
+            SearchRequestJson {
+                tmdb_id: Some(102),
+                ..SearchRequestJson::default()
+            },
+        )
+        .await
+        .unwrap();
+        // First search gets a kept decision.
+        decisions::insert(
+            &pool,
+            DecisionInsert {
+                search_id: with_kept.id,
+                provider_id: None,
+                provider_name: "p".to_string(),
+                release_name: "r".to_string(),
+                release_id_remote: 1,
+                score: 800,
+                rejected: false,
+                tags: Vec::new(),
+                matched_rules: Vec::new(),
+                seeders: 1,
+                leechers: 0,
+                size_bytes: 1,
+                resolution: Resolution::P1080,
+                kind: ReleaseKind::WebDl,
+                download_url: None,
+                details_url: None,
+                provider_kind: Some("unit3d".to_string()),
+                published_at: None,
+                audio_languages: Vec::new(),
+                subtitle_languages: Vec::new(),
+                profile_scores: std::collections::HashMap::new(),
+            },
+        )
+        .await
+        .unwrap();
+        // Second gets a rejected decision (so the EXISTS branch
+        // sees decisions exist but none are kept).
+        decisions::insert(
+            &pool,
+            DecisionInsert {
+                search_id: without.id,
+                provider_id: None,
+                provider_name: "p".to_string(),
+                release_name: "r".to_string(),
+                release_id_remote: 2,
+                score: 0,
+                rejected: true,
+                tags: Vec::new(),
+                matched_rules: Vec::new(),
+                seeders: 0,
+                leechers: 0,
+                size_bytes: 1,
+                resolution: Resolution::P720,
+                kind: ReleaseKind::WebDl,
+                download_url: None,
+                details_url: None,
+                provider_kind: Some("unit3d".to_string()),
+                published_at: None,
+                audio_languages: Vec::new(),
+                subtitle_languages: Vec::new(),
+                profile_scores: std::collections::HashMap::new(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let kept_only = filter(
+            &pool,
+            FilterParams {
+                has_kept_decision: Some(true),
+                limit: 50,
+                ..FilterParams::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(kept_only.len(), 1);
+        assert_eq!(kept_only[0].id, with_kept.id);
+
+        let no_kept = filter(
+            &pool,
+            FilterParams {
+                has_kept_decision: Some(false),
+                limit: 50,
+                ..FilterParams::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(no_kept.len(), 1);
+        assert_eq!(no_kept[0].id, without.id);
+
+        // None → both searches returned.
+        let either = filter(
+            &pool,
+            FilterParams {
+                limit: 50,
+                ..FilterParams::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(either.len(), 2);
     }
 }
