@@ -22,7 +22,7 @@
 
 services:
   orchestrator:
-    image: ghcr.io/lluiseduardo-silva/brarr:${BRARR_IMAGE_TAG:-latest}
+    image: ghcr.io/lluiseduardo-silva/brarr:${BRARR_IMAGE_TAG:-v0.1.4}
     container_name: brarr
     restart: unless-stopped
 
