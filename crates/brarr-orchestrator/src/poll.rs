@@ -47,6 +47,14 @@ pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(1800);
 /// providers' rate limits.
 const PER_MOVIE_DELAY: Duration = Duration::from_secs(5);
 
+/// How long after a season pack push the per-episode fallback stays
+/// suppressed for the same (arr, tvdb, season). 24h = generous import
+/// window for Sonarr to grab + unpack + import the pack while the
+/// wanted endpoint still flags the episodes individually. After the
+/// window expires the fallback resumes so coverage isn't stuck
+/// waiting on a dead pack.
+const SEASON_PACK_DEDUP_WINDOW_SECS: i64 = 86_400;
+
 /// Summary returned from [`run_once_for_instance`] — small enough to
 /// embed in an HTMX badge after the manual-poll button.
 #[derive(Debug, Default, Clone)]
@@ -619,6 +627,43 @@ async fn run_once_sonarr(state: &AppState, arr: &ArrInstanceRow) -> Result<PollS
         }
 
         if pack_pushed {
+            if groups_processed < group_count {
+                time::sleep(PER_MOVIE_DELAY).await;
+            }
+            continue;
+        }
+
+        // Cross-cycle pack guard. If a pack covering this (arr, tvdb,
+        // season) was already pushed successfully in the last 24h
+        // (`SEASON_PACK_DEDUP_WINDOW_SECS`), Sonarr is presumably still
+        // importing it — even though the wanted list still shows the
+        // episodes individually. Pushing per-episode releases now
+        // duplicates the grab and floods the *arr's download client.
+        //
+        // Reproduces the bug seen on The Boys S04: pack pushed at
+        // 21:29, per-episode releases pushed at 21:53/54 because the
+        // wanted endpoint still flagged S04E01-E08 as missing.
+        let tvdb_id_u32 = group
+            .first()
+            .and_then(|ep| ep.series.as_ref())
+            .map_or(0, |s| s.tvdb_id);
+        if tvdb_id_u32 > 0
+            && push_history::season_pack_already_pushed(
+                state.pool(),
+                arr.id,
+                tvdb_id_u32,
+                season,
+                SEASON_PACK_DEDUP_WINDOW_SECS,
+            )
+            .await?
+        {
+            info!(
+                target: "brarr_orchestrator::poll",
+                arr_name = %arr.name,
+                series = %series_title,
+                season = season,
+                "season pack pushed recently; skipping per-episode fallback to avoid duplicate grabs"
+            );
             if groups_processed < group_count {
                 time::sleep(PER_MOVIE_DELAY).await;
             }

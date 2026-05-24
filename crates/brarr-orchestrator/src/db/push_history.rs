@@ -303,6 +303,54 @@ const fn i64_from_u64(v: u64) -> i64 {
     v as i64
 }
 
+/// Has a *season pack* covering `(tvdb_id, season)` already been
+/// pushed successfully to this *arr instance within the last
+/// `within_secs` seconds?
+///
+/// Identifies "pack-axis" pushes by joining
+/// `push_history → decisions → searches` and matching searches that
+/// targeted the whole season (`tvdb_id = ?`, `season = ?`,
+/// `episode IS NULL`). The episode-axis searches the per-episode
+/// fallback runs use `episode = N` so they're excluded.
+///
+/// The `within_secs` window protects against a stale pack push that
+/// never resulted in a grab — after the window expires the poller
+/// falls back to per-episode pushes so coverage doesn't get stuck
+/// waiting on a dead pack.
+///
+/// # Errors
+///
+/// Returns [`AppError::Database`] on SQL failure.
+pub async fn season_pack_already_pushed(
+    pool: &Pool,
+    arr_instance_id: Uuid,
+    tvdb_id: u32,
+    season: u16,
+    within_secs: i64,
+) -> Result<bool, AppError> {
+    let cutoff = OffsetDateTime::now_utc().unix_timestamp() - within_secs;
+    let row = sqlx::query(
+        "SELECT COUNT(*) AS n \
+         FROM push_history ph \
+         JOIN decisions  d ON d.id = ph.decision_id \
+         JOIN searches   s ON s.id = d.search_id \
+         WHERE ph.arr_instance_id = ? \
+           AND ph.status = 'ok' \
+           AND ph.pushed_at >= ? \
+           AND s.tvdb_id = ? \
+           AND s.season  = ? \
+           AND s.episode IS NULL",
+    )
+    .bind(arr_instance_id.to_string())
+    .bind(cutoff)
+    .bind(i64::from(tvdb_id))
+    .bind(i64::from(season))
+    .fetch_one(pool)
+    .await?;
+    let n: i64 = row.try_get("n")?;
+    Ok(n > 0)
+}
+
 /// Has this `(decision_id, arr_instance_id)` pair already been pushed
 /// successfully? Used by the auto-push path to avoid double-grabbing
 /// the same release when the search reruns.
@@ -583,6 +631,191 @@ mod tests {
         let list = list_for_decision(&pool, did).await.unwrap();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].id, row.id);
+    }
+
+    /// Build a decision whose parent search row carries the given
+    /// TVDB axis. Used by the season-pack dedup tests so the join
+    /// in `season_pack_already_pushed` can find a match.
+    async fn make_decision_for_tvdb_season(
+        pool: &Pool,
+        tvdb_id: u32,
+        season: u16,
+        episode: Option<u16>,
+    ) -> Uuid {
+        let search = searches::create(
+            pool,
+            SearchRequestJson {
+                tvdb_id: Some(tvdb_id),
+                season: Some(season),
+                episode,
+                ..SearchRequestJson::default()
+            },
+        )
+        .await
+        .unwrap();
+        let row = decisions::insert(
+            pool,
+            DecisionInsert {
+                search_id: search.id,
+                provider_id: None,
+                provider_name: "p".into(),
+                release_name: format!("The.Boys.S{season:02}.1080p"),
+                release_id_remote: 999,
+                score: 800,
+                rejected: false,
+                tags: vec![],
+                matched_rules: vec![],
+                seeders: 1,
+                leechers: 0,
+                size_bytes: 1,
+                resolution: Resolution::P1080,
+                kind: ReleaseKind::WebDl,
+                download_url: None,
+                details_url: None,
+                provider_kind: Some("unit3d".into()),
+                published_at: None,
+                audio_languages: Vec::new(),
+                subtitle_languages: Vec::new(),
+                profile_scores: std::collections::HashMap::new(),
+            },
+        )
+        .await
+        .unwrap();
+        row.id
+    }
+
+    #[tokio::test]
+    async fn season_pack_dedup_detects_recent_pack_push() {
+        let pool = open_memory().await.unwrap();
+        let aid = make_arr_instance(&pool).await;
+        // Pack search row → episode IS NULL.
+        let pack_did = make_decision_for_tvdb_season(&pool, 81189, 4, None).await;
+        insert(
+            &pool,
+            NewPushHistory {
+                decision_id: pack_did,
+                arr_instance_id: aid,
+                arr_instance_name: "sonarr-main",
+                arr_kind: ArrKind::Sonarr,
+                status: PushStatus::Ok,
+                http_status: Some(200),
+                response_body: None,
+                rejections: None,
+            },
+        )
+        .await
+        .unwrap();
+        // 24h window: pack pushed just now ⇒ hit.
+        assert!(
+            season_pack_already_pushed(&pool, aid, 81189, 4, 86_400)
+                .await
+                .unwrap()
+        );
+        // Wrong season ⇒ no hit.
+        assert!(
+            !season_pack_already_pushed(&pool, aid, 81189, 5, 86_400)
+                .await
+                .unwrap()
+        );
+        // Wrong tvdb ⇒ no hit.
+        assert!(
+            !season_pack_already_pushed(&pool, aid, 99999, 4, 86_400)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn season_pack_dedup_ignores_per_episode_pushes() {
+        let pool = open_memory().await.unwrap();
+        let aid = make_arr_instance(&pool).await;
+        // Per-episode search row → episode = Some(1). Should NOT
+        // count as a season-pack push.
+        let ep_did = make_decision_for_tvdb_season(&pool, 81189, 4, Some(1)).await;
+        insert(
+            &pool,
+            NewPushHistory {
+                decision_id: ep_did,
+                arr_instance_id: aid,
+                arr_instance_name: "sonarr-main",
+                arr_kind: ArrKind::Sonarr,
+                status: PushStatus::Ok,
+                http_status: Some(200),
+                response_body: None,
+                rejections: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            !season_pack_already_pushed(&pool, aid, 81189, 4, 86_400)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn season_pack_dedup_ignores_failed_pack_pushes() {
+        let pool = open_memory().await.unwrap();
+        let aid = make_arr_instance(&pool).await;
+        let pack_did = make_decision_for_tvdb_season(&pool, 81189, 4, None).await;
+        insert(
+            &pool,
+            NewPushHistory {
+                decision_id: pack_did,
+                arr_instance_id: aid,
+                arr_instance_name: "sonarr-main",
+                arr_kind: ArrKind::Sonarr,
+                status: PushStatus::HttpError,
+                http_status: Some(400),
+                response_body: Some("unknown series"),
+                rejections: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            !season_pack_already_pushed(&pool, aid, 81189, 4, 86_400)
+                .await
+                .unwrap(),
+            "failed pack push should not block the per-episode fallback"
+        );
+    }
+
+    #[tokio::test]
+    async fn season_pack_dedup_respects_time_window() {
+        let pool = open_memory().await.unwrap();
+        let aid = make_arr_instance(&pool).await;
+        let pack_did = make_decision_for_tvdb_season(&pool, 81189, 4, None).await;
+        insert(
+            &pool,
+            NewPushHistory {
+                decision_id: pack_did,
+                arr_instance_id: aid,
+                arr_instance_name: "sonarr-main",
+                arr_kind: ArrKind::Sonarr,
+                status: PushStatus::Ok,
+                http_status: Some(200),
+                response_body: None,
+                rejections: None,
+            },
+        )
+        .await
+        .unwrap();
+        // Negative window pushes the cutoff to the future ⇒ row's
+        // unix timestamp falls below cutoff ⇒ no hit. Exercises the
+        // `pushed_at >= cutoff` predicate without sleeping.
+        assert!(
+            !season_pack_already_pushed(&pool, aid, 81189, 4, -10)
+                .await
+                .unwrap()
+        );
+        // Generous window ⇒ hit.
+        assert!(
+            season_pack_already_pushed(&pool, aid, 81189, 4, 86_400)
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]
