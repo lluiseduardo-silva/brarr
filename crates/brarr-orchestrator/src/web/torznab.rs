@@ -448,7 +448,11 @@ async fn handle_api_inner(
     // emits. *arr download clients only carry credentials in the query
     // string, not headers — without this the apikey middleware returns
     // 401 when they later dereference an `<enclosure url>`.
-    let apikey = state.auth().token();
+    // Snapshot the token as an owned String — see push.rs for the
+    // same dance: the auth ArcSwap guard is short-lived, so we clone
+    // the value before crossing async / handler boundaries.
+    let apikey_owned = state.auth_token_owned();
+    let apikey = apikey_owned.as_deref();
 
     match t.as_str() {
         "caps" => Ok(xml_response(StatusCode::OK, render_caps()?)),

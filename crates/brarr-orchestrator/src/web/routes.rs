@@ -19,6 +19,8 @@
 
 use std::fmt::Write as _;
 use std::net::SocketAddr;
+use std::sync::Arc;
+use std::time::Duration;
 
 use axum::Router;
 use axum::extract::{Form, Path, Request, State};
@@ -35,7 +37,9 @@ use tracing::info;
 use uuid::Uuid;
 
 use crate::auth::{AuthConfig, SESSION_COOKIE};
+use crate::auth::{BypassConfig, TrustedPeers};
 use crate::db::quality_profiles;
+use crate::db::settings;
 use crate::db::{arr_instances, decisions, providers, push_history, searches};
 #[allow(
     unused_imports,
@@ -45,10 +49,12 @@ use crate::search::run_tmdb_search;
 use crate::web::render::html;
 use crate::web::templates::{
     ArrInstanceView, ArrInstancesListPartial, ArrInstancesTemplate, DashboardTemplate,
-    DecisionView, ErrorTemplate, LoginTemplate, NewProfileModalPartial, NewSearchModalPartial,
-    ProfileEditorTemplate, ProfileView, ProfilesTemplate, ProviderView, ProvidersListPartial,
-    ProvidersTemplate, PushGroupView, PushHistoryView, PushesTemplate, RecentSearchView,
+    DecisionView, EditArrInstanceModalPartial, EditProviderModalPartial, ErrorTemplate,
+    LoginTemplate, NewProfileModalPartial, NewSearchModalPartial, ProfileEditorTemplate,
+    ProfileView, ProfilesTemplate, ProviderView, ProvidersListPartial, ProvidersTemplate,
+    PushGroupView, PushHistoryView, PushesFilterView, PushesTemplate, RecentSearchView,
     ReleasesTemplate, SearchDetailTemplate, SearchesFilterView, SearchesIndexTemplate,
+    SettingsFlash, SettingsTemplate, SettingsValues,
 };
 use crate::{AppError, AppState};
 use brarr_core::TmdbId;
@@ -61,7 +67,11 @@ pub fn router(state: AppState, static_dir: &std::path::Path) -> Router {
     let protected = Router::new()
         .route("/", get(dashboard))
         .route("/providers", get(providers_index).post(providers_create))
-        .route("/providers/{id}", delete(providers_delete))
+        .route(
+            "/providers/{id}",
+            delete(providers_delete).put(providers_update),
+        )
+        .route("/providers/{id}/edit", get(providers_edit))
         .route("/providers/{id}/test", post(providers_test))
         .route("/providers/{id}/probe", get(providers_probe))
         .route("/providers/{id}/toggle", post(providers_toggle))
@@ -69,9 +79,14 @@ pub fn router(state: AppState, static_dir: &std::path::Path) -> Router {
             "/arr-instances",
             get(arr_instances_index).post(arr_instances_create),
         )
-        .route("/arr-instances/{id}", delete(arr_instances_delete))
+        .route(
+            "/arr-instances/{id}",
+            delete(arr_instances_delete).put(arr_instances_update),
+        )
+        .route("/arr-instances/{id}/edit", get(arr_instances_edit))
         .route("/arr-instances/{id}/test", post(arr_instances_test))
         .route("/arr-instances/{id}/poll-now", post(arr_instances_poll_now))
+        .route("/arr-instances/{id}/toggle", post(arr_instances_toggle))
         .route(
             "/arr-instances/{id}/threshold",
             post(arr_instances_update_threshold),
@@ -90,6 +105,9 @@ pub fn router(state: AppState, static_dir: &std::path::Path) -> Router {
         .route("/searches", get(searches_index).post(searches_create))
         .route("/searches/new", get(new_search_modal))
         .route("/searches/{id}", get(search_detail))
+        .route("/settings", get(settings_index))
+        .route("/settings/general", post(settings_general))
+        .route("/settings/token", post(settings_token))
         .route("/logout", post(logout))
         .layer(auth_layer);
 
@@ -708,7 +726,7 @@ async fn decisions_push(
         .map_err(|e| AppError::InvalidInput(format!("invalid arr_instance id: {e}")))?;
     let decision = decisions::get_by_id(state.pool(), decision_uuid).await?;
     let arr_row = arr_instances::get_by_id(state.pool(), arr_uuid).await?;
-    let base_url = crate::push::derive_request_base(&headers);
+    let base_url = crate::push::derive_request_base(&state, &headers);
     let row = crate::push::push_decision(&state, &decision, &arr_row, &base_url).await?;
     let html_fragment = render_push_badge(&decision.id.to_string(), &arr_row.id.to_string(), &row);
     let mut resp = (StatusCode::OK, html_fragment).into_response();
@@ -743,10 +761,74 @@ fn render_push_badge(
     )
 }
 
-async fn pushes_index(State(state): State<AppState>) -> Result<Response, AppError> {
-    let rows = push_history::recent(state.pool(), 500).await?;
+#[derive(Debug, Default, Deserialize)]
+struct PushesIndexQuery {
+    #[serde(default)]
+    arr_instance_id: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    from: Option<String>,
+    #[serde(default)]
+    to: Option<String>,
+    #[serde(default)]
+    release_query: Option<String>,
+}
+
+async fn pushes_index(
+    State(state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<PushesIndexQuery>,
+) -> Result<Response, AppError> {
+    let pool = state.pool();
+
+    let arr_id = nonblank(q.arr_instance_id.as_deref()).and_then(|s| Uuid::parse_str(s).ok());
+    let status_choice = nonblank(q.status.as_deref()).unwrap_or("any");
+    let status = match status_choice {
+        "ok" => Some(crate::db::push_history::PushStatus::Ok),
+        "http_error" => Some(crate::db::push_history::PushStatus::HttpError),
+        "transport_error" => Some(crate::db::push_history::PushStatus::TransportError),
+        _ => None,
+    };
+    let from_unix = nonblank(q.from.as_deref()).and_then(parse_iso_date_start);
+    let to_unix = nonblank(q.to.as_deref()).and_then(parse_iso_date_end);
+    let release_query = nonblank(q.release_query.as_deref()).map(str::to_string);
+
+    let params = crate::db::push_history::FilterParams {
+        arr_instance_id: arr_id,
+        status,
+        from_unix,
+        to_unix,
+        release_query: release_query.clone(),
+        limit: 500,
+        offset: 0,
+    };
+    let total_count = crate::db::push_history::count_filtered(pool, &params).await?;
+    let rows = crate::db::push_history::filter(pool, params).await?;
     let groups = group_pushes(rows);
-    html(&PushesTemplate { groups })
+
+    // Populate the arr-instance dropdown — needs both enabled +
+    // disabled rows so a filter set against a soft-disabled arr
+    // doesn't disappear silently.
+    let arr_rows = arr_instances::list_all(pool).await?;
+    let arr_options = arr_rows
+        .into_iter()
+        .map(|a| (a.id.to_string(), a.name))
+        .collect();
+
+    let filters = PushesFilterView {
+        arr_instance_id: q.arr_instance_id.clone().unwrap_or_default(),
+        status: status_choice.to_string(),
+        from_date: q.from.clone().unwrap_or_default(),
+        to_date: q.to.clone().unwrap_or_default(),
+        release_query: q.release_query.clone().unwrap_or_default(),
+    };
+
+    html(&PushesTemplate {
+        groups,
+        filters,
+        arr_options,
+        total_count,
+    })
 }
 
 /// Group flat push_history rows by (release_name, arr_instance_name)
@@ -1681,6 +1763,303 @@ fn urlencoding(s: &str) -> String {
     out
 }
 
+// ---- settings page -------------------------------------------------
+
+const MIN_POLL_INTERVAL_SECS: u64 = 60;
+
+async fn settings_index(State(state): State<AppState>) -> Result<Response, AppError> {
+    let values = load_settings_values(&state).await?;
+    let tmpl = SettingsTemplate {
+        values,
+        flash: None,
+    };
+    html(&tmpl)
+}
+
+async fn load_settings_values(state: &AppState) -> Result<SettingsValues, AppError> {
+    let map = settings::get_all(state.pool()).await?;
+    let get = |k: &str| -> String { map.get(k).cloned().unwrap_or_default() };
+    Ok(SettingsValues {
+        auth_enabled: state.auth().is_enabled(),
+        bypass_auth_from: get(settings::KEY_BYPASS_AUTH_FROM),
+        trusted_proxies: get(settings::KEY_TRUSTED_PROXIES),
+        public_url: get(settings::KEY_PUBLIC_URL),
+        poll_interval_secs: if map.contains_key(settings::KEY_POLL_INTERVAL_SECS) {
+            get(settings::KEY_POLL_INTERVAL_SECS)
+        } else {
+            // Show the live (env- or default-derived) value so the
+            // box doesn't pretend the orchestrator is using whatever
+            // the form happens to be pre-filled with.
+            state.poll_interval().as_secs().to_string()
+        },
+        log_level: get(settings::KEY_LOG_LEVEL),
+        backtrace: {
+            let v = get(settings::KEY_BACKTRACE);
+            if v.is_empty() { "0".to_string() } else { v }
+        },
+    })
+}
+
+fn settings_flash_render(
+    state: &AppState,
+    flash: SettingsFlash,
+) -> futures::future::BoxFuture<'_, Result<Response, AppError>> {
+    Box::pin(async move {
+        let mut values = load_settings_values(state).await?;
+        // Echo back the just-submitted (possibly invalid) values
+        // doesn't happen here — load_settings_values already reflects
+        // whatever the save actually persisted.
+        values.auth_enabled = state.auth().is_enabled();
+        let tmpl = SettingsTemplate {
+            values,
+            flash: Some(flash),
+        };
+        html(&tmpl)
+    })
+}
+
+#[derive(Debug, Deserialize)]
+struct SettingsGeneralForm {
+    #[serde(default)]
+    bypass_auth_from: String,
+    #[serde(default)]
+    trusted_proxies: String,
+    #[serde(default)]
+    public_url: String,
+    #[serde(default)]
+    poll_interval_secs: String,
+    #[serde(default)]
+    log_level: String,
+    #[serde(default)]
+    backtrace: String,
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "settings save is one linear validate→persist→swap story; splitting hides the per-field cancel paths"
+)]
+async fn settings_general(
+    State(state): State<AppState>,
+    Form(form): Form<SettingsGeneralForm>,
+) -> Result<Response, AppError> {
+    // Parse + validate every field BEFORE persisting anything so a
+    // typo in one box doesn't half-apply the form.
+    let bypass_spec = form.bypass_auth_from.trim();
+    let proxies_spec = form.trusted_proxies.trim();
+    let peers = if bypass_spec.is_empty() {
+        TrustedPeers::default()
+    } else {
+        match TrustedPeers::parse(bypass_spec) {
+            Ok(p) => p,
+            Err(e) => {
+                return settings_flash_render(
+                    &state,
+                    SettingsFlash {
+                        kind: "err".to_string(),
+                        message: format!("Whitelist inválida: {e}"),
+                    },
+                )
+                .await;
+            }
+        }
+    };
+    let proxies = if proxies_spec.is_empty() {
+        TrustedPeers::default()
+    } else {
+        match TrustedPeers::parse(proxies_spec) {
+            Ok(p) => p,
+            Err(e) => {
+                return settings_flash_render(
+                    &state,
+                    SettingsFlash {
+                        kind: "err".to_string(),
+                        message: format!("Proxies confiáveis inválidos: {e}"),
+                    },
+                )
+                .await;
+            }
+        }
+    };
+
+    let public_url = form.public_url.trim();
+    let public_url_opt = if public_url.is_empty() {
+        None
+    } else {
+        Some(public_url.trim_end_matches('/').to_string())
+    };
+
+    let interval_secs = if form.poll_interval_secs.trim().is_empty() {
+        None
+    } else {
+        match form.poll_interval_secs.trim().parse::<u64>() {
+            Ok(secs) if secs >= MIN_POLL_INTERVAL_SECS => Some(secs),
+            Ok(secs) => {
+                return settings_flash_render(
+                    &state,
+                    SettingsFlash {
+                        kind: "err".to_string(),
+                        message: format!(
+                            "Intervalo do poller {secs}s abaixo do mínimo de {MIN_POLL_INTERVAL_SECS}s."
+                        ),
+                    },
+                )
+                .await;
+            }
+            Err(e) => {
+                return settings_flash_render(
+                    &state,
+                    SettingsFlash {
+                        kind: "err".to_string(),
+                        message: format!("Intervalo inválido: {e}"),
+                    },
+                )
+                .await;
+            }
+        }
+    };
+
+    let log_spec = form.log_level.trim();
+    if !log_spec.is_empty()
+        && let Err(e) = state.runtime().log_reload.apply(log_spec)
+    {
+        return settings_flash_render(
+            &state,
+            SettingsFlash {
+                kind: "err".to_string(),
+                message: format!("Log level inválido: {e}"),
+            },
+        )
+        .await;
+    }
+
+    let backtrace = match form.backtrace.trim() {
+        "" | "0" => "0".to_string(),
+        "1" => "1".to_string(),
+        "full" => "full".to_string(),
+        other => {
+            return settings_flash_render(
+                &state,
+                SettingsFlash {
+                    kind: "err".to_string(),
+                    message: format!("Valor inválido pra backtrace: {other}"),
+                },
+            )
+            .await;
+        }
+    };
+
+    // Persist everything.
+    let pool = state.pool();
+    settings::set(pool, settings::KEY_BYPASS_AUTH_FROM, bypass_spec).await?;
+    settings::set(pool, settings::KEY_TRUSTED_PROXIES, proxies_spec).await?;
+    settings::set(pool, settings::KEY_PUBLIC_URL, public_url).await?;
+    settings::set(
+        pool,
+        settings::KEY_POLL_INTERVAL_SECS,
+        &interval_secs.map(|s| s.to_string()).unwrap_or_default(),
+    )
+    .await?;
+    settings::set(pool, settings::KEY_LOG_LEVEL, log_spec).await?;
+    settings::set(pool, settings::KEY_BACKTRACE, &backtrace).await?;
+
+    // Swap runtime config — atomic per-field.
+    state
+        .runtime()
+        .bypass
+        .store(Arc::new(BypassConfig { peers, proxies }));
+    state.runtime().public_url.store(Arc::new(public_url_opt));
+    if let Some(secs) = interval_secs {
+        state
+            .runtime()
+            .poll_interval
+            .store(Arc::new(Duration::from_secs(secs)));
+    }
+
+    settings_flash_render(
+        &state,
+        SettingsFlash {
+            kind: "ok".to_string(),
+            message: "Configurações salvas e aplicadas. Backtrace exige restart.".to_string(),
+        },
+    )
+    .await
+}
+
+#[derive(Debug, Deserialize)]
+#[allow(
+    clippy::struct_field_names,
+    reason = "all three values ARE tokens; renaming muddies the form mapping"
+)]
+struct SettingsTokenForm {
+    #[serde(default)]
+    current_token: String,
+    new_token: String,
+    confirm_token: String,
+}
+
+async fn settings_token(
+    State(state): State<AppState>,
+    Form(form): Form<SettingsTokenForm>,
+) -> Result<Response, AppError> {
+    let new = form.new_token.trim();
+    let confirm = form.confirm_token.trim();
+
+    if new.is_empty() {
+        return settings_flash_render(
+            &state,
+            SettingsFlash {
+                kind: "err".to_string(),
+                message: "Novo token não pode ser vazio.".to_string(),
+            },
+        )
+        .await;
+    }
+    if new != confirm {
+        return settings_flash_render(
+            &state,
+            SettingsFlash {
+                kind: "err".to_string(),
+                message: "Confirmação não bate com o novo token.".to_string(),
+            },
+        )
+        .await;
+    }
+
+    // When auth is already enabled, require the current token as
+    // confirmation — prevents an accidental rotation lockout when a
+    // session is still valid but the operator was just experimenting.
+    if state.auth().is_enabled() && !state.auth().token_matches(form.current_token.trim()) {
+        return settings_flash_render(
+            &state,
+            SettingsFlash {
+                kind: "err".to_string(),
+                message: "Token atual incorreto.".to_string(),
+            },
+        )
+        .await;
+    }
+
+    settings::set(state.pool(), settings::KEY_AUTH_TOKEN, new).await?;
+    let new_cfg = AuthConfig::from_optional(Some(new));
+    state.runtime().auth.store(Arc::new(new_cfg));
+
+    info!(
+        target: "brarr_orchestrator",
+        "admin token rotated via /settings — existing sessions invalidated"
+    );
+
+    settings_flash_render(
+        &state,
+        SettingsFlash {
+            kind: "ok".to_string(),
+            message:
+                "Token trocado. Sua sessão atual fica inválida no próximo request — entre de novo."
+                    .to_string(),
+        },
+    )
+    .await
+}
+
 fn provider_view(p: crate::db::providers::ProviderRow) -> ProviderView {
     ProviderView {
         id: p.id.to_string(),
@@ -1705,6 +2084,200 @@ async fn providers_toggle(
     let rows = providers::list_all(state.pool()).await?;
     let providers = rows.into_iter().map(provider_view).collect();
     html(&ProvidersListPartial { providers })
+}
+
+/// `GET /providers/{id}/edit` — return the edit modal pre-filled
+/// with the row's current values. HTMX swaps it into `#modal-target`.
+async fn providers_edit(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, AppError> {
+    let uuid = Uuid::parse_str(&id)
+        .map_err(|e| AppError::InvalidInput(format!("invalid provider id: {e}")))?;
+    let row = providers::get_by_id(state.pool(), uuid).await?;
+    html(&EditProviderModalPartial {
+        id: row.id.to_string(),
+        name: row.name,
+        base_url: row.base_url.to_string(),
+        api_token: row.api_token,
+        kind: row.kind,
+        plugin_path: row
+            .plugin_path
+            .as_ref()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+    })
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateProviderForm {
+    name: String,
+    base_url: String,
+    api_token: String,
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    plugin_path: Option<String>,
+}
+
+/// `PUT /providers/{id}` — apply edits. Returns the refreshed list
+/// partial so HTMX can swap the table in place.
+async fn providers_update(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Form(form): Form<UpdateProviderForm>,
+) -> Result<Response, AppError> {
+    let uuid = Uuid::parse_str(&id)
+        .map_err(|e| AppError::InvalidInput(format!("invalid provider id: {e}")))?;
+    let url = url::Url::parse(form.base_url.trim())
+        .map_err(|e| AppError::InvalidInput(format!("invalid base_url: {e}")))?;
+    let plugin_path_buf: Option<std::path::PathBuf> = form
+        .plugin_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from);
+    let kind = form
+        .kind
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            if plugin_path_buf.is_some() {
+                "plugin"
+            } else {
+                "unit3d"
+            }
+        });
+    providers::update(
+        state.pool(),
+        uuid,
+        providers::ProviderUpdate {
+            name: form.name.trim(),
+            base_url: &url,
+            api_token: form.api_token.trim(),
+            kind,
+            plugin_path: plugin_path_buf.as_deref(),
+        },
+    )
+    .await?;
+    let rows = providers::list_all(state.pool()).await?;
+    let providers = rows.into_iter().map(provider_view).collect();
+    html(&ProvidersListPartial { providers })
+}
+
+/// `POST /arr-instances/{id}/toggle` — mirror of providers_toggle for
+/// the *arr instances list.
+async fn arr_instances_toggle(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, AppError> {
+    let uuid = Uuid::parse_str(&id)
+        .map_err(|e| AppError::InvalidInput(format!("invalid arr_instance id: {e}")))?;
+    let current = arr_instances::get_by_id(state.pool(), uuid).await?;
+    arr_instances::set_enabled(state.pool(), uuid, !current.enabled).await?;
+    render_arr_instances_partial(&state).await
+}
+
+/// `GET /arr-instances/{id}/edit` — return the edit modal partial.
+async fn arr_instances_edit(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, AppError> {
+    let uuid = Uuid::parse_str(&id)
+        .map_err(|e| AppError::InvalidInput(format!("invalid arr_instance id: {e}")))?;
+    let row = arr_instances::get_by_id(state.pool(), uuid).await?;
+    let profile_rows = quality_profiles::list_all(state.pool()).await?;
+    let profiles = profile_rows
+        .into_iter()
+        .map(|p| ProfileView {
+            id: p.id.to_string(),
+            name: p.name,
+            description: p.description,
+            push_threshold: p.push_threshold,
+            is_preset: p.is_preset,
+        })
+        .collect();
+    html(&EditArrInstanceModalPartial {
+        id: row.id.to_string(),
+        name: row.name,
+        kind: row.kind.label().to_string(),
+        base_url: row.base_url.to_string(),
+        api_key: row.api_key,
+        push_threshold: row.push_threshold.to_string(),
+        profiles,
+        profile_id: row.profile_id.map(|u| u.to_string()).unwrap_or_default(),
+    })
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateArrInstanceForm {
+    name: String,
+    base_url: String,
+    api_key: String,
+    #[serde(default)]
+    push_threshold: Option<String>,
+    #[serde(default)]
+    profile_id: Option<String>,
+}
+
+/// `PUT /arr-instances/{id}` — apply edits + return refreshed list.
+async fn arr_instances_update(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Form(form): Form<UpdateArrInstanceForm>,
+) -> Result<Response, AppError> {
+    let uuid = Uuid::parse_str(&id)
+        .map_err(|e| AppError::InvalidInput(format!("invalid arr_instance id: {e}")))?;
+    let url = url::Url::parse(form.base_url.trim())
+        .map_err(|e| AppError::InvalidInput(format!("invalid base_url: {e}")))?;
+    let push_threshold = form
+        .push_threshold
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::parse::<u32>)
+        .transpose()
+        .map_err(|e| AppError::InvalidInput(format!("push_threshold must be 0..=1000: {e}")))?
+        .unwrap_or(150);
+    let profile_id = form
+        .profile_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(Uuid::parse_str)
+        .transpose()
+        .map_err(|e| AppError::InvalidInput(format!("profile_id deve ser uuid: {e}")))?;
+    arr_instances::update(
+        state.pool(),
+        uuid,
+        arr_instances::ArrInstanceUpdate {
+            name: form.name.trim(),
+            base_url: &url,
+            api_key: form.api_key.trim(),
+            push_threshold,
+            profile_id,
+        },
+    )
+    .await?;
+    render_arr_instances_partial(&state).await
+}
+
+/// Build the `ArrInstancesListPartial` shared by the toggle + update
+/// handlers — same join-against-profiles pattern the index uses, but
+/// returned as a partial so HTMX can swap just the table.
+async fn render_arr_instances_partial(state: &AppState) -> Result<Response, AppError> {
+    let rows = arr_instances::list_all(state.pool()).await?;
+    let profile_rows = quality_profiles::list_all(state.pool()).await?;
+    let profile_by_id: std::collections::HashMap<
+        Uuid,
+        &crate::db::quality_profiles::QualityProfileRow,
+    > = profile_rows.iter().map(|p| (p.id, p)).collect();
+    let instances = rows
+        .iter()
+        .map(|r| arr_instance_view_with_profile(r, &profile_by_id))
+        .collect();
+    html(&ArrInstancesListPartial { instances })
 }
 
 fn decision_view(

@@ -70,8 +70,11 @@ pub async fn push_decision(
     // the .torrent / .nzb later without 401ing against brarr's auth
     // middleware. The *arr download client doesn't carry headers when
     // dereferencing the URL — only the query string survives.
-    let apikey = state.auth().token();
-    let payload = build_payload(decision, public_base_url, apikey);
+    // Snapshot the token as an owned String — the auth ArcSwap guard
+    // only lives for the duration of `state.auth_token_owned()`, so
+    // borrowing through it across the build_payload call would dangle.
+    let apikey = state.auth_token_owned();
+    let payload = build_payload(decision, public_base_url, apikey.as_deref());
     let client = match ArrClient::new(arr_instance.to_arr_instance()) {
         Ok(c) => c,
         Err(e) => {
@@ -285,27 +288,47 @@ fn extract_rejections(body: &str) -> Option<Vec<String>> {
 /// that brarr's download proxy URLs should resolve through.
 ///
 /// Resolution order:
-///   1. `BRARR_PUBLIC_URL` env var (recommended in production behind a
-///      reverse proxy where the listener host ≠ the public hostname).
-///   2. Otherwise, the per-request derivation in [`derive_request_base`]
-///      below — only useful when the push fires inside an HTTP handler
-///      that has the request headers in hand.
+///   1. [`AppState::public_url`] override (DB-backed runtime setting;
+///      falls through when the operator hasn't configured one).
+///   2. `BRARR_PUBLIC_URL` env var — kept as a startup fallback so
+///      first-boot deployments behind a reverse proxy work without
+///      having to log in and configure anything.
+///   3. The per-request derivation in [`derive_request_base`] — only
+///      useful when the push fires inside an HTTP handler that has
+///      the request headers in hand.
 ///
-/// The scheduled poller (commit E) passes its derived origin via the
-/// env-var path; the per-decision UI button passes the live request
-/// origin.
+/// The scheduled poller passes the state-derived origin via the
+/// env-var-or-runtime path; the per-decision UI button passes the
+/// live request origin.
+#[must_use]
+pub fn state_public_base_url(state: &AppState) -> Option<String> {
+    if let Some(url) = state.public_url() {
+        let trimmed = url.trim_end_matches('/').to_string();
+        if !trimmed.is_empty() {
+            return Some(trimmed);
+        }
+    }
+    env_public_base_url()
+}
+
+/// Env-only base URL resolver. Kept as a building block for the
+/// state-aware variant and for the few startup paths that don't yet
+/// have an `AppState` in scope.
 #[must_use]
 pub fn env_public_base_url() -> Option<String> {
     std::env::var("BRARR_PUBLIC_URL")
         .ok()
         .map(|s| s.trim_end_matches('/').to_string())
+        .filter(|s| !s.is_empty())
 }
 
 /// Derive the request-side origin from an axum `HeaderMap`. Mirrors
-/// the rule used by the Torznab feed renderer.
+/// the rule used by the Torznab feed renderer. Prefers, in order:
+/// the runtime setting on `state`, the env var, then the request's
+/// own `X-Forwarded-Host` / `Host`.
 #[must_use]
-pub fn derive_request_base(headers: &axum::http::HeaderMap) -> String {
-    if let Some(url) = env_public_base_url() {
+pub fn derive_request_base(state: &AppState, headers: &axum::http::HeaderMap) -> String {
+    if let Some(url) = state_public_base_url(state) {
         return url;
     }
     let scheme = headers

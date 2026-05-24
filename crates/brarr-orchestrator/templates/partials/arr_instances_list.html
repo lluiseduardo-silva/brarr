@@ -111,6 +111,20 @@
                                     class="px-2.5 h-7 rounded-md bg-secondary-soft text-xs font-medium text-secondary-soft-fg">
                                 rodar agora
                             </button>
+                            <button hx-get="/arr-instances/{{ a.id }}/edit"
+                                    hx-target="#modal-target"
+                                    hx-swap="innerHTML"
+                                    title="Editar nome/URL/api key/profile"
+                                    class="px-2.5 h-7 rounded-md bg-bg-muted text-xs font-medium text-fg-primary hover:bg-bg-surface-raised">
+                                editar
+                            </button>
+                            <button hx-post="/arr-instances/{{ a.id }}/toggle"
+                                    hx-target="#arr-instances-list"
+                                    hx-swap="outerHTML"
+                                    title="Liga/desliga sem perder config"
+                                    class="px-2.5 h-7 rounded-md text-xs font-medium {% if a.enabled %}bg-accent-soft text-accent-soft-fg{% else %}bg-bg-muted text-fg-primary{% endif %}">
+                                {% if a.enabled %}desativar{% else %}ativar{% endif %}
+                            </button>
                             <button hx-delete="/arr-instances/{{ a.id }}"
                                     hx-target="#arr-instance-{{ a.id }}"
                                     hx-swap="outerHTML"

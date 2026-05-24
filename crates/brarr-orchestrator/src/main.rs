@@ -4,7 +4,24 @@
 //! gRPC and HTTP servers concurrently, wiring them to a shared
 //! [`brarr_orchestrator::AppState`].
 //!
-//! Environment variables (all optional):
+//! ## Configuration precedence
+//!
+//! For every knob the operator can edit at runtime, the value comes
+//! from (in order):
+//!
+//!   1. The `settings` table in the `SQLite` DB (edited via `/settings`).
+//!   2. The matching `BRARR_*` env var (or `RUST_LOG`).
+//!   3. A hard-coded sensible default.
+//!
+//! Once the runtime config is built, it lives inside
+//! [`brarr_orchestrator::state::RuntimeConfig`] and is swapped
+//! atomically on every save from the admin UI — no restart required
+//! for token / bypass / public URL / poll interval / log level.
+//! `RUST_BACKTRACE` is the one exception: persisted in the DB but
+//! only applied on next start (Rust 2024 made `std::env::set_var`
+//! unsafe and the workspace forbids `unsafe_code`).
+//!
+//! Environment variables (all optional, all overridable via UI):
 //!
 //! | Variable                       | Default                      | Purpose                              |
 //! |--------------------------------|------------------------------|--------------------------------------|
@@ -18,21 +35,38 @@
 //! | `BRARR_PUBLIC_URL`             | _(derived from request)_     | external origin for *arr push URLs   |
 //! | `BRARR_ARR_POLL_INTERVAL_SECS` | `1800`                       | autobrr-style auto-push cadence      |
 //! | `RUST_LOG`                     | `info`                       | tracing-subscriber env filter        |
+//! | `RUST_BACKTRACE`               | `0`                          | error backtrace verbosity            |
 
 #![allow(clippy::print_stdout, reason = "user-facing startup banner is fine")]
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
+use arc_swap::ArcSwap;
 use brarr_decision_service::Engine;
+use brarr_orchestrator::db::settings::{
+    self, KEY_AUTH_TOKEN, KEY_BYPASS_AUTH_FROM, KEY_LOG_LEVEL, KEY_POLL_INTERVAL_SECS,
+    KEY_PUBLIC_URL, KEY_TRUSTED_PROXIES,
+};
+use brarr_orchestrator::state::{LogReloader, RuntimeConfig};
 use brarr_orchestrator::{AppState, AuthConfig, BypassConfig, TrustedPeers, db, grpc, poll, web};
 use tracing::warn;
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{EnvFilter, reload};
+
+const DEFAULT_POLL_INTERVAL_SECS: u64 = 1800;
 
 #[tokio::main]
+#[allow(
+    clippy::too_many_lines,
+    reason = "main is one linear story (env→DB→runtime→spawn); splitting hides the precedence cascade"
+)]
 async fn main() -> Result<()> {
-    init_tracing();
+    let log_reloader = init_tracing();
 
     let db_path = env_or("BRARR_DB_PATH", "./brarr.db");
     let http_addr: SocketAddr = env_or("BRARR_HTTP_ADDR", "127.0.0.1:3000")
@@ -49,23 +83,66 @@ async fn main() -> Result<()> {
     let pool = db::open(&db_path)
         .await
         .with_context(|| format!("opening database at {db_path}"))?;
-    let auth = AuthConfig::from_optional(std::env::var("BRARR_AUTH_TOKEN").ok().as_deref());
+
+    // Merge DB-persisted settings on top of env vars so the operator's
+    // last UI save wins over the container env, but a fresh install
+    // still works from BRARR_* alone.
+    let persisted = settings::get_all(&pool)
+        .await
+        .context("loading settings table")?;
+    let lookup =
+        |key: &str| -> Option<String> { persisted.get(key).cloned().filter(|s| !s.is_empty()) };
+
+    let auth_token = lookup(KEY_AUTH_TOKEN)
+        .or_else(|| std::env::var("BRARR_AUTH_TOKEN").ok())
+        .filter(|s| !s.trim().is_empty());
+    let auth = AuthConfig::from_optional(auth_token.as_deref());
     if !auth.is_enabled() {
         warn!(
             target: "brarr_orchestrator",
-            "BRARR_AUTH_TOKEN is unset — admin UI and gRPC are unauthenticated. Set it for production deployments."
+            "no admin token configured — admin UI and gRPC are unauthenticated. Set BRARR_AUTH_TOKEN or save one from /settings."
         );
     }
-    let bypass = load_bypass()?;
-    if !bypass.is_disabled() {
-        tracing::info!(
+
+    let bypass_spec = lookup(KEY_BYPASS_AUTH_FROM)
+        .or_else(|| std::env::var("BRARR_BYPASS_AUTH_FROM").ok())
+        .unwrap_or_default();
+    let proxies_spec = lookup(KEY_TRUSTED_PROXIES)
+        .or_else(|| std::env::var("BRARR_TRUSTED_PROXIES").ok())
+        .unwrap_or_default();
+    let bypass = build_bypass(&bypass_spec, &proxies_spec)?;
+
+    let public_url = lookup(KEY_PUBLIC_URL).or_else(|| std::env::var("BRARR_PUBLIC_URL").ok());
+
+    let poll_interval = lookup(KEY_POLL_INTERVAL_SECS)
+        .or_else(|| std::env::var("BRARR_ARR_POLL_INTERVAL_SECS").ok())
+        .and_then(|s| s.parse::<u64>().ok())
+        .map_or_else(
+            || Duration::from_secs(DEFAULT_POLL_INTERVAL_SECS),
+            |secs| Duration::from_secs(secs.max(60)),
+        );
+
+    // Apply a persisted log_level override on top of whatever env did
+    // at tracing init — no-op when no DB row exists.
+    if let Some(spec) = lookup(KEY_LOG_LEVEL)
+        && let Err(e) = log_reloader.apply(&spec)
+    {
+        warn!(
             target: "brarr_orchestrator",
-            peer_rules = bypass.peers.len(),
-            proxy_rules = bypass.proxies.len(),
-            "auth bypass configured — requests from listed peers will skip the cookie/apikey check"
+            spec = %spec,
+            error = %e,
+            "failed to apply persisted log_level setting; falling back to env"
         );
     }
-    let state = AppState::with_auth_and_bypass(pool, Engine::baseline(), auth.clone(), bypass);
+
+    let runtime = RuntimeConfig {
+        auth: ArcSwap::from_pointee(auth.clone()),
+        bypass: ArcSwap::from_pointee(bypass),
+        public_url: ArcSwap::from_pointee(public_url),
+        poll_interval: ArcSwap::from_pointee(poll_interval),
+        log_reload: log_reloader,
+    };
+    let state = AppState::with_runtime(pool, Engine::baseline(), runtime);
 
     println!("brarr-orchestrator");
     println!("  http  → http://{http_addr}");
@@ -79,20 +156,22 @@ async fn main() -> Result<()> {
             "DISABLED (dev mode)"
         }
     );
-    let bypass_summary = if state.bypass().is_disabled() {
-        "off".to_string()
-    } else {
-        format!(
-            "{} peer rule(s), {} proxy rule(s)",
-            state.bypass().peers.len(),
-            state.bypass().proxies.len()
-        )
-    };
-    println!("  bypass → {bypass_summary}");
-    let poll_interval = poll::interval_from_env();
+    {
+        let bypass_snapshot = state.bypass();
+        let bypass_summary = if bypass_snapshot.is_disabled() {
+            "off".to_string()
+        } else {
+            format!(
+                "{} peer rule(s), {} proxy rule(s)",
+                bypass_snapshot.peers.len(),
+                bypass_snapshot.proxies.len()
+            )
+        };
+        println!("  bypass → {bypass_summary}");
+    }
     println!(
-        "  poll  → every {}s (set BRARR_ARR_POLL_INTERVAL_SECS to tune)",
-        poll_interval.as_secs()
+        "  poll  → every {}s (hot-reloadable via /settings)",
+        state.poll_interval().as_secs()
     );
     println!("  press Ctrl-C to stop");
 
@@ -109,7 +188,7 @@ async fn main() -> Result<()> {
     // (the runtime drops it as part of shutdown). Operationally we
     // don't want it to terminate the binary if the loop happens to
     // panic, so it's a fire-and-forget spawn.
-    let _poll_handle = poll::spawn(poll_state, poll_interval);
+    let _poll_handle = poll::spawn(poll_state);
 
     tokio::select! {
         res = web_task => res.context("web task panicked")?.context("web server")?,
@@ -122,31 +201,47 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn init_tracing() {
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    tracing_subscriber::fmt().with_env_filter(filter).init();
+/// Initialise `tracing-subscriber` with a reloadable env filter and
+/// return the [`LogReloader`] handle the settings UI can later use
+/// to swap the spec at runtime.
+fn init_tracing() -> LogReloader {
+    let initial = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let (filter_layer, handle) = reload::Layer::new(initial);
+    tracing_subscriber::registry()
+        .with(filter_layer)
+        .with(tracing_subscriber::fmt::layer())
+        .init();
+    let handle = Arc::new(handle);
+    LogReloader::new(move |spec: &str| {
+        let new_filter = EnvFilter::try_new(spec)
+            .map_err(|e| format!("invalid env-filter spec `{spec}`: {e}"))?;
+        handle
+            .reload(new_filter)
+            .map_err(|e| format!("reload handle failed: {e}"))?;
+        Ok(())
+    })
 }
 
 fn env_or(name: &str, default: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| default.to_string())
 }
 
-/// Build the [`BypassConfig`] from the two env vars
-/// (`BRARR_BYPASS_AUTH_FROM`, `BRARR_TRUSTED_PROXIES`). Unset vars
-/// produce empty lists. Bad entries crash startup with a clear message
-/// so misconfiguration is loud.
-fn load_bypass() -> Result<BypassConfig> {
-    let peers = match std::env::var("BRARR_BYPASS_AUTH_FROM").ok() {
-        Some(spec) if !spec.trim().is_empty() => TrustedPeers::parse(&spec)
+/// Build a [`BypassConfig`] from the two spec strings (each already
+/// resolved through the DB-settings → env-var → empty cascade).
+fn build_bypass(peers_spec: &str, proxies_spec: &str) -> Result<BypassConfig> {
+    let peers = if peers_spec.trim().is_empty() {
+        TrustedPeers::default()
+    } else {
+        TrustedPeers::parse(peers_spec)
             .map_err(|e| anyhow::anyhow!(e))
-            .context("BRARR_BYPASS_AUTH_FROM")?,
-        _ => TrustedPeers::default(),
+            .context("BRARR_BYPASS_AUTH_FROM / settings:bypass_auth_from")?
     };
-    let proxies = match std::env::var("BRARR_TRUSTED_PROXIES").ok() {
-        Some(spec) if !spec.trim().is_empty() => TrustedPeers::parse(&spec)
+    let proxies = if proxies_spec.trim().is_empty() {
+        TrustedPeers::default()
+    } else {
+        TrustedPeers::parse(proxies_spec)
             .map_err(|e| anyhow::anyhow!(e))
-            .context("BRARR_TRUSTED_PROXIES")?,
-        _ => TrustedPeers::default(),
+            .context("BRARR_TRUSTED_PROXIES / settings:trusted_proxies")?
     };
     Ok(BypassConfig { peers, proxies })
 }

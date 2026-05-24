@@ -64,22 +64,25 @@ pub struct PollSummary {
 
 /// Spawn the background poller task. Returns the [`JoinHandle`] so the
 /// main binary can keep it alive — dropping the handle aborts the task.
+///
+/// The poll cadence is read from
+/// [`crate::AppState::poll_interval`] on every iteration, which means
+/// the operator can edit the value from `/settings` and the next tick
+/// already honors it — no respawn required.
 #[must_use]
-pub fn spawn(state: AppState, interval: Duration) -> JoinHandle<()> {
+pub fn spawn(state: AppState) -> JoinHandle<()> {
     let state = Arc::new(state);
+    let initial = state.poll_interval();
     info!(
         target: "brarr_orchestrator::poll",
-        interval_secs = interval.as_secs(),
-        "starting *arr poller"
+        initial_interval_secs = initial.as_secs(),
+        "starting *arr poller (interval is hot-reloadable via /settings)"
     );
     tokio::spawn(async move {
-        // First tick fires immediately after startup so the operator
-        // sees activity within seconds rather than after the full
-        // interval. `tokio::time::interval` ticks once at construction
-        // by default.
-        let mut ticker = time::interval(interval);
+        // First cycle fires immediately so the operator sees activity
+        // within seconds of startup; subsequent cycles re-read the
+        // configured interval before sleeping.
         loop {
-            ticker.tick().await;
             if let Err(e) = run_one_cycle(&state).await {
                 warn!(
                     target: "brarr_orchestrator::poll",
@@ -87,6 +90,8 @@ pub fn spawn(state: AppState, interval: Duration) -> JoinHandle<()> {
                     "poll cycle failed"
                 );
             }
+            let interval = state.poll_interval();
+            time::sleep(interval).await;
         }
     })
 }
@@ -169,7 +174,7 @@ async fn run_once_radarr(state: &AppState, arr: &ArrInstanceRow) -> Result<PollS
         }
     };
 
-    let base_url = poll_base_url();
+    let base_url = poll_base_url(state);
 
     let mut iter = movies.into_iter();
     while let Some(movie) = iter.next() {
@@ -539,7 +544,7 @@ async fn run_once_sonarr(state: &AppState, arr: &ArrInstanceRow) -> Result<PollS
             return Ok(summary);
         }
     };
-    let base_url = poll_base_url();
+    let base_url = poll_base_url(state);
 
     // Group the wanted episodes by (series_id, season_number). The
     // BTreeMap keeps a stable iteration order (series asc, season
@@ -715,11 +720,13 @@ async fn run_season_pack_pass(
     }
 }
 
-/// Externally-reachable origin used to build push proxy URLs. Same
-/// fallback as the request-path version in `crate::push`, but reads
-/// only the env var since the poller has no incoming request.
-fn poll_base_url() -> String {
-    crate::push::env_public_base_url().unwrap_or_else(|| "http://127.0.0.1:3000".to_string())
+/// Externally-reachable origin used to build push proxy URLs. The
+/// poller has no incoming request to derive headers from, so it
+/// goes through [`crate::push::state_public_base_url`] which checks
+/// the runtime setting first, then the env var, and finally falls
+/// back to the bare localhost bind.
+fn poll_base_url(state: &AppState) -> String {
+    crate::push::state_public_base_url(state).unwrap_or_else(|| "http://127.0.0.1:3000".to_string())
 }
 
 /// `true` when this Radarr movie is something brarr should search

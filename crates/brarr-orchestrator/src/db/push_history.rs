@@ -327,6 +327,115 @@ pub async fn already_pushed(
     Ok(n > 0)
 }
 
+/// Filter expression for [`filter`] / [`count_filtered`]. Every
+/// field is optional — absent fields don't constrain the result set.
+#[derive(Debug, Clone, Default)]
+pub struct FilterParams {
+    /// Match `arr_instance_id` exactly. Uses the FK column (so still
+    /// hits even when the instance row has since been deleted —
+    /// `arr_instance_id` is `ON DELETE SET NULL` so a filter on a
+    /// gone-arr produces an empty set, which is the right call).
+    pub arr_instance_id: Option<Uuid>,
+    /// Match `status` exactly: `Some(PushStatus::Ok)` etc.
+    pub status: Option<PushStatus>,
+    /// Lower bound on `pushed_at` (Unix seconds, inclusive).
+    pub from_unix: Option<i64>,
+    /// Upper bound on `pushed_at` (Unix seconds, inclusive).
+    pub to_unix: Option<i64>,
+    /// Substring match against the joined `release_name` column —
+    /// SQL `LIKE '%pattern%'`. Empty or whitespace = no filter.
+    pub release_query: Option<String>,
+    /// Limit + offset for paginated callers. `recent`-style clamp
+    /// applied internally.
+    pub limit: u32,
+    /// Row offset for pagination.
+    pub offset: u32,
+}
+
+/// Return the filtered + paginated subset of push attempts.
+///
+/// # Errors
+///
+/// Returns [`AppError::Database`] on SQL failure.
+pub async fn filter(pool: &Pool, p: FilterParams) -> Result<Vec<PushHistoryRow>, AppError> {
+    let limit = clamp_recent_limit(p.limit);
+    let offset = p.offset;
+    let mut qb = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
+        "SELECT ph.id, ph.decision_id, ph.arr_instance_id, ph.arr_instance_name, ph.arr_kind, \
+                ph.pushed_at, ph.status, ph.http_status, ph.response_body, ph.rejections_json, \
+                d.release_name AS release_name, d.provider_name AS provider_name \
+         FROM push_history ph LEFT JOIN decisions d ON d.id = ph.decision_id",
+    );
+    push_filters(&mut qb, &p);
+    qb.push(" ORDER BY ph.pushed_at DESC LIMIT ")
+        .push_bind(i64::from(limit))
+        .push(" OFFSET ")
+        .push_bind(i64::from(offset));
+    let rows = qb.build().fetch_all(pool).await?;
+    rows.iter().map(row_to_push).collect()
+}
+
+/// Total matching rows, ignoring `limit` / `offset`.
+///
+/// # Errors
+///
+/// Returns [`AppError::Database`] on SQL failure.
+pub async fn count_filtered(pool: &Pool, p: &FilterParams) -> Result<u64, AppError> {
+    let mut qb = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
+        "SELECT COUNT(*) AS n FROM push_history ph LEFT JOIN decisions d ON d.id = ph.decision_id",
+    );
+    push_filters(&mut qb, p);
+    let row = qb.build().fetch_one(pool).await?;
+    let n: i64 = row.try_get("n")?;
+    Ok(u64::try_from(n).unwrap_or(0))
+}
+
+fn clamp_recent_limit(requested: u32) -> u32 {
+    match requested {
+        0 => 50,
+        n if n > 500 => 500,
+        n => n,
+    }
+}
+
+fn push_filters(qb: &mut sqlx::QueryBuilder<'_, sqlx::Sqlite>, p: &FilterParams) {
+    let mut where_pushed = false;
+    let mut separator = |qb: &mut sqlx::QueryBuilder<'_, sqlx::Sqlite>| {
+        if where_pushed {
+            qb.push(" AND ");
+        } else {
+            qb.push(" WHERE ");
+            where_pushed = true;
+        }
+    };
+    if let Some(id) = p.arr_instance_id {
+        separator(qb);
+        qb.push("ph.arr_instance_id = ").push_bind(id.to_string());
+    }
+    if let Some(s) = p.status {
+        separator(qb);
+        qb.push("ph.status = ").push_bind(s.label().to_string());
+    }
+    if let Some(v) = p.from_unix {
+        separator(qb);
+        qb.push("ph.pushed_at >= ").push_bind(v);
+    }
+    if let Some(v) = p.to_unix {
+        separator(qb);
+        qb.push("ph.pushed_at <= ").push_bind(v);
+    }
+    if let Some(query) = p
+        .release_query
+        .as_ref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        separator(qb);
+        let like = format!("%{query}%");
+        qb.push("d.release_name LIKE ").push_bind(like);
+    }
+}
+
 fn row_to_push(row: &SqliteRow) -> Result<PushHistoryRow, AppError> {
     let id_str: String = row.try_get("id")?;
     let id = Uuid::parse_str(&id_str)

@@ -226,6 +226,85 @@ pub async fn delete_by_id(pool: &Pool, id: Uuid) -> Result<bool, AppError> {
     Ok(res.rows_affected() > 0)
 }
 
+/// Flip the `enabled` flag in place. Mirrors
+/// [`crate::db::providers::set_enabled`] so the UI's "drain mode"
+/// toggle works the same way for both surfaces.
+///
+/// # Errors
+///
+/// - [`AppError::NotFound`] when no row matches `id`.
+/// - [`AppError::Database`] on SQL failure.
+pub async fn set_enabled(pool: &Pool, id: Uuid, enabled: bool) -> Result<ArrInstanceRow, AppError> {
+    let res = sqlx::query("UPDATE arr_instances SET enabled = ? WHERE id = ?")
+        .bind(i64::from(u8::from(enabled)))
+        .bind(id.to_string())
+        .execute(pool)
+        .await?;
+    if res.rows_affected() == 0 {
+        return Err(AppError::NotFound(format!("arr_instance {id}")));
+    }
+    get_by_id(pool, id).await
+}
+
+/// Bundle of fields the edit form may overwrite.
+#[derive(Debug, Clone)]
+pub struct ArrInstanceUpdate<'a> {
+    /// New display name.
+    pub name: &'a str,
+    /// New base URL.
+    pub base_url: &'a Url,
+    /// New api key.
+    pub api_key: &'a str,
+    /// New push threshold. Validated 0..=1000.
+    pub push_threshold: u32,
+    /// Attached quality profile id. `None` detaches.
+    pub profile_id: Option<Uuid>,
+}
+
+/// Rewrite the editable fields of one row. Kind is intentionally
+/// not editable here — switching Sonarr ↔ Radarr changes the
+/// semantics of every linked push_history row, which the operator
+/// should resolve by deleting + recreating instead.
+///
+/// # Errors
+///
+/// - [`AppError::InvalidInput`] when `name` is empty or `push_threshold > 1000`.
+/// - [`AppError::NotFound`] when no row matches `id`.
+/// - [`AppError::Database`] on SQL failure (including `UNIQUE(name)` violation).
+pub async fn update(
+    pool: &Pool,
+    id: Uuid,
+    upd: ArrInstanceUpdate<'_>,
+) -> Result<ArrInstanceRow, AppError> {
+    if upd.name.trim().is_empty() {
+        return Err(AppError::InvalidInput(
+            "arr instance name cannot be empty".into(),
+        ));
+    }
+    if upd.push_threshold > 1000 {
+        return Err(AppError::InvalidInput(format!(
+            "push_threshold must be 0..=1000, got {}",
+            upd.push_threshold
+        )));
+    }
+    let res = sqlx::query(
+        "UPDATE arr_instances SET name = ?, base_url = ?, api_key = ?, push_threshold = ?, profile_id = ? \
+         WHERE id = ?",
+    )
+    .bind(upd.name)
+    .bind(upd.base_url.as_str())
+    .bind(upd.api_key)
+    .bind(i64::from(upd.push_threshold))
+    .bind(upd.profile_id.map(|u| u.to_string()))
+    .bind(id.to_string())
+    .execute(pool)
+    .await?;
+    if res.rows_affected() == 0 {
+        return Err(AppError::NotFound(format!("arr_instance {id}")));
+    }
+    get_by_id(pool, id).await
+}
+
 fn row_to_instance(row: &SqliteRow) -> Result<ArrInstanceRow, AppError> {
     let id_str: String = row.try_get("id")?;
     let id = Uuid::parse_str(&id_str)

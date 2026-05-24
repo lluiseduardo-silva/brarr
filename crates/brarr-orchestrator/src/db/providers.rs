@@ -179,6 +179,60 @@ pub async fn delete_by_id(pool: &Pool, id: Uuid) -> Result<bool, AppError> {
     Ok(res.rows_affected() > 0)
 }
 
+/// Bundle of fields the edit form may overwrite.
+#[derive(Debug, Clone)]
+pub struct ProviderUpdate<'a> {
+    /// New display name (must stay unique).
+    pub name: &'a str,
+    /// New base URL.
+    pub base_url: &'a Url,
+    /// New api token.
+    pub api_token: &'a str,
+    /// New kind label (`unit3d` / `newznab` / `torznab` / `plugin`).
+    pub kind: &'a str,
+    /// New plugin filesystem path. `None` clears the column.
+    pub plugin_path: Option<&'a std::path::Path>,
+}
+
+/// Rewrite the editable fields of one row in place. The `enabled`
+/// flag and `created_at` timestamp are left untouched — toggling
+/// enabled goes through [`set_enabled`].
+///
+/// # Errors
+///
+/// - [`AppError::InvalidInput`] when `name` is empty.
+/// - [`AppError::NotFound`] when no row matches `id`.
+/// - [`AppError::Database`] on `UNIQUE(name)` violation or other SQL
+///   error.
+pub async fn update(
+    pool: &Pool,
+    id: Uuid,
+    upd: ProviderUpdate<'_>,
+) -> Result<ProviderRow, AppError> {
+    if upd.name.trim().is_empty() {
+        return Err(AppError::InvalidInput(
+            "provider name cannot be empty".into(),
+        ));
+    }
+    let plugin_path_str = upd.plugin_path.map(|p| p.to_string_lossy().into_owned());
+    let res = sqlx::query(
+        "UPDATE providers SET name = ?, base_url = ?, api_token = ?, kind = ?, plugin_path = ? \
+         WHERE id = ?",
+    )
+    .bind(upd.name)
+    .bind(upd.base_url.as_str())
+    .bind(upd.api_token)
+    .bind(upd.kind)
+    .bind(&plugin_path_str)
+    .bind(id.to_string())
+    .execute(pool)
+    .await?;
+    if res.rows_affected() == 0 {
+        return Err(AppError::NotFound(format!("provider {id}")));
+    }
+    get_by_id(pool, id).await
+}
+
 fn row_to_provider(row: &SqliteRow) -> Result<ProviderRow, AppError> {
     let id_str: String = row.try_get("id")?;
     let id = Uuid::parse_str(&id_str)

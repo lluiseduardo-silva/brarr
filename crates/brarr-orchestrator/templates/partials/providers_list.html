@@ -85,6 +85,13 @@
                                     class="px-2.5 h-7 rounded-md bg-bg-muted text-xs font-medium text-fg-primary hover:bg-bg-surface-raised">
                                 testar
                             </button>
+                            <button hx-get="/providers/{{ p.id }}/edit"
+                                    hx-target="#modal-target"
+                                    hx-swap="innerHTML"
+                                    title="Editar nome/URL/token/kind"
+                                    class="px-2.5 h-7 rounded-md bg-bg-muted text-xs font-medium text-fg-primary hover:bg-bg-surface-raised">
+                                editar
+                            </button>
                             <button hx-post="/providers/{{ p.id }}/toggle"
                                     hx-target="#providers-list"
                                     hx-swap="outerHTML"

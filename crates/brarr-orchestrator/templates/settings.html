@@ -1,0 +1,154 @@
+{% extends "base.html" %}
+{% block title %}Configurações · brarr{% endblock %}
+{% block content %}
+
+<section class="mb-6">
+    <h1 class="text-2xl font-semibold text-fg-primary mb-1">Configurações</h1>
+    <p class="text-sm text-fg-secondary">
+        Edições aqui ficam em <code class="font-mono text-fg-secondary">settings</code> no SQLite
+        e sobrescrevem as variáveis <code class="font-mono text-fg-secondary">BRARR_*</code> no
+        próximo reload. Token, bypass, public URL, intervalo do poller e log level entram em vigor
+        na hora — sem restart.
+    </p>
+</section>
+
+{% if let Some(flash) = flash %}
+<div class="mb-4 px-4 py-3 rounded-md text-sm
+    {% if flash.kind == "ok" %}bg-success-soft text-success-soft-fg border border-success-solid/30
+    {% else %}bg-danger-soft text-danger-soft-fg border border-danger-solid/30{% endif %}">
+    {{ flash.message }}
+</div>
+{% endif %}
+
+{# Token rotation — separate form because changing it logs the
+   current session out, and we want a hard confirmation step. #}
+<section class="card-hairline bg-bg-surface border border-border-default rounded-xl p-5 mb-6">
+    <header class="flex items-center justify-between mb-4">
+        <h2 class="text-lg font-semibold text-fg-primary">Token de acesso</h2>
+        <span class="text-xs px-2 py-0.5 rounded font-medium
+            {% if values.auth_enabled %}bg-success-soft text-success-soft-fg
+            {% else %}bg-warning-soft text-warning-soft-fg{% endif %}">
+            {% if values.auth_enabled %}auth habilitado{% else %}dev mode (sem auth){% endif %}
+        </span>
+    </header>
+    <p class="text-sm text-fg-secondary mb-4">
+        Trocar o token desloga sua sessão atual. Você vai precisar entrar de novo com o novo valor.
+        {% if values.auth_enabled %}
+        Para validação, informe o token atual abaixo — protege contra troca acidental.
+        {% else %}
+        Auth está desabilitado. Definir um token aqui ativa o login na próxima requisição.
+        {% endif %}
+    </p>
+    <form method="post" action="/settings/token"
+          class="grid grid-cols-1 md:grid-cols-3 gap-3">
+        {% if values.auth_enabled %}
+        <label class="block md:col-span-1">
+            <span class="block mb-1.5 text-xs font-medium uppercase tracking-[0.06em] text-fg-muted">Token atual</span>
+            <input type="password" name="current_token" required autocomplete="current-password"
+                   class="w-full px-3 h-10 rounded-md bg-bg-canvas border border-border-strong text-sm text-fg-primary focus:outline-none focus:border-accent-solid">
+        </label>
+        {% endif %}
+        <label class="block md:col-span-1">
+            <span class="block mb-1.5 text-xs font-medium uppercase tracking-[0.06em] text-fg-muted">Novo token</span>
+            <input type="password" name="new_token" required autocomplete="new-password"
+                   class="w-full px-3 h-10 rounded-md bg-bg-canvas border border-border-strong text-sm text-fg-primary focus:outline-none focus:border-accent-solid">
+        </label>
+        <label class="block md:col-span-1">
+            <span class="block mb-1.5 text-xs font-medium uppercase tracking-[0.06em] text-fg-muted">Confirmar novo token</span>
+            <input type="password" name="confirm_token" required autocomplete="new-password"
+                   class="w-full px-3 h-10 rounded-md bg-bg-canvas border border-border-strong text-sm text-fg-primary focus:outline-none focus:border-accent-solid">
+        </label>
+        <div class="md:col-span-3 flex items-center gap-2">
+            <button type="submit"
+                    class="px-4 h-10 rounded-md bg-accent-solid text-on-accent-solid text-sm font-semibold hover:bg-accent-solid-hover">
+                Trocar token
+            </button>
+            <span class="text-xs text-fg-muted">Sugestão: <code class="font-mono">openssl rand -hex 32</code></span>
+        </div>
+    </form>
+</section>
+
+{# Connectivity + workers + diagnostics share one POST endpoint — a
+   typo in one field rolls back nothing the operator has already
+   filled. #}
+<form method="post" action="/settings/general" class="space-y-6">
+
+    <section class="card-hairline bg-bg-surface border border-border-default rounded-xl p-5">
+        <header class="mb-4">
+            <h2 class="text-lg font-semibold text-fg-primary">Conectividade</h2>
+            <p class="text-xs text-fg-muted mt-1">Bypass de auth por IP, proxies confiáveis para <code class="font-mono">X-Forwarded-For</code> e URL pública para links de download.</p>
+        </header>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <label class="block">
+                <span class="block mb-1.5 text-xs font-medium uppercase tracking-[0.06em] text-fg-muted">Whitelist de hosts (BRARR_BYPASS_AUTH_FROM)</span>
+                <input name="bypass_auth_from" value="{{ values.bypass_auth_from }}" placeholder="loopback,192.168.0.0/16"
+                       class="w-full px-3 h-10 rounded-md bg-bg-canvas border border-border-strong text-sm text-fg-primary placeholder:text-fg-muted focus:outline-none focus:border-accent-solid">
+                <span class="block mt-1 text-xs text-fg-muted">CSV de IPs/CIDRs ou tokens <code class="font-mono">loopback</code> / <code class="font-mono">private</code>.</span>
+            </label>
+
+            <label class="block">
+                <span class="block mb-1.5 text-xs font-medium uppercase tracking-[0.06em] text-fg-muted">Proxies confiáveis (BRARR_TRUSTED_PROXIES)</span>
+                <input name="trusted_proxies" value="{{ values.trusted_proxies }}" placeholder="172.18.0.1"
+                       class="w-full px-3 h-10 rounded-md bg-bg-canvas border border-border-strong text-sm text-fg-primary placeholder:text-fg-muted focus:outline-none focus:border-accent-solid">
+                <span class="block mt-1 text-xs text-fg-muted">Só honra XFF quando o peer direto bate com essa lista.</span>
+            </label>
+
+            <label class="block md:col-span-2">
+                <span class="block mb-1.5 text-xs font-medium uppercase tracking-[0.06em] text-fg-muted">URL pública / redirect (BRARR_PUBLIC_URL)</span>
+                <input name="public_url" value="{{ values.public_url }}" placeholder="https://brarr.example"
+                       class="w-full px-3 h-10 rounded-md bg-bg-canvas border border-border-strong text-sm text-fg-primary placeholder:text-fg-muted focus:outline-none focus:border-accent-solid">
+                <span class="block mt-1 text-xs text-fg-muted">URL externa que *arr usa pra baixar via brarr. Sem trailing slash.</span>
+            </label>
+        </div>
+    </section>
+
+    <section class="card-hairline bg-bg-surface border border-border-default rounded-xl p-5">
+        <header class="mb-4">
+            <h2 class="text-lg font-semibold text-fg-primary">Workers</h2>
+            <p class="text-xs text-fg-muted mt-1">Cadência do poller que checa *arr/wanted. Mínimo 60s.</p>
+        </header>
+        <label class="block max-w-xs">
+            <span class="block mb-1.5 text-xs font-medium uppercase tracking-[0.06em] text-fg-muted">Intervalo do poller (segundos)</span>
+            <input name="poll_interval_secs" value="{{ values.poll_interval_secs }}" inputmode="numeric" placeholder="1800"
+                   class="w-full px-3 h-10 rounded-md bg-bg-canvas border border-border-strong text-sm text-fg-primary placeholder:text-fg-muted focus:outline-none focus:border-accent-solid">
+        </label>
+    </section>
+
+    <section class="card-hairline bg-bg-surface border border-border-default rounded-xl p-5">
+        <header class="mb-4">
+            <h2 class="text-lg font-semibold text-fg-primary">Diagnóstico</h2>
+            <p class="text-xs text-fg-muted mt-1">Filtro do <code class="font-mono">tracing</code> e modo de backtrace.</p>
+        </header>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <label class="block">
+                <span class="block mb-1.5 text-xs font-medium uppercase tracking-[0.06em] text-fg-muted">Log level (RUST_LOG)</span>
+                <input name="log_level" value="{{ values.log_level }}" placeholder="info,brarr_orchestrator=debug"
+                       class="w-full px-3 h-10 rounded-md bg-bg-canvas border border-border-strong text-sm text-fg-primary placeholder:text-fg-muted focus:outline-none focus:border-accent-solid">
+                <span class="block mt-1 text-xs text-fg-muted">Sintaxe <code class="font-mono">tracing-subscriber</code>. Aplica na hora.</span>
+            </label>
+
+            <label class="block">
+                <span class="block mb-1.5 text-xs font-medium uppercase tracking-[0.06em] text-fg-muted">Backtrace (RUST_BACKTRACE)</span>
+                <select name="backtrace"
+                        class="w-full px-3 h-10 rounded-md bg-bg-canvas border border-border-strong text-sm text-fg-primary focus:outline-none focus:border-accent-solid">
+                    <option value="0"    {% if values.backtrace == "0" %}selected{% endif %}>0 (off)</option>
+                    <option value="1"    {% if values.backtrace == "1" %}selected{% endif %}>1 (short)</option>
+                    <option value="full" {% if values.backtrace == "full" %}selected{% endif %}>full</option>
+                </select>
+                <span class="block mt-1 text-xs text-warning-soft-fg">
+                    ⚠ Restart obrigatório — Rust 2024 marcou <code class="font-mono">std::env::set_var</code> como unsafe e o workspace usa <code class="font-mono">unsafe_code = "forbid"</code>.
+                </span>
+            </label>
+        </div>
+    </section>
+
+    <div class="flex items-center gap-2">
+        <button type="submit"
+                class="px-4 h-10 rounded-md bg-accent-solid text-on-accent-solid text-sm font-semibold hover:bg-accent-solid-hover">
+            Salvar configurações
+        </button>
+        <span class="text-xs text-fg-muted">Persistido em <code class="font-mono">settings</code> e propagado no próximo request.</span>
+    </div>
+</form>
+
+{% endblock %}

@@ -16,6 +16,7 @@ path = "src/lib.rs"
 
 [dependencies]
 anyhow = "1.0.102"
+arc-swap = "1.9.1"
 askama = "0.14.0"
 axum = { version = "0.8.9", default-features = false, features = ["macros", "http1", "tokio", "json", "query", "tracing", "form"] }
 brarr-arr = { version = "0.1.0", path = "../brarr-arr" }

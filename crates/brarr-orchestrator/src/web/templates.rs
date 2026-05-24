@@ -215,6 +215,28 @@ pub struct PushesTemplate {
     /// Repeat attempts on the same content render as a single
     /// collapsible group instead of N sibling rows in the table.
     pub groups: Vec<PushGroupView>,
+    /// Filter state currently applied. Used to pre-fill the form so
+    /// reloads / shares of the URL preserve the operator's view.
+    pub filters: PushesFilterView,
+    /// Dropdown options for the arr-instance filter (`(id, name)`).
+    pub arr_options: Vec<(String, String)>,
+    /// Total matches across all rows (denominator in the footer chip).
+    pub total_count: u64,
+}
+
+/// Per-field current filter state for [`PushesTemplate`].
+#[derive(Debug, Default)]
+pub struct PushesFilterView {
+    /// Selected arr_instance id (empty = any).
+    pub arr_instance_id: String,
+    /// Selected status (`"any"` / `"ok"` / `"http_error"` / `"transport_error"`).
+    pub status: String,
+    /// ISO date `YYYY-MM-DD` for the lower bound (or empty).
+    pub from_date: String,
+    /// ISO date `YYYY-MM-DD` for the upper bound (or empty).
+    pub to_date: String,
+    /// Free-text fragment matched against `release_name` via LIKE.
+    pub release_query: String,
 }
 
 /// Cluster of push attempts targeting the same `(release, *arr)`.
@@ -429,6 +451,98 @@ pub struct SearchesFilterView {
     pub has_kept_decision: String,
     /// Selected page size as a string for the `<select>` binding.
     pub page_size: String,
+}
+
+/// Runtime settings view at `/settings`. Each form posts to a
+/// dedicated handler so a typo in one field doesn't roll back the
+/// other sections.
+#[derive(Debug, Template)]
+#[template(path = "settings.html")]
+pub struct SettingsTemplate {
+    /// Pre-filled fields + status flags driving the form rendering.
+    pub values: SettingsValues,
+    /// Optional flash banner (success / error) shown above the form.
+    /// `None` on plain GETs; populated by POST handlers after they
+    /// finish.
+    pub flash: Option<SettingsFlash>,
+}
+
+/// Pre-filled values for the settings form. Strings only so the
+/// template can stuff them straight into `<input value="...">` without
+/// further formatting.
+#[derive(Debug, Default)]
+pub struct SettingsValues {
+    /// `true` when an admin token is currently configured. Drives the
+    /// "auth enabled / disabled" badge and hides the token-rotation
+    /// form's `current_token` requirement when there's nothing to
+    /// rotate from.
+    pub auth_enabled: bool,
+    /// Trusted-peer allowlist spec (matches `BRARR_BYPASS_AUTH_FROM`).
+    pub bypass_auth_from: String,
+    /// Trusted-proxy spec (matches `BRARR_TRUSTED_PROXIES`).
+    pub trusted_proxies: String,
+    /// Public base URL override (matches `BRARR_PUBLIC_URL`).
+    pub public_url: String,
+    /// Poller cadence in seconds (matches `BRARR_ARR_POLL_INTERVAL_SECS`).
+    pub poll_interval_secs: String,
+    /// Tracing env-filter spec (matches `RUST_LOG`).
+    pub log_level: String,
+    /// Backtrace mode persisted in the DB (matches `RUST_BACKTRACE`).
+    /// Note the form shows a "restart required" badge because Rust
+    /// 2024 made `std::env::set_var` unsafe and the workspace forbids
+    /// `unsafe_code`.
+    pub backtrace: String,
+}
+
+/// One-shot flash message rendered above the settings form. `kind`
+/// is `"ok"` or `"err"` so the template can pick a colour without
+/// pattern-matching enum variants in Askama.
+#[derive(Debug)]
+pub struct SettingsFlash {
+    /// `"ok"` (green) or `"err"` (red).
+    pub kind: String,
+    /// User-facing message body (already localised).
+    pub message: String,
+}
+
+/// `GET /providers/{id}/edit` HTMX partial.
+#[derive(Debug, Template)]
+#[template(path = "partials/edit_provider_modal.html")]
+pub struct EditProviderModalPartial {
+    /// Stringified provider UUID — used as the form's PUT target.
+    pub id: String,
+    /// Current name.
+    pub name: String,
+    /// Current base URL.
+    pub base_url: String,
+    /// Current api token (echoed back; operator can paste a new one).
+    pub api_token: String,
+    /// Current kind (`unit3d` / `newznab` / `torznab` / `plugin`).
+    pub kind: String,
+    /// Optional plugin path (empty string when no plugin attached).
+    pub plugin_path: String,
+}
+
+/// `GET /arr-instances/{id}/edit` HTMX partial.
+#[derive(Debug, Template)]
+#[template(path = "partials/edit_arr_instance_modal.html")]
+pub struct EditArrInstanceModalPartial {
+    /// Stringified UUID — used as the form's PUT target.
+    pub id: String,
+    /// Display name.
+    pub name: String,
+    /// `"sonarr"` / `"radarr"` — read-only label (kind isn't editable).
+    pub kind: String,
+    /// Base URL.
+    pub base_url: String,
+    /// Api key.
+    pub api_key: String,
+    /// Push threshold (formatted).
+    pub push_threshold: String,
+    /// All quality profiles for the `<select>`.
+    pub profiles: Vec<ProfileView>,
+    /// Currently-attached profile id (empty means "none").
+    pub profile_id: String,
 }
 
 /// Single-search view at `/searches/{id}`.
