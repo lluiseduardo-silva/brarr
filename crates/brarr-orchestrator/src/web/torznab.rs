@@ -381,6 +381,13 @@ struct ApiQuery {
     /// Interactive Search, wasting ~10x the upstream calls.
     #[serde(default)]
     offset: Option<String>,
+    /// `profile=<uuid|name>` — when set, brarr pre-filters the feed to
+    /// the releases that clear this quality profile's `push_threshold`
+    /// (scored under that profile). Lets the operator point each *arr
+    /// indexer at a different brarr profile so the add_score rules apply
+    /// on the pull path. Absent ⇒ no filter (every found release).
+    #[serde(default)]
+    profile: Option<String>,
     /// Category filter from Sonarr (`cat=2000,2040`). Ignored — we
     /// advertise the subset we support and Sonarr filters client-side.
     #[serde(default)]
@@ -485,6 +492,65 @@ async fn handle_api_inner(
     }
 }
 
+/// Resolved `?profile=` target: a quality profile id + its push threshold.
+#[derive(Debug, Clone, Copy)]
+struct ProfileFilter {
+    id: uuid::Uuid,
+    threshold: u32,
+}
+
+/// Outcome of resolving the `?profile=` query parameter.
+enum ProfileResolution {
+    /// No `profile=` given (or blank) — return every found release.
+    None,
+    /// Resolved to a real profile.
+    Found(ProfileFilter),
+    /// `profile=` was given but matched no profile (typo) — caller turns
+    /// this into a Newznab 400 so the operator notices.
+    Unknown(String),
+}
+
+/// Resolve `?profile=` (a UUID or a case-insensitive profile name) by
+/// scanning the (small) profiles table once.
+async fn resolve_profile_filter(
+    state: &AppState,
+    raw: Option<&str>,
+) -> Result<ProfileResolution, AppError> {
+    let Some(spec) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(ProfileResolution::None);
+    };
+    let all = crate::db::quality_profiles::list_all(state.pool()).await?;
+    let found = if let Ok(id) = uuid::Uuid::parse_str(spec) {
+        all.into_iter().find(|p| p.id == id)
+    } else {
+        all.into_iter().find(|p| p.name.eq_ignore_ascii_case(spec))
+    };
+    Ok(match found {
+        Some(p) => ProfileResolution::Found(ProfileFilter {
+            id: p.id,
+            threshold: p.push_threshold,
+        }),
+        None => ProfileResolution::Unknown(spec.to_string()),
+    })
+}
+
+/// `true` when the decision clears the profile gate: its score under that
+/// profile (falling back to the baseline score for rows that predate the
+/// profile) meets the profile's push threshold.
+fn passes_profile(d: &crate::db::decisions::DecisionRow, pf: &ProfileFilter) -> bool {
+    score_passes(&d.profile_scores, d.score, pf)
+}
+
+/// Core of [`passes_profile`], split out so it's testable without
+/// constructing a full `DecisionRow`.
+fn score_passes(
+    profile_scores: &std::collections::HashMap<uuid::Uuid, u32>,
+    baseline: u32,
+    pf: &ProfileFilter,
+) -> bool {
+    profile_scores.get(&pf.id).copied().unwrap_or(baseline) >= pf.threshold
+}
+
 async fn handle_movie(
     state: &AppState,
     q: &ApiQuery,
@@ -516,6 +582,19 @@ async fn handle_movie(
         ));
     }
 
+    let profile_filter = match resolve_profile_filter(state, q.profile.as_deref()).await? {
+        ProfileResolution::None => None,
+        ProfileResolution::Found(pf) => Some(pf),
+        ProfileResolution::Unknown(name) => {
+            return Ok(error_xml(
+                StatusCode::BAD_REQUEST,
+                201,
+                &format!("Unknown profile: {name}"),
+            )
+            .into_response());
+        }
+    };
+
     let outcome = run_search(
         state,
         SearchKeys {
@@ -525,8 +604,10 @@ async fn handle_movie(
         },
     )
     .await?;
-    // Filter to only the decision rows that belong on this feed's
-    // protocol axis. `total` reflects the post-filter count so the
+    // Filter to the decision rows on this feed's protocol axis, then —
+    // when `?profile=` is set — to those clearing the profile's
+    // threshold (so brarr's add_score rules apply on the pull path).
+    // `total` reflects the post-filter count so the
     // `<newznab:response total=>` element matches what the client can
     // actually see — Sonarr / Radarr stop paginating once
     // `offset + items.len() >= total`, and they'll re-request forever
@@ -535,6 +616,7 @@ async fn handle_movie(
         .decisions
         .iter()
         .filter(|d| protocol.matches_kind(d.provider_kind.as_deref()))
+        .filter(|d| profile_filter.is_none_or(|pf| passes_profile(d, &pf)))
         .collect();
     let total = matching.len();
     let limit_raw = parse_u32_param(q.limit.as_ref(), "limit")?;
@@ -590,6 +672,19 @@ async fn handle_tvsearch(
         .transpose()
         .map_err(|e| AppError::InvalidInput(format!("ep out of u16: {e}")))?;
 
+    let profile_filter = match resolve_profile_filter(state, q.profile.as_deref()).await? {
+        ProfileResolution::None => None,
+        ProfileResolution::Found(pf) => Some(pf),
+        ProfileResolution::Unknown(name) => {
+            return Ok(error_xml(
+                StatusCode::BAD_REQUEST,
+                201,
+                &format!("Unknown profile: {name}"),
+            )
+            .into_response());
+        }
+    };
+
     let outcome = run_search(
         state,
         SearchKeys {
@@ -604,6 +699,7 @@ async fn handle_tvsearch(
         .decisions
         .iter()
         .filter(|d| protocol.matches_kind(d.provider_kind.as_deref()))
+        .filter(|d| profile_filter.is_none_or(|pf| passes_profile(d, &pf)))
         .collect();
     let total = matching.len();
     let limit_raw = parse_u32_param(q.limit.as_ref(), "limit")?;
@@ -1516,5 +1612,39 @@ mod tests {
         assert!(title_looks_like_episode("show s10e23 web"));
         assert!(!title_looks_like_episode("The Matrix 1999 1080p"));
         assert!(!title_looks_like_episode("Spider Man 2002"));
+    }
+
+    #[test]
+    fn score_passes_uses_profile_score_when_present() {
+        let id = uuid::Uuid::new_v4();
+        let mut scores = std::collections::HashMap::new();
+        scores.insert(id, 200u32);
+        // Profile score 200 wins over baseline 50.
+        assert!(score_passes(
+            &scores,
+            50,
+            &ProfileFilter { id, threshold: 150 }
+        ));
+        assert!(!score_passes(
+            &scores,
+            50,
+            &ProfileFilter { id, threshold: 250 }
+        ));
+    }
+
+    #[test]
+    fn score_passes_falls_back_to_baseline_when_profile_absent() {
+        let id = uuid::Uuid::new_v4();
+        let scores = std::collections::HashMap::new(); // no entry for `id`
+        assert!(score_passes(
+            &scores,
+            120,
+            &ProfileFilter { id, threshold: 100 }
+        ));
+        assert!(!score_passes(
+            &scores,
+            80,
+            &ProfileFilter { id, threshold: 100 }
+        ));
     }
 }

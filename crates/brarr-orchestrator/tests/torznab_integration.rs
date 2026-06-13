@@ -393,3 +393,70 @@ async fn torznab_routes_do_not_redirect_to_login() {
     assert_ne!(resp.status(), 303);
     assert_eq!(resp.status(), 401);
 }
+
+// `?profile=` resolution (the brarr-filter-on-the-pull-path feature).
+// Uses the migration-seeded presets so no extra DB seeding is needed.
+// Resolution happens before `run_search`, so these don't need providers.
+const PRESET_MINIMO_PT: &str = "00000000-0000-0000-0000-000000000001"; // "Mínimo PT", threshold 50
+
+#[tokio::test]
+async fn movie_with_unknown_profile_returns_400() {
+    let addr = spawn(AuthConfig::Disabled).await;
+    let resp = client()
+        .get(format!("http://{addr}/torznab/api"))
+        .query(&[
+            ("t", "movie"),
+            ("tmdbid", "603"),
+            ("profile", "does-not-exist"),
+        ])
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 400);
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("Unknown profile"), "body: {body}");
+}
+
+#[tokio::test]
+async fn movie_with_profile_by_uuid_resolves() {
+    let addr = spawn(AuthConfig::Disabled).await;
+    let resp = client()
+        .get(format!("http://{addr}/torznab/api"))
+        .query(&[
+            ("t", "movie"),
+            ("tmdbid", "603"),
+            ("profile", PRESET_MINIMO_PT),
+        ])
+        .send()
+        .await
+        .expect("send");
+    // Resolves to a real preset → 200 (empty feed, no providers configured).
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("<rss"), "body: {body}");
+}
+
+#[tokio::test]
+async fn movie_with_profile_by_name_resolves() {
+    let addr = spawn(AuthConfig::Disabled).await;
+    let resp = client()
+        .get(format!("http://{addr}/torznab/api"))
+        .query(&[("t", "movie"), ("tmdbid", "603"), ("profile", "Mínimo PT")])
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 200);
+}
+
+#[tokio::test]
+async fn movie_without_profile_is_unchanged() {
+    let addr = spawn(AuthConfig::Disabled).await;
+    let resp = client()
+        .get(format!("http://{addr}/torznab/api?t=movie&tmdbid=603"))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("<rss"));
+}

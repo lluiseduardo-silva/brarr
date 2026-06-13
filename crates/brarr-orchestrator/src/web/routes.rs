@@ -1896,6 +1896,19 @@ async fn settings_index(State(state): State<AppState>) -> Result<Response, AppEr
 async fn load_settings_values(state: &AppState) -> Result<SettingsValues, AppError> {
     let map = settings::get_all(state.pool()).await?;
     let get = |k: &str| -> String { map.get(k).cloned().unwrap_or_default() };
+    // Build the Torznab indexer URL from the configured public URL (the
+    // page tells the operator to set it when empty) + apikey.
+    let base = crate::push::state_public_base_url(state).unwrap_or_default();
+    let base = base.trim_end_matches('/');
+    let torznab_url = match state.auth_token_owned().filter(|t| !t.is_empty()) {
+        Some(t) => format!("{base}/torznab/api?apikey={t}"),
+        None => format!("{base}/torznab/api"),
+    };
+    let profiles = quality_profiles::list_all(state.pool())
+        .await?
+        .into_iter()
+        .map(|p| (p.id.to_string(), p.name))
+        .collect();
     Ok(SettingsValues {
         auth_enabled: state.auth().is_enabled(),
         bypass_auth_from: get(settings::KEY_BYPASS_AUTH_FROM),
@@ -1920,6 +1933,8 @@ async fn load_settings_values(state: &AppState) -> Result<SettingsValues, AppErr
             let v = get(settings::KEY_BACKTRACE);
             if v.is_empty() { "0".to_string() } else { v }
         },
+        torznab_url,
+        profiles,
     })
 }
 

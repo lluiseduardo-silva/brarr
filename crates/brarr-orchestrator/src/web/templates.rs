@@ -532,6 +532,13 @@ pub struct SettingsValues {
     /// 2024 made `std::env::set_var` unsafe and the workspace forbids
     /// `unsafe_code`.
     pub backtrace: String,
+    /// Inbound Torznab indexer URL (`…/torznab/api?apikey=…`) for the
+    /// "brarr como indexer" card. Host is empty when no public URL is
+    /// configured (the card tells the operator to set it).
+    pub torznab_url: String,
+    /// `(id, name)` of every quality profile — drives the Torznab card's
+    /// profile picker, which appends `&profile=<id>` to the URL.
+    pub profiles: Vec<(String, String)>,
 }
 
 /// One-shot flash message rendered above the settings form. `kind`
