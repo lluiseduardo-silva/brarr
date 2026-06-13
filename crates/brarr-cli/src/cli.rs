@@ -34,6 +34,9 @@ pub enum Command {
     /// Não usa a config TOML local — o orchestrator tem a lista de trackers
     /// armazenada em `SQLite`.
     Remote(RemoteArgs),
+    /// Dispara a manutenção do banco no `brarr-orchestrator` via `gRPC`:
+    /// poda o histórico além da janela de retenção e recupera espaço.
+    Maintenance(MaintenanceArgs),
 }
 
 /// Argumentos do subcomando `search`.
@@ -86,6 +89,25 @@ pub struct RemoteArgs {
     /// Formato de saída (`text` ou `json`).
     #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
     pub format: OutputFormat,
+}
+
+/// Argumentos do subcomando `maintenance`.
+#[derive(Debug, Args)]
+pub struct MaintenanceArgs {
+    /// Endereço do orchestrator (default `127.0.0.1:50051`). Aceita
+    /// `host:port` ou URL completa com `http://`/`https://`.
+    #[arg(long, default_value = "127.0.0.1:50051")]
+    pub addr: String,
+
+    /// Token de autenticação (`BRARR_AUTH_TOKEN` no orchestrator).
+    /// Omita quando o orchestrator estiver em modo dev (auth desabilitado).
+    #[arg(long)]
+    pub token: Option<String>,
+
+    /// Roda um `VACUUM` completo após a poda para encolher o arquivo no
+    /// disco. Caro (trava o banco) — use só quando precisar compactar.
+    #[arg(long, default_value_t = false)]
+    pub vacuum: bool,
 }
 
 /// Formato escolhido para `brarr search`.
@@ -184,6 +206,37 @@ mod tests {
         };
         assert_eq!(args.addr, "1.2.3.4:50051");
         assert_eq!(args.token.as_deref(), Some("s3cret"));
+    }
+
+    #[test]
+    fn parses_maintenance_with_defaults() {
+        let cli = Cli::try_parse_from(["brarr", "maintenance"]).expect("valid args");
+        let Command::Maintenance(args) = cli.command else {
+            panic!("expected Maintenance subcommand");
+        };
+        assert_eq!(args.addr, "127.0.0.1:50051");
+        assert!(args.token.is_none());
+        assert!(!args.vacuum);
+    }
+
+    #[test]
+    fn parses_maintenance_with_vacuum_and_token() {
+        let cli = Cli::try_parse_from([
+            "brarr",
+            "maintenance",
+            "--addr",
+            "1.2.3.4:50051",
+            "--token",
+            "s3cret",
+            "--vacuum",
+        ])
+        .expect("valid args");
+        let Command::Maintenance(args) = cli.command else {
+            panic!("expected Maintenance subcommand");
+        };
+        assert_eq!(args.addr, "1.2.3.4:50051");
+        assert_eq!(args.token.as_deref(), Some("s3cret"));
+        assert!(args.vacuum);
     }
 
     #[test]

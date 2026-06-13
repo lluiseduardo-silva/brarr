@@ -11,11 +11,12 @@ use tonic::{Request, Response, Status, transport::Server};
 use tracing::info;
 
 use super::proto::{
-    ListProvidersReply, ListProvidersRequest, ProviderSummary, RecentSearchesReply,
-    RecentSearchesRequest, ReleaseOutcome, SearchReply, SearchRequest, SearchSummary,
+    ListProvidersReply, ListProvidersRequest, MaintenanceReply, MaintenanceRequest,
+    ProviderSummary, RecentSearchesReply, RecentSearchesRequest, ReleaseOutcome, SearchReply,
+    SearchRequest, SearchSummary,
     brarr_server::{Brarr, BrarrServer},
 };
-use crate::db::{decisions, providers, searches};
+use crate::db::{decisions, maintenance, providers, searches};
 use crate::search::{SearchKeys, run_search};
 use crate::{AppError, AppState};
 
@@ -138,6 +139,41 @@ impl Brarr for BrarrService {
         }
         Ok(Response::new(RecentSearchesReply { searches: out }))
     }
+
+    async fn run_maintenance(
+        &self,
+        request: Request<MaintenanceRequest>,
+    ) -> Result<Response<MaintenanceReply>, Status> {
+        let req = request.into_inner();
+        let pool = self.state.pool();
+        let retention_days = self.state.retention_days();
+        let outcome = maintenance::run_prune(pool, retention_days)
+            .await
+            .map_err(Status::from)?;
+        // Best-effort reclaim — surface prune counts even if a pragma trips.
+        if let Err(e) = maintenance::checkpoint_wal(pool).await {
+            info!(target: "brarr_orchestrator::grpc", error = %e, "maintenance: wal checkpoint failed");
+        }
+        if let Err(e) = maintenance::incremental_vacuum(pool).await {
+            info!(target: "brarr_orchestrator::grpc", error = %e, "maintenance: incremental vacuum failed");
+        }
+        if req.full_vacuum {
+            maintenance::full_vacuum(pool).await.map_err(Status::from)?;
+        }
+        info!(
+            target: "brarr_orchestrator::grpc",
+            decisions_deleted = outcome.decisions_deleted,
+            searches_deleted = outcome.searches_deleted,
+            retention_days,
+            full_vacuum = req.full_vacuum,
+            "ran maintenance via grpc"
+        );
+        Ok(Response::new(MaintenanceReply {
+            decisions_deleted: outcome.decisions_deleted,
+            searches_deleted: outcome.searches_deleted,
+            retention_days,
+        }))
+    }
 }
 
 /// Any filter field set ⇒ run the filtered path (which respects
@@ -248,5 +284,56 @@ pub fn auth_interceptor(
         _ => Err(tonic::Status::unauthenticated(
             "missing or invalid bearer token",
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::*;
+    use crate::db::open_memory;
+    use brarr_decision_service::Engine;
+    use time::OffsetDateTime;
+    use uuid::Uuid;
+
+    #[tokio::test]
+    async fn run_maintenance_prunes_old_history_and_reports_counts() {
+        let pool = open_memory().await.unwrap();
+        let old = OffsetDateTime::now_utc().unix_timestamp() - 30 * 86_400;
+        let search = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO searches (id, tmdb_id, imdb_id, submitted_at, result_count, request_json) \
+             VALUES (?, NULL, NULL, ?, 0, '{}')",
+        )
+        .bind(search.to_string())
+        .bind(old)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO decisions \
+               (id, search_id, provider_id, provider_name, release_name, release_id_remote, \
+                score, rejected, decided_at) \
+             VALUES (?, ?, NULL, 'p', 'r', 0, 0, 0, ?)",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(search.to_string())
+        .bind(old)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Default RuntimeConfig → retention 7 days. full_vacuum=true also
+        // exercises the VACUUM branch.
+        let svc = BrarrService::new(AppState::new(pool, Engine::baseline()));
+        let reply = svc
+            .run_maintenance(Request::new(MaintenanceRequest { full_vacuum: true }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(reply.retention_days, 7);
+        assert_eq!(reply.decisions_deleted, 1);
+        assert_eq!(reply.searches_deleted, 1);
     }
 }

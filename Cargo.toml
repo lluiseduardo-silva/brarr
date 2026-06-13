@@ -44,3 +44,13 @@ print_stderr = "warn"
 lto = "thin"
 codegen-units = 1
 strip = "symbols"
+
+# Builds de dev: encolhe o `target/` sem perder backtraces dos nossos
+# crates. `line-tables-only` mantém arquivo/linha nas stack traces mas
+# corta o grosso do debuginfo; zerar debug das dependências (que somam a
+# maior parte do `target/`) é o que mais reduz o tamanho em disco.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false

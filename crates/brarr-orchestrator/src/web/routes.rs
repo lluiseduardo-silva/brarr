@@ -108,6 +108,14 @@ pub fn router(state: AppState, static_dir: &std::path::Path) -> Router {
         .route("/settings", get(settings_index))
         .route("/settings/general", post(settings_general))
         .route("/settings/token", post(settings_token))
+        .route(
+            "/settings/maintenance/prune",
+            post(settings_maintenance_prune),
+        )
+        .route(
+            "/settings/maintenance/vacuum",
+            post(settings_maintenance_vacuum),
+        )
         .route("/logout", post(logout))
         .layer(auth_layer);
 
@@ -1792,6 +1800,12 @@ async fn load_settings_values(state: &AppState) -> Result<SettingsValues, AppErr
             // the form happens to be pre-filled with.
             state.poll_interval().as_secs().to_string()
         },
+        decisions_retention_days: if map.contains_key(settings::KEY_DECISIONS_RETENTION_DAYS) {
+            get(settings::KEY_DECISIONS_RETENTION_DAYS)
+        } else {
+            // Same rationale as poll_interval: reflect the live window.
+            state.retention_days().to_string()
+        },
         log_level: get(settings::KEY_LOG_LEVEL),
         backtrace: {
             let v = get(settings::KEY_BACKTRACE);
@@ -1828,6 +1842,8 @@ struct SettingsGeneralForm {
     public_url: String,
     #[serde(default)]
     poll_interval_secs: String,
+    #[serde(default)]
+    decisions_retention_days: String,
     #[serde(default)]
     log_level: String,
     #[serde(default)]
@@ -1918,6 +1934,24 @@ async fn settings_general(
         }
     };
 
+    let retention_days = if form.decisions_retention_days.trim().is_empty() {
+        None
+    } else {
+        match form.decisions_retention_days.trim().parse::<u32>() {
+            Ok(days) => Some(days),
+            Err(e) => {
+                return settings_flash_render(
+                    &state,
+                    SettingsFlash {
+                        kind: "err".to_string(),
+                        message: format!("Retenção inválida (dias): {e}"),
+                    },
+                )
+                .await;
+            }
+        }
+    };
+
     let log_spec = form.log_level.trim();
     if !log_spec.is_empty()
         && let Err(e) = state.runtime().log_reload.apply(log_spec)
@@ -1959,6 +1993,12 @@ async fn settings_general(
         &interval_secs.map(|s| s.to_string()).unwrap_or_default(),
     )
     .await?;
+    settings::set(
+        pool,
+        settings::KEY_DECISIONS_RETENTION_DAYS,
+        &retention_days.map(|d| d.to_string()).unwrap_or_default(),
+    )
+    .await?;
     settings::set(pool, settings::KEY_LOG_LEVEL, log_spec).await?;
     settings::set(pool, settings::KEY_BACKTRACE, &backtrace).await?;
 
@@ -1974,12 +2014,62 @@ async fn settings_general(
             .poll_interval
             .store(Arc::new(Duration::from_secs(secs)));
     }
+    if let Some(days) = retention_days {
+        state.runtime().retention_days.store(Arc::new(days));
+    }
 
     settings_flash_render(
         &state,
         SettingsFlash {
             kind: "ok".to_string(),
             message: "Configurações salvas e aplicadas. Backtrace exige restart.".to_string(),
+        },
+    )
+    .await
+}
+
+/// `POST /settings/maintenance/prune` — run the retention prune now at
+/// the live window, reclaim freed pages, and re-render with a flash.
+async fn settings_maintenance_prune(State(state): State<AppState>) -> Result<Response, AppError> {
+    let pool = state.pool();
+    let days = state.retention_days();
+    let outcome = crate::db::maintenance::run_prune(pool, days).await?;
+    // Reclaim is best-effort: a failed checkpoint must not hide the
+    // prune result the operator just triggered.
+    if let Err(e) = crate::db::maintenance::checkpoint_wal(pool).await {
+        info!(target: "brarr_orchestrator::web", error = %e, "manual prune: wal checkpoint failed");
+    }
+    if let Err(e) = crate::db::maintenance::incremental_vacuum(pool).await {
+        info!(target: "brarr_orchestrator::web", error = %e, "manual prune: incremental vacuum failed");
+    }
+    let message = if days == 0 {
+        "Retenção desativada (0 dias) — nada podado.".to_string()
+    } else {
+        format!(
+            "Poda concluída: {} decisão(ões) e {} busca(s) removidas (janela de {days} dia(s)).",
+            outcome.decisions_deleted, outcome.searches_deleted
+        )
+    };
+    settings_flash_render(
+        &state,
+        SettingsFlash {
+            kind: "ok".to_string(),
+            message,
+        },
+    )
+    .await
+}
+
+/// `POST /settings/maintenance/vacuum` — full `VACUUM` to physically
+/// shrink the database file. Expensive (exclusive lock); surfaced as an
+/// explicit button rather than run on a schedule.
+async fn settings_maintenance_vacuum(State(state): State<AppState>) -> Result<Response, AppError> {
+    crate::db::maintenance::full_vacuum(state.pool()).await?;
+    settings_flash_render(
+        &state,
+        SettingsFlash {
+            kind: "ok".to_string(),
+            message: "VACUUM concluído — espaço livre devolvido ao disco.".to_string(),
         },
     )
     .await

@@ -44,6 +44,12 @@ use crate::db::Pool;
 /// config has a sensible default when no override exists yet.
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(1800);
 
+/// Default history-retention window (days) echoed from
+/// [`crate::maintenance`]. Keeps the `decisions` table bounded out of
+/// the box; the operator can widen, narrow, or disable it (`0`) from
+/// `/settings`.
+const DEFAULT_RETENTION_DAYS: u32 = 7;
+
 /// Hot-reloadable runtime configuration. Held inside the Arc'd
 /// [`AppState`] inner; readers go through accessors on
 /// [`AppState`] (`auth`, `bypass`, `public_url`, `poll_interval`).
@@ -57,6 +63,10 @@ pub struct RuntimeConfig {
     pub public_url: ArcSwap<Option<String>>,
     /// *arr poller cadence.
     pub poll_interval: ArcSwap<Duration>,
+    /// History-retention window in days (`0` = keep forever). Read by
+    /// the background maintenance task on every cycle so edits from
+    /// `/settings` take effect without a respawn.
+    pub retention_days: ArcSwap<u32>,
     /// Closure that reloads the `tracing-subscriber` env filter at
     /// runtime. Defaults to a no-op so tests don't have to wire a
     /// subscriber.
@@ -70,6 +80,7 @@ impl Default for RuntimeConfig {
             bypass: ArcSwap::from_pointee(BypassConfig::default()),
             public_url: ArcSwap::from_pointee(None),
             poll_interval: ArcSwap::from_pointee(DEFAULT_POLL_INTERVAL),
+            retention_days: ArcSwap::from_pointee(DEFAULT_RETENTION_DAYS),
             log_reload: LogReloader::noop(),
         }
     }
@@ -258,6 +269,14 @@ impl AppState {
     #[must_use]
     pub fn poll_interval(&self) -> Duration {
         **self.inner.runtime.poll_interval.load()
+    }
+
+    /// Current history-retention window in days (`0` = keep forever).
+    /// Read by [`crate::maintenance`] each cycle so `/settings` edits
+    /// apply without a respawn.
+    #[must_use]
+    pub fn retention_days(&self) -> u32 {
+        **self.inner.runtime.retention_days.load()
     }
 
     /// Borrow the full runtime config so writers (the `/settings`

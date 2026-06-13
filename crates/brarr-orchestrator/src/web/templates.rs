@@ -485,6 +485,9 @@ pub struct SettingsValues {
     pub public_url: String,
     /// Poller cadence in seconds (matches `BRARR_ARR_POLL_INTERVAL_SECS`).
     pub poll_interval_secs: String,
+    /// History-retention window in days (matches
+    /// `BRARR_DECISIONS_RETENTION_DAYS`). `"0"` = keep forever.
+    pub decisions_retention_days: String,
     /// Tracing env-filter spec (matches `RUST_LOG`).
     pub log_level: String,
     /// Backtrace mode persisted in the DB (matches `RUST_BACKTRACE`).

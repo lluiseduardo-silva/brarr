@@ -54,6 +54,7 @@ pub mod auth;
 pub mod db;
 pub mod error;
 pub mod grpc;
+pub mod maintenance;
 pub mod poll;
 pub mod push;
 pub mod search;

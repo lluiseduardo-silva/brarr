@@ -11,8 +11,8 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result};
 use brarr_cli::{
-    Cli, Command, Config, Engine, OutputFormat, RemoteArgs, RuleSet, SearchArgs, run_remote_search,
-    run_search,
+    Cli, Command, Config, Engine, MaintenanceArgs, OutputFormat, RemoteArgs, RuleSet, SearchArgs,
+    run_remote_maintenance, run_remote_search, run_search,
 };
 use brarr_core::TmdbId;
 use clap::Parser;
@@ -59,6 +59,7 @@ fn run(cli: &Cli) -> Result<()> {
             dispatch_search(&config, args)
         }
         Command::Remote(args) => dispatch_remote(args),
+        Command::Maintenance(args) => dispatch_maintenance(args),
     }
 }
 
@@ -170,6 +171,35 @@ fn dispatch_remote(args: &RemoteArgs) -> Result<()> {
             OutputFormat::Text => print!("{rendered}"),
             OutputFormat::Json => println!("{rendered}"),
         }
+    }
+    Ok(())
+}
+
+fn dispatch_maintenance(args: &MaintenanceArgs) -> Result<()> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("building tokio runtime")?;
+    let out = runtime
+        .block_on(run_remote_maintenance(
+            &args.addr,
+            args.token.as_deref(),
+            args.vacuum,
+        ))
+        .with_context(|| format!("remote maintenance against {}", args.addr))?;
+
+    #[allow(
+        clippy::print_stdout,
+        reason = "CLI user-facing output goes to stdout by design"
+    )]
+    {
+        println!(
+            "Manutenção concluída: {} decisão(ões) e {} busca(s) removidas (janela de {} dia(s)){}.",
+            out.decisions_deleted,
+            out.searches_deleted,
+            out.retention_days,
+            if args.vacuum { " + VACUUM" } else { "" }
+        );
     }
     Ok(())
 }

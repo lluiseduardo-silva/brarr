@@ -9,6 +9,7 @@
 
 pub mod arr_instances;
 pub mod decisions;
+pub mod maintenance;
 pub mod providers;
 pub mod push_history;
 pub mod quality_profiles;
@@ -36,7 +37,11 @@ pub async fn open(path: &str) -> Result<SqlitePool, AppError> {
     let mut opts = SqliteConnectOptions::from_str(&format!("sqlite://{path}"))?
         .create_if_missing(true)
         .foreign_keys(true)
-        .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal);
+        .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+        // Let the maintenance task's `PRAGMA incremental_vacuum` return
+        // freed pages to the OS. Takes effect immediately on fresh DBs;
+        // pre-existing files convert on their next full `VACUUM`.
+        .auto_vacuum(sqlx::sqlite::SqliteAutoVacuum::Incremental);
     // Quiet sqlx's verbose per-query logging at INFO — we keep it at
     // DEBUG so `RUST_LOG=brarr_orchestrator=debug` still gives visibility.
     opts = opts.log_statements(tracing::log::LevelFilter::Debug);

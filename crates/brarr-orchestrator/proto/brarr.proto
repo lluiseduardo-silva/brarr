@@ -18,6 +18,11 @@ service Brarr {
 
   // Returns the most recent persisted searches, newest first.
   rpc RecentSearches(RecentSearchesRequest) returns (RecentSearchesReply);
+
+  // Prune history past the configured retention window and reclaim
+  // space. Optionally runs a full VACUUM. Same operation the admin UI's
+  // maintenance buttons trigger.
+  rpc RunMaintenance(MaintenanceRequest) returns (MaintenanceReply);
 }
 
 message SearchRequest {
@@ -97,4 +102,17 @@ message SearchSummary {
   uint32 tvdb_id = 6;
   uint32 season = 7;
   uint32 episode = 8;
+}
+
+message MaintenanceRequest {
+  // When true, run a full VACUUM after pruning to physically shrink the
+  // database file (expensive: exclusive lock). When false, only the
+  // cheap WAL checkpoint + incremental vacuum run.
+  bool full_vacuum = 1;
+}
+message MaintenanceReply {
+  uint64 decisions_deleted = 1;
+  uint64 searches_deleted = 2;
+  // The retention window (days) the prune used, echoed for the caller.
+  uint32 retention_days = 3;
 }

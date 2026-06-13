@@ -30,7 +30,7 @@ use brarr_core::{
 };
 use brarr_decision_service::DecisionOutcome;
 use proto::brarr_client::BrarrClient;
-use proto::{ReleaseOutcome, SearchRequest};
+use proto::{MaintenanceRequest, ReleaseOutcome, SearchRequest};
 use tonic::metadata::MetadataValue;
 use tonic::transport::Channel;
 use tonic::transport::Endpoint;
@@ -108,6 +108,56 @@ pub async fn run_remote_search(
     Ok(SearchOutcome {
         scored,
         failures: Vec::new(),
+    })
+}
+
+/// Row counts returned by a remote maintenance run.
+#[derive(Debug, Clone, Copy)]
+pub struct RemoteMaintenance {
+    /// `decisions` rows the prune deleted.
+    pub decisions_deleted: u64,
+    /// `searches` rows the prune deleted.
+    pub searches_deleted: u64,
+    /// Retention window (days) the server applied.
+    pub retention_days: u32,
+}
+
+/// Trigger a maintenance run on the orchestrator at `addr`: prune
+/// history past the server's retention window and reclaim space,
+/// optionally running a full `VACUUM`.
+///
+/// # Errors
+///
+/// See [`RemoteError`].
+pub async fn run_remote_maintenance(
+    addr: &str,
+    token: Option<&str>,
+    full_vacuum: bool,
+) -> Result<RemoteMaintenance, RemoteError> {
+    let uri = if addr.starts_with("http://") || addr.starts_with("https://") {
+        addr.to_string()
+    } else {
+        format!("http://{addr}")
+    };
+    // A full VACUUM on a large DB can run for a while — give it room.
+    let endpoint = Endpoint::from_shared(uri.clone())?
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(600));
+    let channel: Channel = endpoint.connect().await?;
+    info!(target: "brarr_cli::remote", %uri, full_vacuum, "dispatching remote maintenance");
+
+    let mut client = BrarrClient::new(channel);
+    let mut request = tonic::Request::new(MaintenanceRequest { full_vacuum });
+    if let Some(t) = token {
+        let v = MetadataValue::try_from(format!("Bearer {t}"))
+            .map_err(|_| RemoteError::InvalidToken)?;
+        request.metadata_mut().insert("authorization", v);
+    }
+    let reply = client.run_maintenance(request).await?.into_inner();
+    Ok(RemoteMaintenance {
+        decisions_deleted: reply.decisions_deleted,
+        searches_deleted: reply.searches_deleted,
+        retention_days: reply.retention_days,
     })
 }
 

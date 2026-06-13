@@ -17,9 +17,9 @@ pub mod config;
 pub mod remote;
 pub mod search;
 
-pub use cli::{Cli, Command, OutputFormat, RemoteArgs, SearchArgs};
+pub use cli::{Cli, Command, MaintenanceArgs, OutputFormat, RemoteArgs, SearchArgs};
 pub use config::{Config, ConfigError, TrackerConfig};
-pub use remote::{RemoteError, run_remote_search};
+pub use remote::{RemoteError, RemoteMaintenance, run_remote_maintenance, run_remote_search};
 pub use search::{ScoredRelease, SearchOutcome, format_outcome, format_outcome_json, run_search};
 
 // Re-export do motor de decisão para que callers (tests, main.rs) não

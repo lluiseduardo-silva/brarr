@@ -34,6 +34,7 @@
 //! | `BRARR_TRUSTED_PROXIES`        | _(unset, XFF ignored)_       | reverse proxies whose `X-Forwarded-For` we honor   |
 //! | `BRARR_PUBLIC_URL`             | _(derived from request)_     | external origin for *arr push URLs   |
 //! | `BRARR_ARR_POLL_INTERVAL_SECS` | `1800`                       | autobrr-style auto-push cadence      |
+//! | `BRARR_DECISIONS_RETENTION_DAYS`| `7`                         | history prune window (`0` = keep all)|
 //! | `RUST_LOG`                     | `info`                       | tracing-subscriber env filter        |
 //! | `RUST_BACKTRACE`               | `0`                          | error backtrace verbosity            |
 
@@ -48,17 +49,20 @@ use anyhow::{Context, Result};
 use arc_swap::ArcSwap;
 use brarr_decision_service::Engine;
 use brarr_orchestrator::db::settings::{
-    self, KEY_AUTH_TOKEN, KEY_BYPASS_AUTH_FROM, KEY_LOG_LEVEL, KEY_POLL_INTERVAL_SECS,
-    KEY_PUBLIC_URL, KEY_TRUSTED_PROXIES,
+    self, KEY_AUTH_TOKEN, KEY_BYPASS_AUTH_FROM, KEY_DECISIONS_RETENTION_DAYS, KEY_LOG_LEVEL,
+    KEY_POLL_INTERVAL_SECS, KEY_PUBLIC_URL, KEY_TRUSTED_PROXIES,
 };
 use brarr_orchestrator::state::{LogReloader, RuntimeConfig};
-use brarr_orchestrator::{AppState, AuthConfig, BypassConfig, TrustedPeers, db, grpc, poll, web};
+use brarr_orchestrator::{
+    AppState, AuthConfig, BypassConfig, TrustedPeers, db, grpc, maintenance, poll, web,
+};
 use tracing::warn;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, reload};
 
 const DEFAULT_POLL_INTERVAL_SECS: u64 = 1800;
+const DEFAULT_RETENTION_DAYS: u32 = 7;
 
 #[tokio::main]
 #[allow(
@@ -122,6 +126,11 @@ async fn main() -> Result<()> {
             |secs| Duration::from_secs(secs.max(60)),
         );
 
+    let retention_days = lookup(KEY_DECISIONS_RETENTION_DAYS)
+        .or_else(|| std::env::var("BRARR_DECISIONS_RETENTION_DAYS").ok())
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(DEFAULT_RETENTION_DAYS);
+
     // Apply a persisted log_level override on top of whatever env did
     // at tracing init — no-op when no DB row exists.
     if let Some(spec) = lookup(KEY_LOG_LEVEL)
@@ -140,6 +149,7 @@ async fn main() -> Result<()> {
         bypass: ArcSwap::from_pointee(bypass),
         public_url: ArcSwap::from_pointee(public_url),
         poll_interval: ArcSwap::from_pointee(poll_interval),
+        retention_days: ArcSwap::from_pointee(retention_days),
         log_reload: log_reloader,
     };
     let state = AppState::with_runtime(pool, Engine::baseline(), runtime);
@@ -173,6 +183,15 @@ async fn main() -> Result<()> {
         "  poll  → every {}s (hot-reloadable via /settings)",
         state.poll_interval().as_secs()
     );
+    println!(
+        "  keep  → {} day(s) of history{}",
+        state.retention_days(),
+        if state.retention_days() == 0 {
+            " (retention disabled)"
+        } else {
+            ""
+        }
+    );
     println!("  press Ctrl-C to stop");
 
     let web_state = state.clone();
@@ -189,6 +208,9 @@ async fn main() -> Result<()> {
     // don't want it to terminate the binary if the loop happens to
     // panic, so it's a fire-and-forget spawn.
     let _poll_handle = poll::spawn(poll_state);
+    // Long-lived db janitor. Same fire-and-forget contract as the poller:
+    // prunes history past the retention window and reclaims space.
+    let _maint_handle = maintenance::spawn(state.clone());
 
     tokio::select! {
         res = web_task => res.context("web task panicked")?.context("web server")?,

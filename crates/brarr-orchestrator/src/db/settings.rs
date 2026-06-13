@@ -24,6 +24,10 @@ pub const KEY_TRUSTED_PROXIES: &str = "trusted_proxies";
 pub const KEY_PUBLIC_URL: &str = "public_url";
 /// *arr poll cadence in seconds (replaces `BRARR_ARR_POLL_INTERVAL_SECS`).
 pub const KEY_POLL_INTERVAL_SECS: &str = "poll_interval_secs";
+/// How many days of `decisions` / `searches` history to keep before the
+/// background maintenance task prunes them. `0` = keep forever (disabled).
+/// Replaces `BRARR_DECISIONS_RETENTION_DAYS`.
+pub const KEY_DECISIONS_RETENTION_DAYS: &str = "decisions_retention_days";
 /// `tracing-subscriber` env filter (replaces `RUST_LOG`).
 pub const KEY_LOG_LEVEL: &str = "log_level";
 /// Backtrace mode — `0` / `1` / `full`. Restart required (workspace
