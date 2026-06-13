@@ -74,16 +74,14 @@ impl Language {
     #[must_use]
     pub fn from_mediainfo(language_field: &str, title: Option<&str>) -> Self {
         let lang = language_field.trim();
-        let title_lc = title.map(str::to_lowercase);
+        let lc = lang.to_ascii_lowercase();
 
-        if lang.eq_ignore_ascii_case("Portuguese (BR)") {
-            return Self::PtBr;
-        }
-        if lang.eq_ignore_ascii_case("Portuguese (PT)") {
-            return Self::PtPt;
-        }
-        if lang.eq_ignore_ascii_case("Portuguese") {
-            if let Some(t) = title_lc.as_deref() {
+        if let Some(pt) = classify_portuguese(&lc) {
+            // A bare "Portuguese" / "pt" (ambiguous) can still be refined
+            // by a Brazilian / European hint embedded in the title.
+            if pt == Self::Pt
+                && let Some(t) = title.map(str::to_lowercase)
+            {
                 if t.contains("brazilian") || t.contains("brasileir") {
                     return Self::PtBr;
                 }
@@ -91,9 +89,9 @@ impl Language {
                     return Self::PtPt;
                 }
             }
-            return Self::Pt;
+            return pt;
         }
-        if lang.eq_ignore_ascii_case("English") {
+        if matches!(lc.as_str(), "english" | "en" | "eng") {
             return Self::En;
         }
         if is_japanese_tag(lang) {
@@ -111,6 +109,42 @@ impl Language {
     pub const fn is_portuguese(&self) -> bool {
         matches!(self, Self::PtBr | Self::PtPt | Self::Pt)
     }
+}
+
+/// Classify a lowercased language field as a Portuguese variant, or
+/// `None` when it isn't Portuguese. Accepts English names
+/// (`portuguese`, `portuguese (brazil)`), ISO codes (`pt`, `por`,
+/// `pob`, `pt-br`, `pt_pt`), and BR/PT region markers — covers both
+/// `MediaInfo` dumps and the `language*` / `lang` attrs that BR Newznab
+/// indexers (Curupira etc.) emit.
+fn classify_portuguese(lc: &str) -> Option<Language> {
+    let has_name = lc.contains("portugu"); // portuguese / português / portugues
+    let is_code = matches!(lc, "pt" | "por" | "pob" | "ptbr" | "ptpt")
+        || lc.starts_with("pt-")
+        || lc.starts_with("pt_");
+    if !has_name && !is_code {
+        return None;
+    }
+    if lc.contains("brazil")
+        || lc.contains("brasil")
+        || lc.contains("(br")
+        || lc.starts_with("pt-br")
+        || lc.starts_with("pt_br")
+        || lc == "ptbr"
+        || lc == "pob"
+    {
+        return Some(Language::PtBr);
+    }
+    if lc.contains("portugal")
+        || lc.contains("(pt")
+        || lc.contains("european")
+        || lc.starts_with("pt-pt")
+        || lc.starts_with("pt_pt")
+        || lc == "ptpt"
+    {
+        return Some(Language::PtPt);
+    }
+    Some(Language::Pt)
 }
 
 /// Strip a parenthesised region suffix from a language tag so
@@ -176,6 +210,39 @@ mod tests {
         assert_eq!(
             Language::from_mediainfo("Portuguese (PT)", None),
             Language::PtPt
+        );
+    }
+
+    #[test]
+    fn pt_br_from_iso_code_and_region_name() {
+        // BR Newznab indexers (Curupira) emit ISO codes + human names.
+        assert_eq!(Language::from_mediainfo("pt-BR", None), Language::PtBr);
+        assert_eq!(Language::from_mediainfo("pt_br", None), Language::PtBr);
+        assert_eq!(
+            Language::from_mediainfo("Portuguese (Brazil)", None),
+            Language::PtBr
+        );
+        assert_eq!(
+            Language::from_mediainfo("Portuguese (Brasil)", None),
+            Language::PtBr
+        );
+        assert_eq!(Language::from_mediainfo("pob", None), Language::PtBr);
+    }
+
+    #[test]
+    fn pt_variants_and_english_from_codes() {
+        assert_eq!(Language::from_mediainfo("pt-PT", None), Language::PtPt);
+        assert_eq!(
+            Language::from_mediainfo("Portuguese (Portugal)", None),
+            Language::PtPt
+        );
+        assert_eq!(Language::from_mediainfo("pt", None), Language::Pt);
+        assert_eq!(Language::from_mediainfo("por", None), Language::Pt);
+        assert_eq!(Language::from_mediainfo("eng", None), Language::En);
+        assert_eq!(Language::from_mediainfo("en", None), Language::En);
+        // Spanish has no enum variant → preserved as Other.
+        assert!(
+            matches!(Language::from_mediainfo("es", None), Language::Other(ref s) if s == "es")
         );
     }
 

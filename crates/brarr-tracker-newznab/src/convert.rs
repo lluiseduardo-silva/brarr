@@ -128,20 +128,25 @@ fn build_enrichment(item: &RawItem) -> ReleaseEnrichment {
     // packing them into a single comma-joined value. Iterate ALL
     // entries — `attr()` (singular) would drop everything after the
     // first. The `audio` attr is treated identically.
-    for raw in item.attrs("language") {
-        for piece in split_langs(raw) {
-            push_unique(&mut audio, piece);
+    // Audio-language attrs vary by indexer fork: the Newznab-standard
+    // `language` (often one per track), the `audio` alias, plus the
+    // `language-audio` (comma-joined codes) and `lang` (primary code)
+    // that BR Usenet indexers like Curupira emit.
+    for name in ["language", "audio", "language-audio", "lang"] {
+        for raw in item.attrs(name) {
+            for piece in split_langs(raw) {
+                push_unique(&mut audio, piece);
+            }
         }
     }
-    for raw in item.attrs("audio") {
-        for piece in split_langs(raw) {
-            push_unique(&mut audio, piece);
-        }
-    }
+    // Subtitle-language attrs: `subs` (standard) + `language-subs` (BR
+    // forks).
     let mut subs = Vec::new();
-    for raw in item.attrs("subs") {
-        for piece in split_langs(raw) {
-            push_unique(&mut subs, piece);
+    for name in ["subs", "language-subs"] {
+        for raw in item.attrs(name) {
+            for piece in split_langs(raw) {
+                push_unique(&mut subs, piece);
+            }
         }
     }
     // Title heuristic fallback. Newznab indexers — NZBGeek especially
@@ -365,6 +370,43 @@ mod tests {
             e.subtitle_languages
                 .iter()
                 .any(|l| matches!(l, Language::PtBr | Language::Pt))
+        );
+    }
+
+    #[test]
+    fn curupira_br_usenet_attrs_yield_pt_br() {
+        // Real Curupira (BR Usenet) item: language codes split across
+        // `language-audio` / `language-subs` / `lang`, plus human-readable
+        // `language` names. brarr must extract PT-BR audio so the
+        // "Áudio PT-BR" rule fires (it scored 0 before this fix).
+        let xml = r#"<?xml version="1.0"?>
+<rss xmlns:newznab="http://www.newznab.com/DTD/2010/feeds/attributes/">
+  <channel>
+    <item>
+      <title>Maridos.2023.720p.LOKE.WEB-DL.AAC2.0.H.264.DUAL-SiGLA</title>
+      <guid>01KV16</guid>
+      <enclosure url="http://curupira.cc/api?t=get&amp;id=01KV16" length="3352069953" type="application/x-nzb"/>
+      <newznab:attr name="tmdbid" value="1008009"/>
+      <newznab:attr name="lang" value="pt-BR"/>
+      <newznab:attr name="language-audio" value="pt-BR,es"/>
+      <newznab:attr name="language-subs" value="es,pt-BR"/>
+      <newznab:attr name="language" value="Portuguese (Brazil)"/>
+      <newznab:attr name="language" value="Spanish"/>
+    </item>
+  </channel>
+</rss>"#;
+        let feed = parse_feed(xml).unwrap();
+        let r = item_to_release(&feed.items[0], tracker()).unwrap();
+        let e = r.enrichment.as_ref().unwrap();
+        assert!(
+            e.audio_languages.contains(&Language::PtBr),
+            "expected PT-BR audio, got {:?}",
+            e.audio_languages
+        );
+        assert!(
+            e.subtitle_languages.contains(&Language::PtBr),
+            "expected PT-BR subtitle, got {:?}",
+            e.subtitle_languages
         );
     }
 
