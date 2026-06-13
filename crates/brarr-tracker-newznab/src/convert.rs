@@ -30,6 +30,8 @@ pub fn item_to_release(item: &RawItem, tracker: TrackerSource) -> Result<Release
     release.urls = pick_urls(item);
     release.enrichment = Some(build_enrichment(item));
     release.published_at = pick_published_at(item);
+    // Newznab não traz MediaInfo, então as tags saem só do título.
+    release.tags = brarr_core::parse_release_tags(&item.title);
     Ok(release)
 }
 
@@ -170,6 +172,10 @@ fn build_enrichment(item: &RawItem) -> ReleaseEnrichment {
         subtitle_languages: subs,
         has_forced_subs: false,
         has_hdr,
+        // Newznab não traz MediaInfo; codec/bit-depth ficam por conta do
+        // tokenizador de título (ver `item_to_release`).
+        video_codec: None,
+        video_bit_depth: None,
     }
 }
 

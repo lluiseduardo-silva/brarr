@@ -57,6 +57,11 @@ pub struct Release {
     /// para que clientes *arr enxerguem a idade real do upload em vez
     /// de "Age: 0 minutes".
     pub published_at: Option<OffsetDateTime>,
+    /// Tags derivadas do título (e refinadas pelo `MediaInfo` quando
+    /// disponível): codec de vídeo, grupo de release e flags
+    /// proper/repack/remux. Preenchidas pelos converters via
+    /// [`crate::parse_release_tags`].
+    pub tags: ReleaseTags,
 }
 
 /// Erros de construção de [`Release`].
@@ -110,8 +115,56 @@ impl Release {
             urls: ReleaseUrls::default(),
             enrichment: None,
             published_at: None,
+            tags: ReleaseTags::default(),
         })
     }
+}
+
+/// Codec de vídeo do release, detectado do título ou do `MediaInfo`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum VideoCodec {
+    /// H.264 / AVC (também conhecido como x264).
+    H264,
+    /// H.265 / HEVC (também conhecido como x265).
+    H265,
+    /// AV1.
+    Av1,
+    /// Outro/desconhecido — preserva a string crua (e.g. `"VP9"`).
+    Other(String),
+}
+
+impl VideoCodec {
+    /// Normaliza o `Video format` do `MediaInfo` (e.g. `"HEVC"`, `"AVC"`,
+    /// `"AV1"`) num [`VideoCodec`]. Desconhecido cai em
+    /// [`VideoCodec::Other`] com a string `trim`ada.
+    #[must_use]
+    pub fn from_mediainfo_format(raw: &str) -> Self {
+        let norm = raw.trim();
+        match norm.to_ascii_uppercase().as_str() {
+            "HEVC" | "H265" | "H.265" | "X265" => Self::H265,
+            "AVC" | "H264" | "H.264" | "X264" => Self::H264,
+            "AV1" => Self::Av1,
+            _ => Self::Other(norm.to_string()),
+        }
+    }
+}
+
+/// Tags derivadas do título (e refinadas pelo `MediaInfo`): codec de
+/// vídeo, grupo de release e flags proper/repack/remux. Tudo
+/// best-effort — campos ausentes quando não detectados.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub struct ReleaseTags {
+    /// Codec de vídeo, quando detectado.
+    pub video_codec: Option<VideoCodec>,
+    /// Grupo de release (sufixo `-GRUPO`), quando detectado.
+    pub release_group: Option<String>,
+    /// `true` se o título marca `PROPER`.
+    pub proper: bool,
+    /// `true` se o título marca `REPACK`.
+    pub repack: bool,
+    /// `true` se o título marca `REMUX` (refina `ReleaseKind::BluRay`).
+    pub remux: bool,
 }
 
 /// Tipo de fonte do release.

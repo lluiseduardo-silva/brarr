@@ -9,6 +9,7 @@ repository.workspace = true
 
 [dependencies]
 brarr-core = { version = "0.1.0", path = "../brarr-core" }
+regex = "1.12"
 serde = { version = "1.0.228", features = ["derive"] }
 thiserror = "2.0.18"
 toml = "1.1.2"

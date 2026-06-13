@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block title %}Webhooks · brarr{% endblock %}
+{% block content %}
+
+<section class="mb-6">
+    <h1 class="text-2xl font-semibold text-fg-primary mb-1">Webhooks recebidos</h1>
+    <p class="text-sm text-fg-secondary">
+        Eventos de <span class="font-mono">Connect → Webhook</span> que o Sonarr/Radarr enviou ao brarr.
+        Configure a URL por instância em <a href="/arr-instances" class="text-accent-soft-fg hover:underline">*arr</a>.
+        Cada evento elegível dispara uma busca + push em background.
+    </p>
+</section>
+
+{% if events.is_empty() %}
+<div class="card-hairline bg-bg-surface border border-border-default rounded-xl p-8 text-center">
+    <p class="text-sm text-fg-secondary">
+        Nenhum webhook recebido ainda. Cole a URL da instância no Connect do *arr e use o botão
+        <span class="font-mono">Test</span> — o evento aparece aqui.
+    </p>
+</div>
+{% else %}
+<div class="card-hairline bg-bg-surface border border-border-default rounded-xl overflow-hidden">
+    <table class="w-full text-sm">
+        <thead>
+            <tr class="text-left bg-bg-muted">
+                <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Quando</th>
+                <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Instância</th>
+                <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Evento</th>
+                <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Busca</th>
+                <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Payload</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for e in events %}
+            <tr class="border-t border-border-default align-top">
+                <td class="px-4 py-3 whitespace-nowrap">
+                    <time class="text-xs text-fg-secondary font-mono"
+                          data-datetime="{{ e.received_at }}" data-datetime-style="short">{{ e.received_at }}</time>
+                </td>
+                <td class="px-4 py-3">
+                    <span class="text-fg-primary">{{ e.arr_instance_name }}</span>
+                    <span class="ml-1.5 px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase tracking-[0.06em] bg-bg-muted text-fg-secondary">{{ e.kind }}</span>
+                </td>
+                <td class="px-4 py-3">
+                    <span class="px-2 py-0.5 rounded text-[11px] font-medium bg-accent-soft text-accent-soft-fg">{{ e.event_type }}</span>
+                </td>
+                <td class="px-4 py-3 whitespace-nowrap">
+                    {% if let Some(sid) = e.triggered_search_id %}
+                    <a href="/searches/{{ sid }}" class="text-accent-soft-fg hover:underline text-xs font-mono">ver busca →</a>
+                    {% else %}
+                    <span class="text-fg-muted text-xs">—</span>
+                    {% endif %}
+                </td>
+                <td class="px-4 py-3">
+                    <details>
+                        <summary class="cursor-pointer text-xs text-fg-secondary hover:text-fg-primary">ver JSON</summary>
+                        <pre class="mt-2 p-2 rounded-md bg-bg-canvas border border-border-default text-[11px] font-mono text-fg-secondary overflow-x-auto max-w-xl whitespace-pre-wrap">{{ e.payload_preview }}</pre>
+                    </details>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+
+{% endblock %}

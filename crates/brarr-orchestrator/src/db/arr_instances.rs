@@ -40,6 +40,10 @@ pub struct ArrInstanceRow {
     /// for "drain mode" where the operator wants to silence one *arr
     /// without losing its config.
     pub enabled: bool,
+    /// `true` ⇒ this instance is driven by inbound webhooks; the
+    /// scheduled poller skips it (the manual "rodar agora" button still
+    /// works). Default `false`.
+    pub webhook_driven: bool,
     /// Row creation timestamp.
     pub created_at: OffsetDateTime,
 }
@@ -131,6 +135,7 @@ pub async fn insert(pool: &Pool, new: NewArrInstance<'_>) -> Result<ArrInstanceR
         push_threshold: threshold,
         profile_id: new.profile_id,
         enabled,
+        webhook_driven: false,
         created_at: now,
     })
 }
@@ -142,7 +147,7 @@ pub async fn insert(pool: &Pool, new: NewArrInstance<'_>) -> Result<ArrInstanceR
 /// Returns [`AppError::Database`] on SQL failure.
 pub async fn list_all(pool: &Pool) -> Result<Vec<ArrInstanceRow>, AppError> {
     let rows = sqlx::query(
-        "SELECT id, name, kind, base_url, api_key, push_threshold, profile_id, enabled, created_at \
+        "SELECT id, name, kind, base_url, api_key, push_threshold, profile_id, enabled, webhook_driven, created_at \
          FROM arr_instances ORDER BY name ASC",
     )
     .fetch_all(pool)
@@ -158,7 +163,7 @@ pub async fn list_all(pool: &Pool) -> Result<Vec<ArrInstanceRow>, AppError> {
 /// Returns [`AppError::Database`] on SQL failure.
 pub async fn list_enabled(pool: &Pool) -> Result<Vec<ArrInstanceRow>, AppError> {
     let rows = sqlx::query(
-        "SELECT id, name, kind, base_url, api_key, push_threshold, profile_id, enabled, created_at \
+        "SELECT id, name, kind, base_url, api_key, push_threshold, profile_id, enabled, webhook_driven, created_at \
          FROM arr_instances WHERE enabled = 1 ORDER BY name ASC",
     )
     .fetch_all(pool)
@@ -173,7 +178,7 @@ pub async fn list_enabled(pool: &Pool) -> Result<Vec<ArrInstanceRow>, AppError> 
 /// Returns [`AppError::NotFound`] if no row matches.
 pub async fn get_by_id(pool: &Pool, id: Uuid) -> Result<ArrInstanceRow, AppError> {
     let row_opt = sqlx::query(
-        "SELECT id, name, kind, base_url, api_key, push_threshold, profile_id, enabled, created_at \
+        "SELECT id, name, kind, base_url, api_key, push_threshold, profile_id, enabled, webhook_driven, created_at \
          FROM arr_instances WHERE id = ?",
     )
     .bind(id.to_string())
@@ -237,6 +242,30 @@ pub async fn delete_by_id(pool: &Pool, id: Uuid) -> Result<bool, AppError> {
 pub async fn set_enabled(pool: &Pool, id: Uuid, enabled: bool) -> Result<ArrInstanceRow, AppError> {
     let res = sqlx::query("UPDATE arr_instances SET enabled = ? WHERE id = ?")
         .bind(i64::from(u8::from(enabled)))
+        .bind(id.to_string())
+        .execute(pool)
+        .await?;
+    if res.rows_affected() == 0 {
+        return Err(AppError::NotFound(format!("arr_instance {id}")));
+    }
+    get_by_id(pool, id).await
+}
+
+/// Flip the `webhook_driven` flag in place. When `true`, the scheduled
+/// poller skips this instance (see [`crate::poll`]); the manual poll
+/// button is unaffected.
+///
+/// # Errors
+///
+/// - [`AppError::NotFound`] when no row matches `id`.
+/// - [`AppError::Database`] on SQL failure.
+pub async fn set_webhook_driven(
+    pool: &Pool,
+    id: Uuid,
+    webhook_driven: bool,
+) -> Result<ArrInstanceRow, AppError> {
+    let res = sqlx::query("UPDATE arr_instances SET webhook_driven = ? WHERE id = ?")
+        .bind(i64::from(u8::from(webhook_driven)))
         .bind(id.to_string())
         .execute(pool)
         .await?;
@@ -334,6 +363,7 @@ fn row_to_instance(row: &SqliteRow) -> Result<ArrInstanceRow, AppError> {
             AppError::InvalidInput(format!("invalid uuid in arr_instances.profile_id: {e}"))
         })?;
     let enabled_i64: i64 = row.try_get("enabled")?;
+    let webhook_driven_i64: i64 = row.try_get("webhook_driven")?;
     let created_unix: i64 = row.try_get("created_at")?;
     let created_at = OffsetDateTime::from_unix_timestamp(created_unix)
         .map_err(|e| AppError::InvalidInput(format!("invalid timestamp: {e}")))?;
@@ -346,6 +376,7 @@ fn row_to_instance(row: &SqliteRow) -> Result<ArrInstanceRow, AppError> {
         push_threshold,
         profile_id,
         enabled: enabled_i64 != 0,
+        webhook_driven: webhook_driven_i64 != 0,
         created_at,
     })
 }
@@ -500,6 +531,21 @@ mod tests {
         assert_eq!(enabled.len(), 1);
         assert_eq!(enabled[0].name, "on");
         assert_eq!(list_all(&pool).await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn webhook_driven_defaults_false_and_roundtrips() {
+        let pool = open_memory().await.unwrap();
+        let url = Url::parse("https://x/").unwrap();
+        let row = insert(&pool, ni("wh", ArrKind::Radarr, &url, "k"))
+            .await
+            .unwrap();
+        assert!(!row.webhook_driven);
+        let on = set_webhook_driven(&pool, row.id, true).await.unwrap();
+        assert!(on.webhook_driven);
+        assert!(get_by_id(&pool, row.id).await.unwrap().webhook_driven);
+        let off = set_webhook_driven(&pool, row.id, false).await.unwrap();
+        assert!(!off.webhook_driven);
     }
 
     #[tokio::test]

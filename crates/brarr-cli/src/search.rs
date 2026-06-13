@@ -472,12 +472,10 @@ mod tests {
         )
         .unwrap();
         r.enrichment = Some(ReleaseEnrichment {
-            container_format: None,
-            duration: None,
             audio_languages: audio,
             subtitle_languages: subs,
-            has_forced_subs: false,
             has_hdr: hdr,
+            ..ReleaseEnrichment::default()
         });
         r
     }

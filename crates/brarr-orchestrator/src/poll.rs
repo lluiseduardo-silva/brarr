@@ -114,6 +114,18 @@ async fn run_one_cycle(state: &AppState) -> Result<(), AppError> {
         return Ok(());
     }
     for arr in arr_rows {
+        // Webhook-driven instances rely on inbound Connect events for
+        // real-time coverage, so the scheduled sweep skips them. The
+        // manual "rodar agora" button calls `run_once_for_instance`
+        // directly and is unaffected.
+        if arr.webhook_driven {
+            debug!(
+                target: "brarr_orchestrator::poll",
+                arr_name = %arr.name,
+                "skipping webhook-driven instance in scheduled cycle"
+            );
+            continue;
+        }
         match run_once_for_instance(state, &arr).await {
             Ok(summary) => info!(
                 target: "brarr_orchestrator::poll",

@@ -8,7 +8,7 @@
 
 use brarr_core::{
     ImdbId, MalId, OffsetDateTime, Release, ReleaseError, ReleaseKind, Resolution, TmdbId,
-    TrackerSource, TvdbId,
+    TrackerSource, TvdbId, VideoCodec, parse_release_tags,
 };
 use brarr_mediainfo::parse;
 use time::PrimitiveDateTime;
@@ -91,6 +91,19 @@ impl Unit3dTorrent {
             .as_deref()
             .and_then(|raw| parse(raw).ok())
             .map(|parsed| parsed.to_enrichment());
+
+        // Tags do título; o codec é refinado pelo MediaInfo quando o
+        // dump trouxe o `Video format` (mais confiável que adivinhar do
+        // nome).
+        let mut tags = parse_release_tags(&release.title);
+        if let Some(fmt) = release
+            .enrichment
+            .as_ref()
+            .and_then(|e| e.video_codec.as_deref())
+        {
+            tags.video_codec = Some(VideoCodec::from_mediainfo_format(fmt));
+        }
+        release.tags = tags;
 
         // `created_at` é o timestamp do upload no tracker — alimenta
         // o `<pubDate>` do feed Torznab pra que Sonarr/Radarr mostrem

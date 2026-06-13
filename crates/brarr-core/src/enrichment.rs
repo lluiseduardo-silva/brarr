@@ -37,6 +37,13 @@ pub struct ReleaseEnrichment {
     pub has_forced_subs: bool,
     /// `true` se houver pelo menos uma faixa de vídeo com `HDR format` declarado.
     pub has_hdr: bool,
+    /// Formato/codec da primeira faixa de vídeo (e.g. `"HEVC"`, `"AVC"`,
+    /// `"AV1"`). `None` quando ausente no dump. Mais confiável que o
+    /// codec adivinhado do título — os converters o preferem.
+    pub video_codec: Option<String>,
+    /// Profundidade de bits da primeira faixa de vídeo (8/10/12). `None`
+    /// quando ausente.
+    pub video_bit_depth: Option<u8>,
 }
 
 impl ReleaseEnrichment {

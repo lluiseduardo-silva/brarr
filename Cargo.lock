@@ -408,6 +408,7 @@ name = "brarr-decision-service"
 version = "0.1.5"
 dependencies = [
  "brarr-core",
+ "regex",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

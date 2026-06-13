@@ -18,6 +18,7 @@
         { prefix: '/releases',      section: 'releases' },
         { prefix: '/searches',      section: 'releases' },
         { prefix: '/pushes',        section: 'pushes' },
+        { prefix: '/webhooks',      section: 'webhooks' },
         { prefix: '/',              section: 'dashboard' }
     ];
 

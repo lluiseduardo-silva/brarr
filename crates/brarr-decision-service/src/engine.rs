@@ -9,19 +9,25 @@
 use brarr_core::{DecisionScore, Release};
 
 use crate::outcome::DecisionOutcome;
-use crate::rule::RuleSet;
+use crate::rule::{RegexCache, RuleSet};
 
-/// Motor de regras. Fino wrapper em torno de um [`RuleSet`].
+/// Motor de regras. Wrapper em torno de um [`RuleSet`] que pré-compila
+/// os `title_matches` em regex no construtor pra não recompilar a cada
+/// release no caminho quente.
 #[derive(Debug, Clone)]
 pub struct Engine {
     rules: RuleSet,
+    regexes: RegexCache,
 }
 
 impl Engine {
-    /// Constrói um motor com o `RuleSet` dado.
+    /// Constrói um motor com o `RuleSet` dado, pré-compilando os
+    /// `title_matches`. Padrões inválidos são ignorados aqui (o leaf
+    /// nunca casa) — use [`RuleSet::validate`] pra reportá-los à UI.
     #[must_use]
-    pub const fn new(rules: RuleSet) -> Self {
-        Self { rules }
+    pub fn new(rules: RuleSet) -> Self {
+        let regexes = rules.compile_regexes();
+        Self { rules, regexes }
     }
 
     /// Motor com regras default (equivalente ao scoring hardcoded da
@@ -55,7 +61,7 @@ impl Engine {
         let mut rejected = false;
 
         for (idx, rule) in self.rules.rules.iter().enumerate() {
-            if !rule.when.matches(release) {
+            if !rule.when.matches_with(release, &self.regexes) {
                 continue;
             }
             score_acc = score_acc.saturating_add(rule.add_score);
@@ -105,12 +111,9 @@ mod tests {
             Release::new("1", tracker("t"), "x", ReleaseKind::WebDl, resolution, 0).unwrap();
         r.seeders = seeders;
         r.enrichment = Some(ReleaseEnrichment {
-            container_format: None,
-            duration: None,
             audio_languages: audio,
-            subtitle_languages: vec![],
-            has_forced_subs: false,
             has_hdr: hdr,
+            ..ReleaseEnrichment::default()
         });
         r
     }

@@ -21,6 +21,7 @@ impl ParsedMediaInfo {
     /// (`has_forced_subs`, `has_hdr`).
     #[must_use]
     pub fn to_enrichment(&self) -> ReleaseEnrichment {
+        let primary_video = self.video.first();
         ReleaseEnrichment {
             container_format: self.general.container_format.clone(),
             duration: self.general.duration,
@@ -28,6 +29,8 @@ impl ParsedMediaInfo {
             subtitle_languages: self.subtitles.iter().map(|t| t.language.clone()).collect(),
             has_forced_subs: self.subtitles.iter().any(|s| s.forced),
             has_hdr: self.video.iter().any(|v| v.hdr_format.is_some()),
+            video_codec: primary_video.and_then(|v| v.format.clone()),
+            video_bit_depth: primary_video.and_then(|v| v.bit_depth),
         }
     }
 }

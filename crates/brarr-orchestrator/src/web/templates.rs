@@ -194,6 +194,15 @@ pub struct ArrInstanceView {
     pub profile_threshold: Option<u32>,
     /// `true` if this row is currently eligible for push.
     pub enabled: bool,
+    /// `true` ⇒ scheduled poller skips this instance (webhook-driven).
+    pub webhook_driven: bool,
+    /// Ready-to-paste inbound webhook URL for this instance's Connect →
+    /// Webhook setting. Empty for views that don't render the *arr table
+    /// (e.g. dashboard dropdowns). Includes `?apikey=` when auth is on.
+    pub webhook_url: String,
+    /// `false` ⇒ auth is disabled, so the URL carries no apikey — the
+    /// template shows a dev-mode note instead.
+    pub webhook_has_token: bool,
     /// Creation timestamp (ISO-8601).
     pub created_at: String,
 }
@@ -205,6 +214,34 @@ pub struct ArrInstanceView {
 pub struct ArrInstancesListPartial {
     /// All configured *arr endpoints.
     pub instances: Vec<ArrInstanceView>,
+}
+
+/// `/webhooks` view — recent inbound *arr webhook events (audit log).
+#[derive(Debug, Template)]
+#[template(path = "webhooks.html")]
+pub struct WebhooksTemplate {
+    /// Recent events, newest first.
+    pub events: Vec<WebhookEventView>,
+}
+
+/// One row in the webhook audit table.
+#[derive(Debug)]
+pub struct WebhookEventView {
+    /// Reception timestamp (ISO-8601; reformatted client-side by
+    /// `datetime.js`).
+    pub received_at: String,
+    /// Display name of the *arr instance that fired it (`"(removida)"`
+    /// when the instance was since deleted).
+    pub arr_instance_name: String,
+    /// `"sonarr"` / `"radarr"`.
+    pub kind: String,
+    /// Raw *arr `eventType` (e.g. `MovieAdded`, `Test`).
+    pub event_type: String,
+    /// UUID of the search this event triggered, if any (links to the
+    /// search-detail page).
+    pub triggered_search_id: Option<String>,
+    /// Truncated payload JSON for the expandable detail.
+    pub payload_preview: String,
 }
 
 /// `/pushes` view — recent push attempts grouped by release + *arr.

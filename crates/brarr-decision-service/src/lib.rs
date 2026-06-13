@@ -57,4 +57,7 @@ mod rule;
 pub use engine::Engine;
 pub use loader::{LoadError, from_toml};
 pub use outcome::DecisionOutcome;
-pub use rule::{AudioFilter, Condition, ResolutionFilter, Rule, RuleSet, SubtitleFilter};
+pub use rule::{
+    AudioFilter, CodecFilter, Condition, KindFilter, ResolutionFilter, Rule, RuleSet,
+    SubtitleFilter,
+};

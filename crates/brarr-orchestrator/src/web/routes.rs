@@ -54,7 +54,7 @@ use crate::web::templates::{
     ProfileView, ProfilesTemplate, ProviderView, ProvidersListPartial, ProvidersTemplate,
     PushGroupView, PushHistoryView, PushesFilterView, PushesTemplate, RecentSearchView,
     ReleasesTemplate, SearchDetailTemplate, SearchesFilterView, SearchesIndexTemplate,
-    SettingsFlash, SettingsTemplate, SettingsValues,
+    SettingsFlash, SettingsTemplate, SettingsValues, WebhookEventView, WebhooksTemplate,
 };
 use crate::{AppError, AppState};
 use brarr_core::TmdbId;
@@ -88,6 +88,10 @@ pub fn router(state: AppState, static_dir: &std::path::Path) -> Router {
         .route("/arr-instances/{id}/poll-now", post(arr_instances_poll_now))
         .route("/arr-instances/{id}/toggle", post(arr_instances_toggle))
         .route(
+            "/arr-instances/{id}/webhook-driven",
+            post(arr_instances_webhook_driven_toggle),
+        )
+        .route(
             "/arr-instances/{id}/threshold",
             post(arr_instances_update_threshold),
         )
@@ -105,6 +109,7 @@ pub fn router(state: AppState, static_dir: &std::path::Path) -> Router {
         .route("/searches", get(searches_index).post(searches_create))
         .route("/searches/new", get(new_search_modal))
         .route("/searches/{id}", get(search_detail))
+        .route("/webhooks", get(webhooks_index))
         .route("/settings", get(settings_index))
         .route("/settings/general", post(settings_general))
         .route("/settings/token", post(settings_token))
@@ -498,17 +503,21 @@ async fn providers_test(
     Ok(resp)
 }
 
-async fn arr_instances_index(State(state): State<AppState>) -> Result<Response, AppError> {
+async fn arr_instances_index(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> Result<Response, AppError> {
     let rows = arr_instances::list_all(state.pool()).await?;
     let profile_rows = quality_profiles::list_all(state.pool()).await?;
     let profile_by_id: std::collections::HashMap<
         Uuid,
         &crate::db::quality_profiles::QualityProfileRow,
     > = profile_rows.iter().map(|p| (p.id, p)).collect();
-    let instances = rows
+    let mut instances: Vec<_> = rows
         .iter()
         .map(|r| arr_instance_view_with_profile(r, &profile_by_id))
         .collect();
+    fill_webhook_urls(&state, Some(&headers), &mut instances);
     let profiles = profile_rows
         .iter()
         .map(|p| ProfileView {
@@ -599,7 +608,8 @@ async fn arr_instances_create(
     .await?;
 
     let rows = arr_instances::list_all(state.pool()).await?;
-    let instances = rows.into_iter().map(arr_instance_view).collect();
+    let mut instances: Vec<_> = rows.into_iter().map(arr_instance_view).collect();
+    fill_webhook_urls(&state, None, &mut instances);
     html(&ArrInstancesListPartial { instances })
 }
 
@@ -613,7 +623,9 @@ async fn arr_instances_delete(
     if !removed {
         return Err(AppError::NotFound(format!("arr_instance {uuid}")));
     }
-    Ok((StatusCode::OK, "").into_response())
+    // Re-render the whole list (not just the row) so the per-instance
+    // webhook detail sub-row can't be left orphaned.
+    render_arr_instances_partial(&state).await
 }
 
 /// `POST /arr-instances/{id}/test` — hits the *arr's `/system/status`
@@ -676,7 +688,8 @@ async fn arr_instances_update_threshold(
         .map_err(|e| AppError::InvalidInput(format!("threshold must be 0..=1000: {e}")))?;
     arr_instances::update_threshold(state.pool(), uuid, threshold).await?;
     let rows = arr_instances::list_all(state.pool()).await?;
-    let instances = rows.into_iter().map(arr_instance_view).collect();
+    let mut instances: Vec<_> = rows.into_iter().map(arr_instance_view).collect();
+    fill_webhook_urls(&state, None, &mut instances);
     html(&ArrInstancesListPartial { instances })
 }
 
@@ -839,6 +852,49 @@ async fn pushes_index(
     })
 }
 
+/// `GET /webhooks` — audit log of inbound Sonarr/Radarr Connect events.
+/// Wires the `webhook_events::recent` query (previously orphaned) to a
+/// page so the operator can see what *arr fired and which search it
+/// triggered.
+async fn webhooks_index(State(state): State<AppState>) -> Result<Response, AppError> {
+    let pool = state.pool();
+    let events = crate::db::webhook_events::recent(pool, 200).await?;
+    let name_by_id: std::collections::HashMap<Uuid, String> = arr_instances::list_all(pool)
+        .await?
+        .into_iter()
+        .map(|a| (a.id, a.name))
+        .collect();
+    let views = events
+        .into_iter()
+        .map(|e| WebhookEventView {
+            received_at: format_ts(e.received_at),
+            arr_instance_name: name_by_id
+                .get(&e.arr_instance_id)
+                .cloned()
+                .unwrap_or_else(|| "(removida)".to_string()),
+            kind: e.kind.label().to_string(),
+            event_type: e.event_type,
+            triggered_search_id: e.triggered_search_id.map(|u| u.to_string()),
+            payload_preview: truncate_payload(&e.payload_json),
+        })
+        .collect();
+    html(&WebhooksTemplate { events: views })
+}
+
+/// Clamp a webhook payload to a bounded preview for the expandable
+/// detail cell. Real Connect payloads are a few KiB; we show the head.
+fn truncate_payload(payload: &str) -> String {
+    const MAX: usize = 600;
+    if payload.len() <= MAX {
+        return payload.to_string();
+    }
+    let mut end = MAX;
+    while !payload.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &payload[..end])
+}
+
 /// Group flat push_history rows by (release_name, arr_instance_name)
 /// so repeat attempts on the same content cluster under one header
 /// in the UI. Order: groups by latest attempt DESC, attempts inside
@@ -929,10 +985,40 @@ fn arr_instance_view(row: crate::db::arr_instances::ArrInstanceRow) -> ArrInstan
         profile_name: None,
         profile_threshold: None,
         enabled: row.enabled,
+        webhook_driven: row.webhook_driven,
+        // Filled by `fill_webhook_urls` at the *arr-table render sites
+        // (needs the request origin + auth token, which the row lacks).
+        webhook_url: String::new(),
+        webhook_has_token: false,
         created_at: row
             .created_at
             .format(&Iso8601::DEFAULT)
             .unwrap_or_else(|_| String::from("?")),
+    }
+}
+
+/// Stamp the ready-to-paste inbound webhook URL onto each *arr row.
+/// `headers` is `Some` on the full-page handler (so the origin can be
+/// derived from `Host` when no public URL is configured) and `None` on
+/// the HTMX partials (which fall back to the configured public URL).
+fn fill_webhook_urls(
+    state: &AppState,
+    headers: Option<&axum::http::HeaderMap>,
+    instances: &mut [ArrInstanceView],
+) {
+    let base = match headers {
+        Some(h) => crate::push::derive_request_base(state, h),
+        None => crate::push::state_public_base_url(state).unwrap_or_default(),
+    };
+    let base = base.trim_end_matches('/');
+    let token = state.auth_token_owned();
+    let token = token.as_deref().filter(|t| !t.is_empty());
+    for v in instances.iter_mut() {
+        v.webhook_has_token = token.is_some();
+        v.webhook_url = match token {
+            Some(t) => format!("{base}/webhooks/{}/{}?apikey={t}", v.kind, v.id),
+            None => format!("{base}/webhooks/{}/{}", v.kind, v.id),
+        };
     }
 }
 
@@ -1323,7 +1409,15 @@ async fn profiles_preview(
     let rules_result: Result<brarr_decision_service::RuleSet, _> =
         serde_json::from_str(&form.rules_json);
     let engine = match rules_result {
-        Ok(r) => brarr_decision_service::Engine::from_profile_rules(r),
+        Ok(r) => {
+            if let Err(errs) = r.validate() {
+                return Ok(html_string(format!(
+                    r#"<p class="text-sm text-danger-soft-fg">Regras inválidas: {}</p>"#,
+                    crate::web::templates::escape(&errs.join("; "))
+                )));
+            }
+            brarr_decision_service::Engine::from_profile_rules(r)
+        }
         Err(e) => {
             return Ok(html_string(format!(
                 r#"<p class="text-sm text-danger-soft-fg">JSON inválido: {}</p>"#,
@@ -1487,6 +1581,21 @@ async fn profiles_update(
             });
         }
     };
+    // Reject malformed `title_matches` regexes before persisting so a
+    // bad pattern never silently disables a leaf in production.
+    if let Err(errs) = rules.validate() {
+        let row = quality_profiles::get_by_id(state.pool(), uuid).await?;
+        return html(&ProfileEditorTemplate {
+            id: row.id.to_string(),
+            name: form.name,
+            description: form.description.unwrap_or_default(),
+            push_threshold: form.push_threshold,
+            is_preset: row.is_preset,
+            rules_json: form.rules_json,
+            error_message: Some(format!("Regras inválidas: {}", errs.join("; "))),
+            preview_html: String::new(),
+        });
+    }
     let description = form
         .description
         .as_deref()
@@ -2269,6 +2378,20 @@ async fn arr_instances_toggle(
     render_arr_instances_partial(&state).await
 }
 
+/// `POST /arr-instances/{id}/webhook-driven` — flip the webhook-driven
+/// flag. When on, the scheduled poller skips this instance (the manual
+/// "rodar agora" button still works).
+async fn arr_instances_webhook_driven_toggle(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, AppError> {
+    let uuid = Uuid::parse_str(&id)
+        .map_err(|e| AppError::InvalidInput(format!("invalid arr_instance id: {e}")))?;
+    let current = arr_instances::get_by_id(state.pool(), uuid).await?;
+    arr_instances::set_webhook_driven(state.pool(), uuid, !current.webhook_driven).await?;
+    render_arr_instances_partial(&state).await
+}
+
 /// `GET /arr-instances/{id}/edit` — return the edit modal partial.
 async fn arr_instances_edit(
     State(state): State<AppState>,
@@ -2363,10 +2486,11 @@ async fn render_arr_instances_partial(state: &AppState) -> Result<Response, AppE
         Uuid,
         &crate::db::quality_profiles::QualityProfileRow,
     > = profile_rows.iter().map(|p| (p.id, p)).collect();
-    let instances = rows
+    let mut instances: Vec<_> = rows
         .iter()
         .map(|r| arr_instance_view_with_profile(r, &profile_by_id))
         .collect();
+    fill_webhook_urls(state, None, &mut instances);
     html(&ArrInstancesListPartial { instances })
 }
 

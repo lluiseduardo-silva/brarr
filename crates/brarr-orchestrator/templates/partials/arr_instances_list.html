@@ -118,6 +118,13 @@
                                     class="px-2.5 h-7 rounded-md bg-bg-muted text-xs font-medium text-fg-primary hover:bg-bg-surface-raised">
                                 editar
                             </button>
+                            <button hx-post="/arr-instances/{{ a.id }}/webhook-driven"
+                                    hx-target="#arr-instances-list"
+                                    hx-swap="outerHTML"
+                                    title="Quando ligado, o poller agendado pula esta instância (confia no webhook em tempo real). 'Rodar agora' continua funcionando."
+                                    class="px-2.5 h-7 rounded-md text-xs font-medium {% if a.webhook_driven %}bg-info-soft text-info-soft-fg{% else %}bg-bg-muted text-fg-primary{% endif %}">
+                                {% if a.webhook_driven %}poll: webhook{% else %}poll: auto{% endif %}
+                            </button>
                             <button hx-post="/arr-instances/{{ a.id }}/toggle"
                                     hx-target="#arr-instances-list"
                                     hx-swap="outerHTML"
@@ -126,13 +133,31 @@
                                 {% if a.enabled %}desativar{% else %}ativar{% endif %}
                             </button>
                             <button hx-delete="/arr-instances/{{ a.id }}"
-                                    hx-target="#arr-instance-{{ a.id }}"
+                                    hx-target="#arr-instances-list"
                                     hx-swap="outerHTML"
                                     hx-confirm="Remover este *arr?"
                                     class="px-2.5 h-7 rounded-md text-xs font-medium text-danger-soft-fg hover:bg-danger-soft">
                                 remover
                             </button>
                         </div>
+                    </td>
+                </tr>
+                {# Per-instance inbound webhook URL — full-width detail row. #}
+                <tr class="{% if !a.enabled %}opacity-55{% endif %}">
+                    <td colspan="6" class="px-4 pb-3 pt-0">
+                        <details>
+                            <summary class="cursor-pointer text-xs text-fg-secondary hover:text-fg-primary">URL de webhook (cole no Connect do {{ a.kind }})</summary>
+                            <div class="mt-2 flex items-center gap-2 max-w-3xl">
+                                <input id="wh-{{ a.id }}" readonly value="{{ a.webhook_url }}"
+                                       class="flex-1 px-2 h-8 rounded-md bg-bg-canvas border border-border-default text-[11px] font-mono text-fg-secondary focus:outline-none">
+                                <button type="button" data-copy-target="#wh-{{ a.id }}"
+                                        class="px-2.5 h-8 rounded-md bg-bg-muted text-xs font-medium text-fg-primary hover:bg-bg-surface-raised whitespace-nowrap">Copiar</button>
+                            </div>
+                            <p class="mt-1.5 text-[11px] text-fg-muted">
+                                No {{ a.kind }}: <span class="font-mono">Settings → Connect → + → Webhook</span>, método <span class="font-mono">POST</span>, marque os triggers desejados.
+                                {% if !a.webhook_has_token %}<span class="text-warning-soft-fg">Auth desabilitado — a URL não leva apikey.</span>{% endif %}
+                            </p>
+                        </details>
                     </td>
                 </tr>
             {% endfor %}
