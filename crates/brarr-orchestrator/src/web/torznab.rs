@@ -438,11 +438,15 @@ async fn handle_api_inner(
     headers: axum::http::HeaderMap,
     protocol: Protocol,
 ) -> Result<Response, AppError> {
+    // A bare hit (no `t=`) returns the capability advert instead of a
+    // 400 — friendlier when the operator opens the indexer base URL
+    // directly to test it. Sonarr/Radarr always send an explicit `t=`,
+    // so this only affects manual probes.
     let t =
         q.t.as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty())
-            .ok_or_else(|| AppError::InvalidInput("missing ?t= parameter".to_string()))?
+            .unwrap_or("caps")
             .to_ascii_lowercase();
 
     // Derive the public base URL ("scheme://host") from the request so

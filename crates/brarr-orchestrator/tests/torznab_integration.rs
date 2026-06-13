@@ -234,14 +234,19 @@ async fn unknown_t_returns_400_with_newznab_error() {
 }
 
 #[tokio::test]
-async fn missing_t_param_returns_400() {
+async fn missing_t_param_defaults_to_caps() {
+    // A bare hit on the indexer base URL (no `t=`) returns the caps
+    // advert so the operator can open it in a browser to test. *arr
+    // always sends an explicit `t=`.
     let addr = spawn(AuthConfig::Disabled).await;
     let resp = client()
         .get(format!("http://{addr}/torznab/api"))
         .send()
         .await
         .expect("send");
-    assert_eq!(resp.status(), 400);
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+    assert!(body.contains(r#"<server title="brarr""#), "body: {body}");
 }
 
 #[tokio::test]

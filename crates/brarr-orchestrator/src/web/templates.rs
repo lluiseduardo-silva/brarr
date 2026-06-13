@@ -532,12 +532,19 @@ pub struct SettingsValues {
     /// 2024 made `std::env::set_var` unsafe and the workspace forbids
     /// `unsafe_code`.
     pub backtrace: String,
-    /// Inbound Torznab indexer URL (`…/torznab/api?apikey=…`) for the
-    /// "brarr como indexer" card. Host is empty when no public URL is
-    /// configured (the card tells the operator to set it).
-    pub torznab_url: String,
-    /// `(id, name)` of every quality profile — drives the Torznab card's
-    /// profile picker, which appends `&profile=<id>` to the URL.
+    /// Torznab (torrent) indexer base URL (`…/torznab/api`) — goes in
+    /// the *arr indexer's URL field (no query; *arr appends `t=` and the
+    /// apikey field separately). Host empty when no public URL is set.
+    pub torznab_base: String,
+    /// Newznab (usenet) indexer base URL (`…/newznab/api`). Registered as
+    /// a separate Newznab indexer so *arr hands `.nzb` results to the
+    /// usenet download client, not qBittorrent.
+    pub newznab_base: String,
+    /// Admin token for the *arr indexer's "API Key" field. Empty when
+    /// auth is disabled.
+    pub indexer_apikey: String,
+    /// `(id, name)` of every quality profile — drives the card's profile
+    /// picker, which builds the `&profile=<id>` additional parameter.
     pub profiles: Vec<(String, String)>,
 }
 
