@@ -202,6 +202,35 @@ async fn sonarr_episode_added_returns_202_and_triggers_search() {
 }
 
 #[tokio::test]
+async fn sonarr_series_add_returns_202_and_triggers_search() {
+    // Sonarr's real eventType is `SeriesAdd` (no "ed"). Regression for
+    // the matcher that only knew `SeriesAdded` — events were audited but
+    // never searched.
+    let pool = db::open_memory().await.unwrap();
+    let arr_id = make_arr(&pool, "sonarr-main", ArrKind::Sonarr).await;
+    let addr = boot(
+        pool.clone(),
+        AuthConfig::from_optional(Some(TOKEN)),
+        BypassConfig::default(),
+    )
+    .await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!(
+            "http://{addr}/webhooks/sonarr/{arr_id}?apikey={TOKEN}"
+        ))
+        .header("content-type", "application/json")
+        .body(fixture("sonarr_series_add.json"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 202);
+
+    let n = wait_for_search_row(&pool).await;
+    assert_eq!(n, 1, "SeriesAdd should trigger one series-wide search");
+}
+
+#[tokio::test]
 async fn kind_mismatch_returns_400() {
     let pool = db::open_memory().await.unwrap();
     // Insert Sonarr instance, then POST a Radarr payload to /webhooks/radarr/{sonarr_id}

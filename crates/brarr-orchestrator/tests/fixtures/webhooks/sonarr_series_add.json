@@ -1,0 +1,17 @@
+{
+  "eventType": "SeriesAdd",
+  "instanceName": "Sonarr",
+  "applicationUrl": "https://sonarr.example.com",
+  "series": {
+    "id": 19,
+    "title": "Game of Thrones",
+    "titleSlug": "game-of-thrones",
+    "path": "/data/Series/Game of Thrones",
+    "tvdbId": 121361,
+    "tvMazeId": 82,
+    "tmdbId": 1399,
+    "imdbId": "tt0944947",
+    "type": "standard",
+    "year": 2011
+  }
+}

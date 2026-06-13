@@ -148,6 +148,11 @@ enum SonarrEvent {
     /// "Test" button.
     Test,
     /// New series added to the library — series-wide TVDB search.
+    ///
+    /// Sonarr's actual `eventType` is `SeriesAdd` (no "ed") — unlike
+    /// Radarr's `MovieAdded`. We rename to match it and keep
+    /// `SeriesAdded` as an alias in case a fork/version differs.
+    #[serde(rename = "SeriesAdd", alias = "SeriesAdded")]
     SeriesAdded {
         /// Series metadata.
         series: Option<SonarrSeries>,
