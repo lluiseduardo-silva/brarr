@@ -477,7 +477,7 @@ async fn handle_api_inner(
             );
             Ok(xml_response(
                 StatusCode::OK,
-                render_placeholder_feed(&base_url, protocol, apikey)?,
+                render_placeholder_feed(&base_url, protocol, apikey, ProbeAxis::Both)?,
             ))
         }
         "tvsearch" | "tv-search" => handle_tvsearch(&state, &q, &base_url, protocol, apikey).await,
@@ -583,7 +583,7 @@ async fn handle_movie(
         );
         return Ok(xml_response(
             StatusCode::OK,
-            render_placeholder_feed(base_url, protocol, apikey)?,
+            render_placeholder_feed(base_url, protocol, apikey, ProbeAxis::Movie)?,
         ));
     }
 
@@ -665,7 +665,7 @@ async fn handle_tvsearch(
         );
         return Ok(xml_response(
             StatusCode::OK,
-            render_placeholder_feed(base_url, protocol, apikey)?,
+            render_placeholder_feed(base_url, protocol, apikey, ProbeAxis::Tv)?,
         ));
     }
     let season = parse_u32_param(q.season.as_ref(), "season")?
@@ -995,6 +995,38 @@ fn render_empty_feed() -> Result<Vec<u8>, AppError> {
     render_feed_inner(&[], "http://127.0.0.1:3000", 0, 0, Protocol::Torrent, None)
 }
 
+/// Which Newznab category family a probe sentinel advertises so the
+/// *arr "Test Indexer" check finds an intersection with the client's
+/// configured categories: Radarr filters on the 2000-series movie cats,
+/// Sonarr on the 5000-series TV cats. A `t=movie` probe emits movie
+/// cats, `t=tvsearch` emits TV cats, and the ambiguous `t=search`
+/// free-text probe emits both so either client matches. Without this
+/// the sentinel always carried movie cats, so adding brarr to Sonarr
+/// failed with "no results in the configured categories".
+#[derive(Clone, Copy)]
+enum ProbeAxis {
+    Movie,
+    Tv,
+    Both,
+}
+
+impl ProbeAxis {
+    /// Category ids to advertise on the sentinel. The first is emitted
+    /// as the primary `<category>` (some probes compare only that
+    /// element), so each list leads with the HD subcategory rather than
+    /// the bare parent; all are repeated as `torznab:attr name="category"`
+    /// rows so a client filtering on either element finds a match.
+    fn categories(self) -> &'static [&'static str] {
+        match self {
+            Self::Movie => &["2040", "2000", "2030", "2045", "2050"],
+            Self::Tv => &["5040", "5000", "5030", "5045"],
+            Self::Both => &[
+                "2040", "2000", "2030", "2045", "2050", "5040", "5000", "5030", "5045",
+            ],
+        }
+    }
+}
+
 /// Build an RSS feed with a single sentinel item so Sonarr / Radarr's
 /// "Test Indexer" probe — which counts `>0` items **whose categories
 /// intersect the user's configured filter** — can pass for
@@ -1017,7 +1049,10 @@ fn render_placeholder_feed(
     base_url: &str,
     protocol: Protocol,
     apikey: Option<&str>,
+    axis: ProbeAxis,
 ) -> Result<Vec<u8>, AppError> {
+    let cats = axis.categories();
+    let primary_cat = cats.first().copied().unwrap_or("2000");
     let apikey_qs = match apikey {
         Some(k) if !k.is_empty() => {
             format!("?apikey={}", AuthConfig::encode_token_for_query(k))
@@ -1075,12 +1110,13 @@ fn render_placeholder_feed(
                     .write_text_content(BytesText::new(&pub_date))?;
                 iw.create_element("link")
                     .write_text_content(BytesText::new(&sentinel_url))?;
-                // Emit the most common Movies subcategory as the
-                // primary `<category>` so probes that compare only
-                // this element pass. Repeat it through the attr block
+                // Emit the axis-appropriate primary `<category>` so
+                // probes that compare only this element pass (Radarr
+                // expects a 2000-series movie cat, Sonarr a 5000-series
+                // TV cat). Repeat the full set through the attr block
                 // below for clients that filter on `torznab:attr`.
                 iw.create_element("category")
-                    .write_text_content(BytesText::new("2040"))?;
+                    .write_text_content(BytesText::new(primary_cat))?;
                 iw.create_element("enclosure")
                     .with_attributes([
                         ("url", sentinel_url.as_str()),
@@ -1088,10 +1124,10 @@ fn render_placeholder_feed(
                         ("type", protocol.enclosure_type()),
                     ])
                     .write_empty()?;
-                // Cover every Movies subcategory brarr advertises in
-                // `t=caps`, so any user-configured combination of cats
-                // intersects.
-                for cat in ["2000", "2030", "2040", "2045", "2050"] {
+                // Cover every subcategory brarr advertises in `t=caps`
+                // for this axis, so any user-configured combination of
+                // cats intersects.
+                for &cat in cats {
                     attr(iw, "category", cat)?;
                 }
                 attr(iw, "size", "1")?;
@@ -1529,11 +1565,71 @@ mod tests {
 
     #[test]
     fn placeholder_feed_embeds_apikey_when_provided() {
-        let bytes = render_placeholder_feed("http://h:3000", Protocol::Nzb, Some("tok")).unwrap();
+        let bytes = render_placeholder_feed(
+            "http://h:3000",
+            Protocol::Nzb,
+            Some("tok"),
+            ProbeAxis::Movie,
+        )
+        .unwrap();
         let xml = String::from_utf8(bytes).unwrap();
         assert!(
             xml.contains("/newznab/download/00000000-0000-0000-0000-000000000000?apikey=tok"),
             "sentinel URL missing apikey: {xml}"
+        );
+    }
+
+    #[test]
+    fn tv_probe_sentinel_carries_tv_categories() {
+        // Sonarr's add-indexer probe hits `t=tvsearch` and filters the
+        // returned items by its configured TV (5000-series) categories.
+        // A movie-only sentinel produced "no results in the configured
+        // categories" — this pins the TV axis emitting 5000-series cats.
+        let bytes =
+            render_placeholder_feed("http://h:3000", Protocol::Torrent, None, ProbeAxis::Tv)
+                .unwrap();
+        let xml = String::from_utf8(bytes).unwrap();
+        assert!(
+            xml.contains("<category>5040</category>"),
+            "TV sentinel missing 5000-series primary category: {xml}"
+        );
+        assert!(
+            xml.contains(r#"<torznab:attr name="category" value="5045""#),
+            "TV sentinel missing 5045 attr: {xml}"
+        );
+        assert!(
+            !xml.contains(r#"value="2040""#),
+            "TV sentinel must not carry movie cats: {xml}"
+        );
+    }
+
+    #[test]
+    fn movie_probe_sentinel_carries_movie_categories() {
+        let bytes =
+            render_placeholder_feed("http://h:3000", Protocol::Torrent, None, ProbeAxis::Movie)
+                .unwrap();
+        let xml = String::from_utf8(bytes).unwrap();
+        assert!(
+            xml.contains("<category>2040</category>"),
+            "movie sentinel missing 2000-series primary category: {xml}"
+        );
+        assert!(
+            !xml.contains(r#"value="5040""#),
+            "movie sentinel must not carry TV cats: {xml}"
+        );
+    }
+
+    #[test]
+    fn search_probe_sentinel_carries_both_axes() {
+        // Free-text `t=search` (Prowlarr / generic) can't tell movie from
+        // TV, so the sentinel advertises both families.
+        let bytes =
+            render_placeholder_feed("http://h:3000", Protocol::Torrent, None, ProbeAxis::Both)
+                .unwrap();
+        let xml = String::from_utf8(bytes).unwrap();
+        assert!(
+            xml.contains(r#"value="2040""#) && xml.contains(r#"value="5040""#),
+            "search sentinel must carry both movie and TV cats: {xml}"
         );
     }
 

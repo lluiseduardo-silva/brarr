@@ -119,6 +119,14 @@ async fn tvsearch_without_tvdbid_returns_placeholder_feed() {
     assert!(body.contains("<rss"));
     assert!(body.contains("<item>"));
     assert!(body.contains("health-check"));
+    // Sonarr filters the probe's items by its configured TV (5000-series)
+    // categories. A movie-only sentinel produced "no results in the
+    // configured categories" and blocked the indexer save — assert the
+    // tvsearch sentinel advertises a TV category.
+    assert!(
+        body.contains("5040"),
+        "tvsearch sentinel must carry a TV category for Sonarr: {body}"
+    );
 }
 
 #[tokio::test]
