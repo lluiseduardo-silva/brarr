@@ -191,71 +191,46 @@
     </div>
 </section>
 
-{# Indexer (brarr como provider) — torrent + usenet são dois indexers. #}
-<section class="card-hairline bg-bg-surface border border-border-default rounded-xl p-5 mt-6">
+{# Indexer (brarr como provider) — monta a URL completa e copia. #}
+<section id="tz-card"
+         data-base-torznab="{{ values.torznab_base }}"
+         data-base-newznab="{{ values.newznab_base }}"
+         data-apikey="{{ values.indexer_apikey }}"
+         class="card-hairline bg-bg-surface border border-border-default rounded-xl p-5 mt-6">
     <header class="mb-4">
         <h2 class="text-lg font-semibold text-fg-primary">Indexer (brarr como provider)</h2>
         <p class="text-xs text-fg-muted mt-1">
-            No Sonarr/Radarr: <span class="font-mono">Settings → Indexers → +</span>. Como o brarr tem trackers (torrent)
-            <strong>e</strong> indexers usenet, cadastre <strong>dois</strong> indexers separados — senão o *arr não manda o
-            arquivo pro download client certo. A URL vai no campo <span class="font-mono">URL</span>, a chave em
-            <span class="font-mono">API Key</span>, e o profile (opcional) em <span class="font-mono">Additional Parameters</span>.
-            O <span class="font-mono">t=</span> o próprio *arr adiciona.
+            Escolha o tipo e o profile; a URL já sai completa (com apikey e profile) pra colar no
+            <span class="font-mono">Settings → Indexers → +</span> do Sonarr/Radarr. <strong>Torznab</strong> = torrents,
+            <strong>Newznab</strong> = usenet — cadastre os dois se você usa ambos. O <span class="font-mono">t=</span> o *arr adiciona.
         </p>
     </header>
 
-    <div class="space-y-3 max-w-3xl">
+    <div class="flex flex-wrap items-end gap-2">
         <label class="block">
-            <span class="block mb-1 text-xs font-medium uppercase tracking-[0.06em] text-fg-muted">URL — Torznab (torrents) · tipo “Torznab”</span>
-            <div class="flex items-center gap-2">
-                <input id="tz-torznab" readonly value="{{ values.torznab_base }}"
-                       class="flex-1 px-3 h-10 rounded-md bg-bg-canvas border border-border-strong text-[12px] font-mono text-fg-secondary focus:outline-none">
-                <button type="button" data-copy-target="#tz-torznab"
-                        class="px-3 h-10 rounded-md bg-bg-muted text-sm font-medium text-fg-primary hover:bg-bg-surface-raised whitespace-nowrap">Copiar</button>
-            </div>
+            <span class="block mb-1 text-xs font-medium uppercase tracking-[0.06em] text-fg-muted">Tipo</span>
+            <select id="tz-type" onchange="brarrTzBuild()"
+                    class="h-10 px-2 rounded-md bg-bg-canvas border border-border-strong text-sm text-fg-primary focus:outline-none focus:border-accent-solid">
+                <option value="torznab">Torznab (torrents)</option>
+                <option value="newznab">Newznab (usenet)</option>
+            </select>
         </label>
-
         <label class="block">
-            <span class="block mb-1 text-xs font-medium uppercase tracking-[0.06em] text-fg-muted">URL — Newznab (usenet) · tipo “Newznab”</span>
-            <div class="flex items-center gap-2">
-                <input id="tz-newznab" readonly value="{{ values.newznab_base }}"
-                       class="flex-1 px-3 h-10 rounded-md bg-bg-canvas border border-border-strong text-[12px] font-mono text-fg-secondary focus:outline-none">
-                <button type="button" data-copy-target="#tz-newznab"
-                        class="px-3 h-10 rounded-md bg-bg-muted text-sm font-medium text-fg-primary hover:bg-bg-surface-raised whitespace-nowrap">Copiar</button>
-            </div>
+            <span class="block mb-1 text-xs font-medium uppercase tracking-[0.06em] text-fg-muted">Profile (filtro do brarr)</span>
+            <select id="tz-profile" onchange="brarrTzBuild()"
+                    class="h-10 px-2 rounded-md bg-bg-canvas border border-border-strong text-sm text-fg-primary focus:outline-none focus:border-accent-solid">
+                <option value="">sem profile — todas as releases</option>
+                {% for p in values.profiles %}
+                <option value="{{ p.0 }}">{{ p.1 }}</option>
+                {% endfor %}
+            </select>
         </label>
-
-        {% if values.indexer_apikey.is_empty() %}
-        <p class="text-[11px] text-warning-soft-fg">Auth desabilitado — sem API Key (deixe o campo do *arr vazio).</p>
-        {% else %}
-        <label class="block">
-            <span class="block mb-1 text-xs font-medium uppercase tracking-[0.06em] text-fg-muted">API Key</span>
-            <div class="flex items-center gap-2">
-                <input id="tz-apikey" readonly value="{{ values.indexer_apikey }}"
-                       class="flex-1 px-3 h-10 rounded-md bg-bg-canvas border border-border-strong text-[12px] font-mono text-fg-secondary focus:outline-none">
-                <button type="button" data-copy-target="#tz-apikey"
-                        class="px-3 h-10 rounded-md bg-bg-muted text-sm font-medium text-fg-primary hover:bg-bg-surface-raised whitespace-nowrap">Copiar</button>
-            </div>
-        </label>
-        {% endif %}
-
-        <label class="block">
-            <span class="block mb-1 text-xs font-medium uppercase tracking-[0.06em] text-fg-muted">Additional Parameters — filtro por profile do brarr (opcional)</span>
-            <div class="flex items-center gap-2">
-                <select id="tz-profile" onchange="brarrTorznabPick()"
-                        class="h-10 px-2 rounded-md bg-bg-canvas border border-border-strong text-sm text-fg-primary focus:outline-none focus:border-accent-solid">
-                    <option value="">sem profile — todas as releases</option>
-                    {% for p in values.profiles %}
-                    <option value="{{ p.0 }}">{{ p.1 }}</option>
-                    {% endfor %}
-                </select>
-                <input id="tz-param" readonly value="" placeholder="(sem profile)"
-                       class="flex-1 px-3 h-10 rounded-md bg-bg-canvas border border-border-strong text-[12px] font-mono text-fg-secondary focus:outline-none">
-                <button type="button" data-copy-target="#tz-param"
-                        class="px-3 h-10 rounded-md bg-bg-muted text-sm font-medium text-fg-primary hover:bg-bg-surface-raised whitespace-nowrap">Copiar</button>
-            </div>
-            <span class="block mt-1 text-[11px] text-fg-muted">Com profile, o brarr pré-filtra o feed (só releases que passam do threshold). Sem profile, devolve todas.</span>
-        </label>
+        <div class="flex items-center gap-2 flex-1 min-w-[280px]">
+            <input id="tz-url" readonly value=""
+                   class="flex-1 px-3 h-10 rounded-md bg-bg-canvas border border-border-strong text-[12px] font-mono text-fg-secondary focus:outline-none">
+            <button type="button" data-copy-target="#tz-url"
+                    class="px-4 h-10 rounded-md bg-accent-solid text-on-accent-solid text-sm font-semibold hover:bg-accent-solid-hover whitespace-nowrap">Copiar URL</button>
+        </div>
     </div>
 
     {% if values.torznab_base.starts_with("/") %}
@@ -265,12 +240,22 @@
     {% endif %}
 </section>
 <script>
-  window.brarrTorznabPick = function () {
-    var sel = document.getElementById('tz-profile');
-    var inp = document.getElementById('tz-param');
-    if (!sel || !inp) return;
-    inp.value = sel.value ? '&profile=' + encodeURIComponent(sel.value) : '';
+  window.brarrTzBuild = function () {
+    var card = document.getElementById('tz-card');
+    if (!card) return;
+    var type = document.getElementById('tz-type').value;
+    var profile = document.getElementById('tz-profile').value;
+    var inp = document.getElementById('tz-url');
+    var base = type === 'newznab'
+      ? card.getAttribute('data-base-newznab')
+      : card.getAttribute('data-base-torznab');
+    var apikey = card.getAttribute('data-apikey') || '';
+    var parts = [];
+    if (apikey) { parts.push('apikey=' + encodeURIComponent(apikey)); }
+    if (profile) { parts.push('profile=' + encodeURIComponent(profile)); }
+    inp.value = (base || '') + (parts.length ? '?' + parts.join('&') : '');
   };
+  brarrTzBuild();
 </script>
 
 {% endblock %}
