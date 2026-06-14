@@ -49,6 +49,7 @@
     reason = "Torznab/Newznab/TMDb/IMDb/UHD/HD appear in user-facing docs frequently"
 )]
 
+use std::borrow::Cow;
 use std::io::Cursor;
 
 use axum::Router;
@@ -307,10 +308,10 @@ async fn apikey_middleware(
         );
         return Ok(next.run(req).await);
     }
-    let from_query = AuthConfig::apikey_from_query(req.uri().query());
-    let from_header = AuthConfig::bearer_from_headers(req.headers());
-    let candidate = from_query.or(from_header).unwrap_or("");
-    if state.auth().token_matches(candidate) {
+    let candidate = AuthConfig::apikey_from_query(req.uri().query())
+        .or_else(|| AuthConfig::bearer_from_headers(req.headers()).map(Cow::Borrowed))
+        .unwrap_or_default();
+    if state.auth().token_matches(&candidate) {
         return Ok(next.run(req).await);
     }
     Err(error_xml(StatusCode::UNAUTHORIZED, 100, "Invalid API key").into_response())
@@ -1018,7 +1019,9 @@ fn render_placeholder_feed(
     apikey: Option<&str>,
 ) -> Result<Vec<u8>, AppError> {
     let apikey_qs = match apikey {
-        Some(k) if !k.is_empty() => format!("?apikey={k}"),
+        Some(k) if !k.is_empty() => {
+            format!("?apikey={}", AuthConfig::encode_token_for_query(k))
+        }
         _ => String::new(),
     };
     let sentinel_url = format!(
@@ -1155,7 +1158,9 @@ fn write_item<W: std::io::Write>(
     // an embedded apikey the proxy returns 401. Empty/None token (auth
     // disabled) omits the query string entirely.
     let apikey_qs = match apikey {
-        Some(k) if !k.is_empty() => format!("?apikey={k}"),
+        Some(k) if !k.is_empty() => {
+            format!("?apikey={}", AuthConfig::encode_token_for_query(k))
+        }
         _ => String::new(),
     };
     let download_url = format!(

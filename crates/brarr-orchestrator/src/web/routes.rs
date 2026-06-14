@@ -1016,7 +1016,12 @@ fn fill_webhook_urls(
     for v in instances.iter_mut() {
         v.webhook_has_token = token.is_some();
         v.webhook_url = match token {
-            Some(t) => format!("{base}/webhooks/{}/{}?apikey={t}", v.kind, v.id),
+            Some(t) => format!(
+                "{base}/webhooks/{}/{}?apikey={}",
+                v.kind,
+                v.id,
+                crate::auth::AuthConfig::encode_token_for_query(t)
+            ),
             None => format!("{base}/webhooks/{}/{}", v.kind, v.id),
         };
     }

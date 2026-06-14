@@ -440,6 +440,7 @@ dependencies = [
  "brarr-tracker-unit3d",
  "futures",
  "ipnet",
+ "percent-encoding",
  "prost",
  "protoc-bin-vendored",
  "quick-xml",

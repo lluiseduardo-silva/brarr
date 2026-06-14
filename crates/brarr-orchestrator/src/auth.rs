@@ -24,11 +24,13 @@
 //! token itself is opaque to us — callers are expected to seed it
 //! with at least 128 bits of randomness (e.g. `openssl rand -hex 32`).
 
+use std::borrow::Cow;
 use std::net::IpAddr;
 use std::sync::Arc;
 
 use axum::http::HeaderMap;
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
+use percent_encoding::{NON_ALPHANUMERIC, percent_decode_str, utf8_percent_encode};
 use subtle::ConstantTimeEq;
 
 use crate::AppError;
@@ -106,17 +108,40 @@ impl AuthConfig {
     /// Sonarr/Radarr use when calling a Newznab/Torznab indexer). Returns
     /// the first matching parameter so trailing duplicates don't shadow
     /// the leading one.
+    ///
+    /// The value is **percent-decoded** before being returned. *arr
+    /// clients URL-encode reserved characters in the query string, so a
+    /// token like `842377@Luis` arrives on the wire as `842377%40Luis`;
+    /// without decoding, the constant-time comparison against the
+    /// configured token spuriously fails with `Invalid API key`. Decoding
+    /// borrows when there is nothing to unescape and allocates only when
+    /// an escape is present — hence the [`Cow`]. Pairs with
+    /// [`Self::encode_token_for_query`] on the emit side.
     #[must_use]
-    pub fn apikey_from_query(query: Option<&str>) -> Option<&str> {
+    pub fn apikey_from_query(query: Option<&str>) -> Option<Cow<'_, str>> {
         let q = query?;
         for pair in q.split('&') {
             let mut it = pair.splitn(2, '=');
             let key = it.next()?;
             if key.eq_ignore_ascii_case("apikey") {
-                return it.next();
+                let raw = it.next()?;
+                return Some(percent_decode_str(raw).decode_utf8_lossy());
             }
         }
         None
+    }
+
+    /// Percent-encode a token for safe embedding as an `?apikey=<value>`
+    /// query parameter in the URLs brarr hands to *arr (feed download
+    /// links, push payloads, the webhook URL shown in the UI). *arr
+    /// stores those URLs verbatim and GETs them later, so a token with
+    /// reserved characters (`@`, `&`, space, `#`, …) would otherwise
+    /// corrupt the query string or the credential. Inverse of
+    /// [`Self::apikey_from_query`]. Borrows when the token is already
+    /// query-safe.
+    #[must_use]
+    pub fn encode_token_for_query(token: &str) -> Cow<'_, str> {
+        utf8_percent_encode(token, NON_ALPHANUMERIC).into()
     }
 
     /// Extract the `brarr_session` cookie value, if present.
@@ -334,18 +359,54 @@ mod tests {
     #[test]
     fn apikey_parsing_picks_first_match() {
         assert_eq!(
-            AuthConfig::apikey_from_query(Some("foo=bar&apikey=abc123&t=caps")),
+            AuthConfig::apikey_from_query(Some("foo=bar&apikey=abc123&t=caps")).as_deref(),
             Some("abc123")
         );
         assert_eq!(
-            AuthConfig::apikey_from_query(Some("APIKEY=upper")),
+            AuthConfig::apikey_from_query(Some("APIKEY=upper")).as_deref(),
             Some("upper"),
             "case-insensitive name match"
         );
-        assert_eq!(AuthConfig::apikey_from_query(Some("apikey=")), Some(""));
-        assert_eq!(AuthConfig::apikey_from_query(Some("t=caps")), None);
-        assert_eq!(AuthConfig::apikey_from_query(None), None);
-        assert_eq!(AuthConfig::apikey_from_query(Some("")), None);
+        assert_eq!(
+            AuthConfig::apikey_from_query(Some("apikey=")).as_deref(),
+            Some("")
+        );
+        assert_eq!(
+            AuthConfig::apikey_from_query(Some("t=caps")).as_deref(),
+            None
+        );
+        assert_eq!(AuthConfig::apikey_from_query(None).as_deref(), None);
+        assert_eq!(AuthConfig::apikey_from_query(Some("")).as_deref(), None);
+    }
+
+    #[test]
+    fn apikey_parsing_percent_decodes_reserved_chars() {
+        // *arr URL-encodes the apikey query value: a token containing `@`
+        // arrives as `%40`, a space as `%20`. Without decoding, the
+        // comparison against the configured token fails with a spurious
+        // `Invalid API key` — the regression this guards against.
+        assert_eq!(
+            AuthConfig::apikey_from_query(Some("apikey=842377%40Luis&t=caps")).as_deref(),
+            Some("842377@Luis")
+        );
+        assert_eq!(
+            AuthConfig::apikey_from_query(Some("apikey=a%20b")).as_deref(),
+            Some("a b"),
+            "a percent-encoded space round-trips"
+        );
+        assert_eq!(
+            AuthConfig::apikey_from_query(Some("apikey=a%26b&t=caps")).as_deref(),
+            Some("a&b"),
+            "an encoded ampersand (%26) is part of the value, not a pair separator"
+        );
+        // A token round-trips through encode → query → decode unchanged.
+        let token = "842377@Luis";
+        let encoded = AuthConfig::encode_token_for_query(token);
+        let query = format!("apikey={encoded}");
+        assert_eq!(
+            AuthConfig::apikey_from_query(Some(&query)).as_deref(),
+            Some(token)
+        );
     }
 
     #[test]

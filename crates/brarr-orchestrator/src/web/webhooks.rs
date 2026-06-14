@@ -43,6 +43,8 @@
 //! harm — the next poll cycle would have searched anyway. Revisit if
 //! the audit page gets noisy.
 
+use std::borrow::Cow;
+
 use axum::Router;
 use axum::extract::{Path, Request, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -100,10 +102,10 @@ async fn webhook_apikey_middleware(
         );
         return Ok(next.run(req).await);
     }
-    let from_query = AuthConfig::apikey_from_query(req.uri().query());
-    let from_header = AuthConfig::bearer_from_headers(req.headers());
-    let candidate = from_query.or(from_header).unwrap_or("");
-    if state.auth().token_matches(candidate) {
+    let candidate = AuthConfig::apikey_from_query(req.uri().query())
+        .or_else(|| AuthConfig::bearer_from_headers(req.headers()).map(Cow::Borrowed))
+        .unwrap_or_default();
+    if state.auth().token_matches(&candidate) {
         return Ok(next.run(req).await);
     }
     Err((StatusCode::UNAUTHORIZED, "invalid apikey").into_response())

@@ -211,7 +211,12 @@ fn build_payload(
         (ArrProtocol::Torrent, "/torznab")
     };
     let apikey_qs = match apikey {
-        Some(k) if !k.is_empty() => format!("?apikey={k}"),
+        Some(k) if !k.is_empty() => {
+            format!(
+                "?apikey={}",
+                crate::auth::AuthConfig::encode_token_for_query(k)
+            )
+        }
         _ => String::new(),
     };
     let download_url = format!(
