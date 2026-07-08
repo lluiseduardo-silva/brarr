@@ -32,9 +32,27 @@ pub struct RawItem {
     pub title: String,
     /// `<guid>...</guid>` — opaque indexer-side id, often a URL.
     pub guid: String,
-    /// `<link>...</link>` or `<enclosure url=...>` — download URL for the
-    /// `.nzb` (Newznab) or `.torrent` (Torznab).
+    /// Download URL for the `.nzb` (Newznab) or `.torrent` (Torznab).
+    ///
+    /// Sourced from `<enclosure url=...>` when present (the authoritative
+    /// download link per the Newznab/Torznab spec), falling back to
+    /// `<link>`. The enclosure wins regardless of element order — see
+    /// [`Self::download_from_enclosure`].
     pub download_url: Option<String>,
+    /// Parse-state: `true` once [`Self::download_url`] was populated from
+    /// an `<enclosure url>`. Not wire data — it enforces precedence.
+    ///
+    /// Indexers disagree on what `<link>` means: NZBGeek makes it the
+    /// `.nzb` get-URL, but curupira points it at the release **details
+    /// page** (an HTML page) and puts the real `.nzb` link only in
+    /// `<enclosure>`. curupira also emits `<link>` *before* `<enclosure>`,
+    /// so naive first-wins parsing stored the HTML page as the download
+    /// URL — Sonarr then fetched HTML, tried to parse it as an NZB, and
+    /// died with `An error occurred while parsing EntityName` on a stray
+    /// `&` in the page's inline JavaScript. This flag lets a later
+    /// `<enclosure>` override a `<link>`-derived value while still keeping
+    /// the first enclosure when several are present.
+    download_from_enclosure: bool,
     /// `<size>` or `length` attribute on `<enclosure>` — bytes.
     pub size_bytes: u64,
     /// `<category>` element (some indexers emit one), used as a fallback
@@ -246,7 +264,14 @@ fn handle_empty(e: &BytesStart<'_>, current: &mut Option<RawItem>) -> Result<(),
                 .map_err(|err| ClientError::Xml(format!("unescape: {err}")))?
                 .into_owned();
             match key.as_str() {
-                "url" if item.download_url.is_none() => item.download_url = Some(val),
+                // The enclosure is the authoritative download link. It
+                // overrides a `<link>`-derived URL (curupira emits the
+                // details-page `<link>` before its `.nzb` `<enclosure>`),
+                // but the first enclosure wins if an item carries several.
+                "url" if !item.download_from_enclosure => {
+                    item.download_url = Some(val);
+                    item.download_from_enclosure = true;
+                }
                 "length" => {
                     if let Ok(n) = val.parse::<u64>() {
                         if item.size_bytes == 0 {
@@ -266,8 +291,10 @@ fn apply_text(item: &mut RawItem, target: TextTarget, text: String) {
         TextTarget::Title => item.title = text,
         TextTarget::Guid => item.guid = text,
         TextTarget::Link => {
-            // `<link>` only counts as the download URL if `<enclosure>`
-            // didn't set one already (Newznab tends to send both).
+            // `<link>` is only a fallback download URL. If an
+            // `<enclosure>` was already seen it wins; if `<link>` comes
+            // first, a later `<enclosure>` overrides this in `handle_empty`
+            // (curupira's `<link>` is a details page, not the `.nzb`).
             if item.download_url.is_none() {
                 item.download_url = Some(text);
             }
@@ -351,6 +378,44 @@ mod tests {
         assert_eq!(it.title, "Other.Release");
         assert_eq!(it.size_bytes, 100);
         assert!(it.attr("imdb").is_none());
+    }
+
+    #[test]
+    fn enclosure_wins_over_link_regardless_of_order() {
+        // Regression: curupira emits `<link>` (the HTML release *details*
+        // page) BEFORE `<enclosure>` (the real `.nzb` get-URL). First-wins
+        // parsing stored the details page as the download URL, so Sonarr
+        // grabbed HTML, parsed it as an NZB, and threw
+        // `An error occurred while parsing EntityName` on a stray `&` in
+        // the page's inline JS. The `<enclosure>` must win despite coming
+        // second.
+        let body = r#"<?xml version="1.0"?>
+<rss xmlns:newznab="http://www.newznab.com/DTD/2010/feeds/attributes/">
+  <channel>
+    <item>
+      <title>Mushoku.Tensei.S03E01.1080p.WEB-DL-Grp</title>
+      <guid isPermaLink="true">http://curupira.cc/releases/01KWPKNQTN6481RNVNMP1TZSPH</guid>
+      <link>http://curupira.cc/releases/01KWPKNQTN6481RNVNMP1TZSPH</link>
+      <comments>http://curupira.cc/releases/01KWPKNQTN6481RNVNMP1TZSPH</comments>
+      <enclosure url="http://curupira.cc/api?t=get&amp;id=01KWPKNQTN6481RNVNMP1TZSPH&amp;apikey=KEY" length="1629025966" type="application/x-nzb"/>
+    </item>
+  </channel>
+</rss>"#;
+        let feed = parse_feed(body).unwrap();
+        let url = feed.items[0].download_url.as_deref().unwrap();
+        assert!(
+            url.contains("t=get") && url.contains("apikey=KEY"),
+            "expected the enclosure .nzb get-URL, got the <link>: {url}"
+        );
+        assert!(
+            !url.contains("/releases/"),
+            "download URL still points at the HTML details page: {url}"
+        );
+        // …while `<comments>` still carries the details page.
+        assert_eq!(
+            feed.items[0].details_url.as_deref(),
+            Some("http://curupira.cc/releases/01KWPKNQTN6481RNVNMP1TZSPH")
+        );
     }
 
     #[test]
