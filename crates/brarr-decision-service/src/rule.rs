@@ -482,7 +482,12 @@ pub enum SubtitleFilter {
     PtBr,
     /// PT-PT.
     PtPt,
-    /// PT-BR ou PT-PT.
+    /// Português ambíguo (sem hint regional) — indexers que etiquetam a
+    /// faixa apenas como "Portuguese", sem `(BR)`/`(PT)`.
+    Pt,
+    /// Qualquer variante de português (PT-BR, PT-PT ou Pt) — simétrico
+    /// com [`AudioFilter::PtAny`]. Uma legenda marcada só como
+    /// "Portuguese" conta como PT aqui.
     PtAny,
     /// Inglês.
     En,
@@ -577,8 +582,11 @@ fn subtitle_matches(release: &Release, s: &SubtitleFilter) -> bool {
     match s {
         SubtitleFilter::PtBr => e.has_subtitle_in(&Language::PtBr),
         SubtitleFilter::PtPt => e.has_subtitle_in(&Language::PtPt),
+        SubtitleFilter::Pt => e.has_subtitle_in(&Language::Pt),
         SubtitleFilter::PtAny => {
-            e.has_subtitle_in(&Language::PtBr) || e.has_subtitle_in(&Language::PtPt)
+            e.has_subtitle_in(&Language::PtBr)
+                || e.has_subtitle_in(&Language::PtPt)
+                || e.has_subtitle_in(&Language::Pt)
         }
         SubtitleFilter::En => e.has_subtitle_in(&Language::En),
         SubtitleFilter::Jp => e.has_subtitle_in(&Language::Jp),
@@ -787,7 +795,7 @@ mod tests {
     }
 
     #[test]
-    fn subtitle_pt_any_matches_pt_br_or_pt_pt() {
+    fn subtitle_pt_any_matches_pt_br_pt_pt_and_ambiguous_pt() {
         let pt_br = release(
             vec![],
             vec![Language::PtBr],
@@ -806,6 +814,18 @@ mod tests {
             false,
             "t",
         );
+        // Ambiguous "Portuguese" (no regional hint) — the shape nzbgeek
+        // emits (`subs=Portuguese`). Must count as PT, symmetric with
+        // `AudioFilter::PtAny`.
+        let pt_ambiguous = release(
+            vec![],
+            vec![Language::Pt],
+            Resolution::P1080,
+            0,
+            0,
+            false,
+            "t",
+        );
         let en_only = release(
             vec![],
             vec![Language::En],
@@ -817,7 +837,35 @@ mod tests {
         );
         assert!(subtitle_matches(&pt_br, &SubtitleFilter::PtAny));
         assert!(subtitle_matches(&pt_pt, &SubtitleFilter::PtAny));
+        assert!(subtitle_matches(&pt_ambiguous, &SubtitleFilter::PtAny));
         assert!(!subtitle_matches(&en_only, &SubtitleFilter::PtAny));
+    }
+
+    #[test]
+    fn subtitle_pt_targets_ambiguous_pt_only() {
+        let pt_ambiguous = release(
+            vec![],
+            vec![Language::Pt],
+            Resolution::P1080,
+            0,
+            0,
+            false,
+            "t",
+        );
+        let pt_br = release(
+            vec![],
+            vec![Language::PtBr],
+            Resolution::P1080,
+            0,
+            0,
+            false,
+            "t",
+        );
+        assert!(subtitle_matches(&pt_ambiguous, &SubtitleFilter::Pt));
+        // The `Pt` leaf is the exact-ambiguous variant: a regional PT-BR
+        // track is not the ambiguous language, so it doesn't match `Pt`
+        // (use `pt-any` to catch every PT flavour).
+        assert!(!subtitle_matches(&pt_br, &SubtitleFilter::Pt));
     }
 
     #[test]
