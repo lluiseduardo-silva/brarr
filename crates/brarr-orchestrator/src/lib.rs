@@ -56,9 +56,11 @@ pub mod error;
 pub mod grpc;
 pub mod maintenance;
 pub mod poll;
+pub mod provider_cache;
 pub mod push;
 pub mod search;
 pub mod state;
+pub mod ttl_cache;
 pub mod web;
 
 pub use auth::{AuthConfig, BypassConfig, TrustedPeers};

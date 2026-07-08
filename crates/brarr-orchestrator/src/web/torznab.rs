@@ -67,7 +67,7 @@ use tracing::{debug, warn};
 use uuid::Uuid;
 
 use crate::auth::AuthConfig;
-use crate::search::{SearchKeys, run_search};
+use crate::search::{SearchKeys, run_search_cached};
 use crate::{AppError, AppState};
 
 /// Build the indexer sub-router. Exposes two parallel surfaces so
@@ -600,7 +600,7 @@ async fn handle_movie(
         }
     };
 
-    let outcome = run_search(
+    let outcome = run_search_cached(
         state,
         SearchKeys {
             tmdb,
@@ -632,7 +632,7 @@ async fn handle_movie(
         .into_iter()
         .skip(offset)
         .take(limit)
-        .filter_map(decision_to_feed_item)
+        .filter_map(|row| decision_to_feed_item(row, CategoryAxis::Movie))
         .collect();
 
     Ok(xml_response(
@@ -690,7 +690,7 @@ async fn handle_tvsearch(
         }
     };
 
-    let outcome = run_search(
+    let outcome = run_search_cached(
         state,
         SearchKeys {
             tvdb,
@@ -715,7 +715,7 @@ async fn handle_tvsearch(
         .into_iter()
         .skip(offset)
         .take(limit)
-        .filter_map(decision_to_feed_item)
+        .filter_map(|row| decision_to_feed_item(row, CategoryAxis::Tv))
         .collect();
 
     Ok(xml_response(
@@ -739,6 +739,10 @@ struct FeedItem {
     /// provider didn't expose it — in that case `write_item` falls back
     /// to `now()`, matching pre-pubDate behaviour.
     published_at: Option<OffsetDateTime>,
+    /// The search axis this item was produced by. `write_item` forwards
+    /// it to [`categories_for`] so a `tvsearch` result is always tagged
+    /// TV and a `movie` result always movie, regardless of title shape.
+    category_axis: CategoryAxis,
 }
 
 /// Derive the public-facing base URL ("scheme://host") from the
@@ -798,12 +802,16 @@ fn parse_imdb(raw: Option<&str>) -> Result<Option<ImdbId>, AppError> {
 /// proxy" route can serve that URL by re-resolving the upstream tracker
 /// link. Until then Sonarr won't be able to actually grab the torrent,
 /// but the feed itself remains spec-compliant.
-fn decision_to_feed_item(row: &crate::db::decisions::DecisionRow) -> Option<FeedItem> {
+fn decision_to_feed_item(
+    row: &crate::db::decisions::DecisionRow,
+    category_axis: CategoryAxis,
+) -> Option<FeedItem> {
     let release = decision_to_release(row)?;
     Some(FeedItem {
         release,
         provider_kind: row.provider_kind.clone(),
         published_at: row.published_at,
+        category_axis,
     })
 }
 
@@ -1173,7 +1181,7 @@ fn write_item<W: std::io::Write>(
     // client validates the MIME after the redirect.
     let _ = item.provider_kind.as_deref();
     let enclosure_type = protocol.enclosure_type();
-    let categories = categories_for(r);
+    let categories = categories_for(r, item.category_axis);
     let primary_cat = categories.first().copied().unwrap_or(2000);
     // Always emit a brarr-side proxy URL — never the raw upstream link.
     // Two reasons:
@@ -1307,13 +1315,34 @@ fn attr<W: std::io::Write>(w: &mut Writer<W>, name: &str, value: &str) -> std::i
     Ok(())
 }
 
+/// Which search axis produced a feed's items — the authoritative signal
+/// for movie-vs-TV category assignment. A `t=tvsearch` (tvdbid) query
+/// only ever returns TV and a `t=movie` (tmdb/imdb) query only movies,
+/// so the category follows the *query*, never a guess from the release
+/// title. (Free-text `t=search` renders only a placeholder today, so it
+/// produces no `FeedItem`s; add a variant here if it grows a real
+/// result path.)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CategoryAxis {
+    /// `t=tvsearch` — always TV (5000-series).
+    Tv,
+    /// `t=movie` — always movie (2000-series).
+    Movie,
+}
+
 /// Map a release's `kind` + `resolution` to one or more Newznab category
 /// ids. The first entry is the "primary" — Sonarr displays it under
 /// `category` and uses it for filtering. Subsequent entries are emitted
 /// as additional `torznab:attr name="category"` rows so multi-cat
 /// filtering also matches.
-fn categories_for(r: &Release) -> Vec<u32> {
-    let is_tv = title_looks_like_episode(&r.title);
+///
+/// `axis` decides movie-vs-TV: the search that produced the item is
+/// authoritative. Guessing from the title alone (the old behaviour)
+/// mis-tagged absolute-numbered anime (`[Group] Show - 07`, no `SxxEyy`)
+/// and bare season packs (`Show.S01.1080p`) as movies, so Sonarr —
+/// which filters an anime indexer on TV cats — silently dropped them.
+fn categories_for(r: &Release, axis: CategoryAxis) -> Vec<u32> {
+    let is_tv = matches!(axis, CategoryAxis::Tv);
     let parent = if is_tv { 5000 } else { 2000 };
     let mut out = vec![parent];
     // Resolution wins — Sonarr filters most aggressively on the
@@ -1332,31 +1361,6 @@ fn categories_for(r: &Release) -> Vec<u32> {
         out.push(2050);
     }
     out
-}
-
-/// Heuristic: titles with `S\d{1,2}E\d{1,2}` (case-insensitive) or
-/// season folder syntax are episodes.
-fn title_looks_like_episode(title: &str) -> bool {
-    let lower = title.to_ascii_lowercase();
-    let bytes = lower.as_bytes();
-    let mut i = 0;
-    while i + 5 < bytes.len() {
-        if bytes[i] == b's' && bytes[i + 1].is_ascii_digit() {
-            let mut j = i + 1;
-            while j < bytes.len() && bytes[j].is_ascii_digit() {
-                j += 1;
-            }
-            if j < bytes.len()
-                && bytes[j] == b'e'
-                && j + 1 < bytes.len()
-                && bytes[j + 1].is_ascii_digit()
-            {
-                return true;
-            }
-        }
-        i += 1;
-    }
-    false
 }
 
 fn xml_response(status: StatusCode, body: Vec<u8>) -> Response {
@@ -1444,6 +1448,7 @@ mod tests {
             release,
             provider_kind: Some("newznab".into()),
             published_at,
+            category_axis: CategoryAxis::Movie,
         }
     }
 
@@ -1688,13 +1693,13 @@ mod tests {
             1,
         )
         .unwrap();
-        let cats = categories_for(&r);
+        let cats = categories_for(&r, CategoryAxis::Movie);
         assert_eq!(cats[0], 2000);
         assert!(cats.contains(&2045));
     }
 
     #[test]
-    fn categories_picks_tv_hd_for_episode_titles() {
+    fn categories_picks_tv_hd_on_tv_axis() {
         let tracker =
             brarr_core::TrackerSource::new("t", url::Url::parse("https://x/").unwrap()).unwrap();
         let r = Release::new(
@@ -1706,17 +1711,54 @@ mod tests {
             1,
         )
         .unwrap();
-        let cats = categories_for(&r);
+        let cats = categories_for(&r, CategoryAxis::Tv);
         assert_eq!(cats[0], 5000);
         assert!(cats.contains(&5040));
     }
 
+    /// Regression for the production bug (tvdb 389422, 2026-07-08): a
+    /// `tvsearch` feed must tag absolute-numbered anime as TV even though
+    /// the title carries no `SxxEyy`, otherwise Sonarr's anime indexer —
+    /// filtering on TV categories — silently drops it. (The old code
+    /// guessed movie-vs-TV from this very title and got it wrong.)
     #[test]
-    fn title_looks_like_episode_detects_common_forms() {
-        assert!(title_looks_like_episode("Show.S01E01.1080p"));
-        assert!(title_looks_like_episode("show s10e23 web"));
-        assert!(!title_looks_like_episode("The Matrix 1999 1080p"));
-        assert!(!title_looks_like_episode("Spider Man 2002"));
+    fn categories_follows_tv_axis_for_absolute_numbered_anime() {
+        let tracker =
+            brarr_core::TrackerSource::new("t", url::Url::parse("https://x/").unwrap()).unwrap();
+        let r = Release::new(
+            "1",
+            tracker,
+            "[Erai-raws] Genjitsu Shugi Yuusha no Oukoku Saikenki - 01 [1080p][Multiple Subtitle]",
+            ReleaseKind::WebDl,
+            Resolution::P1080,
+            1,
+        )
+        .unwrap();
+        // No `SxxEyy` in the title, yet on the tvsearch axis it must be TV.
+        let cats = categories_for(&r, CategoryAxis::Tv);
+        assert_eq!(cats[0], 5000);
+        assert!(cats.contains(&5040));
+    }
+
+    /// The movie axis is authoritative too: a movie whose title happens
+    /// to look episode-like must not leak into the TV categories.
+    #[test]
+    fn categories_follows_movie_axis_despite_episode_like_title() {
+        let tracker =
+            brarr_core::TrackerSource::new("t", url::Url::parse("https://x/").unwrap()).unwrap();
+        let r = Release::new(
+            "1",
+            tracker,
+            "Some.Movie.S01E01.In.Title.2160p.BluRay",
+            ReleaseKind::BluRay,
+            Resolution::P2160,
+            1,
+        )
+        .unwrap();
+        let cats = categories_for(&r, CategoryAxis::Movie);
+        assert_eq!(cats[0], 2000);
+        assert!(cats.contains(&2045));
+        assert!(!cats.iter().any(|c| (5000..6000).contains(c)));
     }
 
     #[test]

@@ -1933,6 +1933,9 @@ async fn load_settings_values(state: &AppState) -> Result<SettingsValues, AppErr
             // Same rationale as poll_interval: reflect the live window.
             state.retention_days().to_string()
         },
+        // Reflect the live runtime value so the checkbox always matches
+        // what the pipeline is actually doing.
+        persist_rejected: state.persist_rejected(),
         log_level: get(settings::KEY_LOG_LEVEL),
         backtrace: {
             let v = get(settings::KEY_BACKTRACE);
@@ -1975,6 +1978,9 @@ struct SettingsGeneralForm {
     poll_interval_secs: String,
     #[serde(default)]
     decisions_retention_days: String,
+    // Checkbox: present (`"1"`) when ticked, absent (`""`) when not.
+    #[serde(default)]
+    persist_rejected: String,
     #[serde(default)]
     log_level: String,
     #[serde(default)]
@@ -2083,6 +2089,8 @@ async fn settings_general(
         }
     };
 
+    let persist_rejected = settings::parse_flag(&form.persist_rejected);
+
     let log_spec = form.log_level.trim();
     if !log_spec.is_empty()
         && let Err(e) = state.runtime().log_reload.apply(log_spec)
@@ -2130,6 +2138,12 @@ async fn settings_general(
         &retention_days.map(|d| d.to_string()).unwrap_or_default(),
     )
     .await?;
+    settings::set(
+        pool,
+        settings::KEY_PERSIST_REJECTED,
+        if persist_rejected { "1" } else { "0" },
+    )
+    .await?;
     settings::set(pool, settings::KEY_LOG_LEVEL, log_spec).await?;
     settings::set(pool, settings::KEY_BACKTRACE, &backtrace).await?;
 
@@ -2148,6 +2162,10 @@ async fn settings_general(
     if let Some(days) = retention_days {
         state.runtime().retention_days.store(Arc::new(days));
     }
+    state
+        .runtime()
+        .persist_rejected
+        .store(Arc::new(persist_rejected));
 
     settings_flash_render(
         &state,

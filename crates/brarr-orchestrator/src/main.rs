@@ -50,7 +50,7 @@ use arc_swap::ArcSwap;
 use brarr_decision_service::Engine;
 use brarr_orchestrator::db::settings::{
     self, KEY_AUTH_TOKEN, KEY_BYPASS_AUTH_FROM, KEY_DECISIONS_RETENTION_DAYS, KEY_LOG_LEVEL,
-    KEY_POLL_INTERVAL_SECS, KEY_PUBLIC_URL, KEY_TRUSTED_PROXIES,
+    KEY_PERSIST_REJECTED, KEY_POLL_INTERVAL_SECS, KEY_PUBLIC_URL, KEY_TRUSTED_PROXIES,
 };
 use brarr_orchestrator::state::{LogReloader, RuntimeConfig};
 use brarr_orchestrator::{
@@ -131,6 +131,11 @@ async fn main() -> Result<()> {
         .and_then(|s| s.parse::<u32>().ok())
         .unwrap_or(DEFAULT_RETENTION_DAYS);
 
+    let persist_rejected = lookup(KEY_PERSIST_REJECTED)
+        .or_else(|| std::env::var("BRARR_PERSIST_REJECTED").ok())
+        .as_deref()
+        .is_some_and(settings::parse_flag);
+
     // Apply a persisted log_level override on top of whatever env did
     // at tracing init — no-op when no DB row exists.
     if let Some(spec) = lookup(KEY_LOG_LEVEL)
@@ -150,6 +155,7 @@ async fn main() -> Result<()> {
         public_url: ArcSwap::from_pointee(public_url),
         poll_interval: ArcSwap::from_pointee(poll_interval),
         retention_days: ArcSwap::from_pointee(retention_days),
+        persist_rejected: ArcSwap::from_pointee(persist_rejected),
         log_reload: log_reloader,
     };
     let state = AppState::with_runtime(pool, Engine::baseline(), runtime);

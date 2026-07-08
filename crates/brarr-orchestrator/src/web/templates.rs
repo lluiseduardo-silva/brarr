@@ -525,6 +525,10 @@ pub struct SettingsValues {
     /// History-retention window in days (matches
     /// `BRARR_DECISIONS_RETENTION_DAYS`). `"0"` = keep forever.
     pub decisions_retention_days: String,
+    /// Keep-all override for search persistence (matches
+    /// `BRARR_PERSIST_REJECTED`). `true` ⇒ persist even releases that
+    /// every quality profile rejects; `false` (default) ⇒ drop them.
+    pub persist_rejected: bool,
     /// Tracing env-filter spec (matches `RUST_LOG`).
     pub log_level: String,
     /// Backtrace mode persisted in the DB (matches `RUST_BACKTRACE`).

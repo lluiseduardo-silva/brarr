@@ -21,6 +21,7 @@
 
 use std::path::Path;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use brarr_core::{ImdbId, Release, TmdbId, TrackerProvider, TrackerSource, TvdbId};
 use brarr_plugin_host::{PluginConfig, WasmEpochTicker, WasmTrackerProvider};
@@ -37,12 +38,29 @@ use crate::db::{
     providers::{self, ProviderRow},
     searches::{self, SearchRequestJson, SearchRow},
 };
+use crate::provider_cache::ProviderClientCache;
 use crate::{AppError, AppState};
+
+/// Wall-clock budget for one provider's search within the fan-out. Caps
+/// the slowest/timing-out tracker so a single bad upstream can't hold the
+/// whole search — and the waiting *arr client — for the full
+/// 30s-per-attempt × retry window of the underlying HTTP client. Healthy
+/// providers answer well inside this; a provider that exceeds it is
+/// reported as a timeout failure and the rest of the fan-out is
+/// unaffected (its results and DB persistence proceed normally).
+pub const PER_PROVIDER_BUDGET: Duration = Duration::from_secs(15);
+
+/// Time-to-live for the Torznab/Newznab pull-path search cache (see
+/// [`crate::ttl_cache`] and [`run_search_cached`]). Long enough to absorb
+/// the burst of duplicate requests Sonarr/Radarr issue per Interactive
+/// Search (per season/episode, once per configured feed), short enough
+/// that provider/profile edits surface on the next window.
+pub const SEARCH_CACHE_TTL: Duration = Duration::from_secs(60);
 
 /// Set of external media ids a search can carry. At least one of
 /// `tmdb` / `imdb` / `tvdb` should be `Some(_)` — fully-empty keys
 /// produce zero results.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct SearchKeys {
     /// TMDb id (movies / TV). Honored by UNIT3D and most plugins.
     pub tmdb: Option<TmdbId>,
@@ -124,6 +142,43 @@ pub async fn run_tmdb_search(state: &AppState, tmdb: TmdbId) -> Result<SearchRun
     run_search(state, SearchKeys::from_tmdb(tmdb)).await
 }
 
+/// Cache-aware wrapper around [`run_search`] for the Torznab/Newznab pull
+/// path. Returns a cached [`SearchRunOutcome`] when an identical search
+/// ran within [`SEARCH_CACHE_TTL`]; otherwise runs the real search,
+/// stores it, and returns it.
+///
+/// Sonarr/Radarr explode one Interactive Search into many near-identical
+/// indexer requests (per season/episode, and once per configured brarr
+/// feed). This collapses that burst onto a single fan-out instead of
+/// re-hammering every upstream tracker and re-persisting a `searches` +
+/// `decisions` set per request. The admin UI and the background poller
+/// call [`run_search`] directly so they always observe fresh data.
+///
+/// # Errors
+///
+/// See [`run_search`]. A cache hit never errors.
+pub async fn run_search_cached(
+    state: &AppState,
+    keys: SearchKeys,
+) -> Result<SearchRunOutcome, AppError> {
+    let now = Instant::now();
+    if let Some(hit) = state.search_cache().get(&keys, now) {
+        debug!(
+            target: "brarr_orchestrator::search",
+            tmdb = ?keys.tmdb.map(TmdbId::get),
+            imdb = ?keys.imdb.map(ImdbId::get),
+            tvdb = ?keys.tvdb.map(TvdbId::get),
+            season = ?keys.season,
+            episode = ?keys.episode,
+            "search cache hit — skipping fan-out"
+        );
+        return Ok(hit);
+    }
+    let outcome = run_search(state, keys.clone()).await?;
+    state.search_cache().insert(keys, outcome.clone(), now);
+    Ok(outcome)
+}
+
 /// Execute a search across every configured tracker, persist results,
 /// and return the outcome.
 ///
@@ -196,10 +251,23 @@ pub async fn run_search(state: &AppState, keys: SearchKeys) -> Result<SearchRunO
         })
         .collect();
 
-    let per_provider = fan_out(state.wasm_engine(), state.wasm_ticker(), &providers, &keys).await;
+    let per_provider = fan_out(
+        state.wasm_engine(),
+        state.wasm_ticker(),
+        state.provider_clients(),
+        &providers,
+        &keys,
+    )
+    .await;
 
     let mut decisions_out = Vec::new();
     let mut failures = Vec::new();
+    // Keep-all override: when on, universally-rejected releases are still
+    // persisted (so the history shows everything that was filtered out);
+    // when off (default) they're dropped before insert to keep the
+    // `decisions` table lean. Read once per run so `/settings` edits take
+    // effect on the next search without a respawn.
+    let persist_rejected = state.persist_rejected();
 
     for (pr, result) in per_provider {
         match result {
@@ -211,21 +279,32 @@ pub async fn run_search(state: &AppState, keys: SearchKeys) -> Result<SearchRunO
                     "provider returned releases"
                 );
                 for release in releases {
-                    let outcome = engine.evaluate(&release);
+                    let mut outcome = engine.evaluate(&release);
                     // Score the same release against every persisted
                     // profile's engine so the UI can surface custom
                     // rule outputs (e.g. anime-jp +80 / pt-sub +150)
-                    // alongside the baseline.
+                    // alongside the baseline. The baseline engine carries
+                    // no `reject` rules, so a profile's reject verdict is
+                    // the only one that can filter — collect each here.
                     let mut profile_scores = std::collections::HashMap::new();
+                    let mut profile_rejections = Vec::with_capacity(profile_engines.len());
                     for (profile_id, profile_engine) in &profile_engines {
-                        let outcome = profile_engine.evaluate(&release);
-                        profile_scores.insert(*profile_id, outcome.score.get());
+                        let p_outcome = profile_engine.evaluate(&release);
+                        profile_scores.insert(*profile_id, p_outcome.score.get());
+                        profile_rejections.push(p_outcome.rejected);
                     }
-                    // Persist every release — including rejected ones —
-                    // so the UI can show what was filtered out.
+                    // Drop releases that every profile rejects (junk to
+                    // everyone) unless the operator opted into keeping all.
+                    // The `rejected` column is stamped with that universal
+                    // verdict so keep-all mode still badges filtered rows.
+                    let verdict = persistence_verdict(&profile_rejections, persist_rejected);
+                    if !verdict.persist {
+                        continue;
+                    }
+                    outcome.rejected = verdict.rejected;
                     let ins = build_insert(&search.id, &pr, &release, &outcome, profile_scores);
                     let row = decisions::insert(pool, ins).await?;
-                    if !outcome.rejected {
+                    if !verdict.rejected {
                         decisions_out.push(row);
                     }
                 }
@@ -272,6 +351,7 @@ pub async fn run_search(state: &AppState, keys: SearchKeys) -> Result<SearchRunO
 async fn fan_out(
     wasm_engine: &WasmEngine,
     ticker: &WasmEpochTicker,
+    clients: &ProviderClientCache,
     providers: &[ProviderRow],
     keys: &SearchKeys,
 ) -> Vec<(ProviderRow, Result<Vec<Release>, String>)> {
@@ -280,17 +360,35 @@ async fn fan_out(
         let wasm_engine = wasm_engine.clone();
         let keys = keys.clone();
         async move {
-            let client = match build_provider(&wasm_engine, ticker, &pr).await {
+            let client = match build_provider(&wasm_engine, ticker, clients, &pr).await {
                 Ok(p) => p,
                 Err(e) => return (pr, Err(e)),
             };
-            let result = dispatch_search(&pr, client.as_ref(), &keys)
-                .await
-                .map_err(|e| e.to_string());
+            let result = with_budget(
+                PER_PROVIDER_BUDGET,
+                dispatch_search(&pr, client.as_ref(), &keys),
+            )
+            .await;
             (pr, result)
         }
     });
     join_all(futures).await
+}
+
+/// Run `fut` (one provider's axis dispatch) under a wall-clock `budget`,
+/// folding both a provider error and a budget overrun into the `String`
+/// failure the fan-out collects. On overrun the future is dropped, so a
+/// stalled upstream stops consuming the fan-out's wall-clock instead of
+/// holding the whole search open for its own (much longer) HTTP timeout
+/// and retry budget.
+async fn with_budget<F>(budget: Duration, fut: F) -> Result<Vec<Release>, String>
+where
+    F: std::future::Future<Output = Result<Vec<Release>, brarr_core::ProviderError>>,
+{
+    match tokio::time::timeout(budget, fut).await {
+        Ok(result) => result.map_err(|e| e.to_string()),
+        Err(_) => Err(format!("timed out after {}s", budget.as_secs())),
+    }
 }
 
 /// Per-provider axis picker.
@@ -345,12 +443,16 @@ async fn dispatch_search(
 async fn build_provider(
     wasm_engine: &WasmEngine,
     ticker: &WasmEpochTicker,
+    clients: &ProviderClientCache,
     pr: &ProviderRow,
 ) -> Result<Arc<dyn TrackerProvider>, String> {
     let source = TrackerSource::new(pr.name.clone(), pr.base_url.clone())
         .map_err(|e| format!("invalid provider source: {e}"))?;
 
     if let Some(path) = pr.plugin_path.as_deref() {
+        // Plugins aren't cached: they own a WASM module loaded from disk
+        // and have their own lifecycle (see `state` docs). Re-load per
+        // call as before.
         let bytes =
             read_plugin_bytes(path).map_err(|e| format!("read plugin {}: {e}", path.display()))?;
         let provider = WasmTrackerProvider::load_with_engine(
@@ -364,22 +466,63 @@ async fn build_provider(
         return Ok(Arc::new(provider));
     }
 
+    // Reuse the built HTTP client when this provider's config is
+    // unchanged — keeps the `reqwest` connection pool + TLS session warm
+    // across the many requests Sonarr/Radarr issue per search.
+    let fingerprint = crate::provider_cache::fingerprint(pr);
+    if let Some(cached) = clients.get(pr.id, fingerprint) {
+        return Ok(cached);
+    }
+
     // Newznab and Torznab share the same XML wire format; the same
     // client handles both. The distinction is captured by `kind` for
     // future divergence (e.g. download URL shape, category defaults).
-    if pr.kind.eq_ignore_ascii_case("newznab") || pr.kind.eq_ignore_ascii_case("torznab") {
-        let client = NewznabClient::new(source, &pr.api_token).map_err(|e| e.to_string())?;
-        Ok(Arc::new(client))
-    } else {
-        // Default to UNIT3D for unknown kinds — gives a useful error
-        // if the token is wrong instead of silently swallowing.
-        let client = Unit3dClient::new(source, &pr.api_token).map_err(|e| e.to_string())?;
-        Ok(Arc::new(client))
-    }
+    let built: Arc<dyn TrackerProvider> =
+        if pr.kind.eq_ignore_ascii_case("newznab") || pr.kind.eq_ignore_ascii_case("torznab") {
+            let client = NewznabClient::new(source, &pr.api_token).map_err(|e| e.to_string())?;
+            Arc::new(client)
+        } else {
+            // Default to UNIT3D for unknown kinds — gives a useful error
+            // if the token is wrong instead of silently swallowing.
+            let client = Unit3dClient::new(source, &pr.api_token).map_err(|e| e.to_string())?;
+            Arc::new(client)
+        };
+    clients.put(pr.id, fingerprint, Arc::clone(&built));
+    Ok(built)
 }
 
 fn read_plugin_bytes(path: &Path) -> std::io::Result<Vec<u8>> {
     std::fs::read(path)
+}
+
+/// Persistence verdict for one release, derived from how every quality
+/// profile judged it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PersistVerdict {
+    /// Whether the decision row should be written to `decisions` at all.
+    persist: bool,
+    /// Value to stamp in the `rejected` column when it is written.
+    rejected: bool,
+}
+
+/// Decide whether to persist a release and what its `rejected` flag is.
+///
+/// A release is *universally rejected* — junk to every profile that
+/// opined — only when at least one profile exists and **all** of them
+/// reject it. The baseline engine carries no `reject` rules, so it never
+/// participates here; with zero profiles nothing is ever dropped.
+///
+/// - Universally rejected + keep-all off ⇒ drop (don't persist).
+/// - Universally rejected + keep-all on ⇒ persist, `rejected = true`.
+/// - Apt to at least one profile (or no profiles) ⇒ persist,
+///   `rejected = false`.
+fn persistence_verdict(profile_rejections: &[bool], persist_rejected: bool) -> PersistVerdict {
+    let universally_rejected =
+        !profile_rejections.is_empty() && profile_rejections.iter().all(|&r| r);
+    PersistVerdict {
+        persist: persist_rejected || !universally_rejected,
+        rejected: universally_rejected,
+    }
 }
 
 fn build_insert(
@@ -429,11 +572,83 @@ fn build_insert(
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-    use super::run_tmdb_search;
+    use std::time::Duration;
+
+    use super::{persistence_verdict, run_tmdb_search, with_budget};
     use crate::AppState;
     use crate::db::open_memory;
-    use brarr_core::TmdbId;
+    use brarr_core::{ProviderError, Release, TmdbId};
     use brarr_decision_service::Engine;
+
+    #[test]
+    fn verdict_no_profiles_keeps_release() {
+        // No profiles opined ⇒ nothing to reject against ⇒ always kept.
+        let v = persistence_verdict(&[], false);
+        assert!(v.persist);
+        assert!(!v.rejected);
+    }
+
+    #[test]
+    fn verdict_apt_to_some_profile_is_kept() {
+        // Rejected by one profile but apt to another ⇒ not universal junk.
+        let v = persistence_verdict(&[true, false], false);
+        assert!(v.persist);
+        assert!(!v.rejected);
+    }
+
+    #[test]
+    fn verdict_universally_rejected_is_dropped_by_default() {
+        // Every profile rejects ⇒ junk to everyone ⇒ dropped when
+        // keep-all is off.
+        let v = persistence_verdict(&[true, true], false);
+        assert!(!v.persist);
+        assert!(v.rejected);
+    }
+
+    #[test]
+    fn verdict_universally_rejected_is_kept_when_keep_all_on() {
+        // Same junk, but keep-all on ⇒ persisted and badged rejected.
+        let v = persistence_verdict(&[true, true], true);
+        assert!(v.persist);
+        assert!(v.rejected);
+    }
+
+    #[test]
+    fn verdict_single_profile_keep_is_persisted() {
+        let v = persistence_verdict(&[false], false);
+        assert!(v.persist);
+        assert!(!v.rejected);
+    }
+
+    #[tokio::test]
+    async fn with_budget_returns_ok_for_fast_future() {
+        let res = with_budget(Duration::from_secs(5), async {
+            Ok::<Vec<Release>, ProviderError>(Vec::new())
+        })
+        .await;
+        assert!(res.is_ok());
+    }
+
+    #[tokio::test]
+    async fn with_budget_times_out_slow_future() {
+        let res = with_budget(Duration::from_millis(10), async {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            Ok::<Vec<Release>, ProviderError>(Vec::new())
+        })
+        .await;
+        let err = res.expect_err("slow future must hit the budget");
+        assert!(err.contains("timed out"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn with_budget_propagates_provider_error() {
+        let res = with_budget(Duration::from_secs(5), async {
+            Err::<Vec<Release>, ProviderError>(ProviderError::new("x", "boom"))
+        })
+        .await;
+        let err = res.expect_err("provider error must surface");
+        assert!(err.contains("boom"), "got: {err}");
+    }
 
     #[tokio::test]
     async fn search_with_no_providers_returns_empty_outcome() {

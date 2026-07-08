@@ -28,6 +28,11 @@ pub const KEY_POLL_INTERVAL_SECS: &str = "poll_interval_secs";
 /// background maintenance task prunes them. `0` = keep forever (disabled).
 /// Replaces `BRARR_DECISIONS_RETENTION_DAYS`.
 pub const KEY_DECISIONS_RETENTION_DAYS: &str = "decisions_retention_days";
+/// Keep-all override for search persistence. Truthy (`1`/`true`) ⇒
+/// persist every evaluated release including ones every quality profile
+/// rejects; empty / `0` ⇒ drop universally-rejected releases (default).
+/// Replaces `BRARR_PERSIST_REJECTED`.
+pub const KEY_PERSIST_REJECTED: &str = "persist_rejected";
 /// `tracing-subscriber` env filter (replaces `RUST_LOG`).
 pub const KEY_LOG_LEVEL: &str = "log_level";
 /// Backtrace mode — `0` / `1` / `full`. Restart required (workspace
@@ -97,6 +102,17 @@ pub async fn get_all(pool: &Pool) -> Result<HashMap<String, String>, AppError> {
     Ok(out)
 }
 
+/// Parse a persisted boolean flag. Truthy: `1`, `true`, `yes`, `on`
+/// (case-insensitive, trimmed). Everything else — including empty,
+/// meaning "unset / no override" — is `false`.
+#[must_use]
+pub fn parse_flag(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
 fn row_to_setting(row: &SqliteRow) -> Result<SettingRow, AppError> {
     let updated_unix: i64 = row.try_get("updated_at")?;
     let updated_at = OffsetDateTime::from_unix_timestamp(updated_unix)
@@ -146,6 +162,16 @@ mod tests {
         set(&pool, KEY_BYPASS_AUTH_FROM, "").await.unwrap();
         let row = get(&pool, KEY_BYPASS_AUTH_FROM).await.unwrap().unwrap();
         assert_eq!(row.value, "");
+    }
+
+    #[test]
+    fn parse_flag_truthy_and_falsy() {
+        for t in ["1", "true", "TRUE", "Yes", " on "] {
+            assert!(parse_flag(t), "{t:?} should be truthy");
+        }
+        for f in ["", "0", "false", "no", "off", "x"] {
+            assert!(!parse_flag(f), "{f:?} should be falsy");
+        }
     }
 
     #[tokio::test]

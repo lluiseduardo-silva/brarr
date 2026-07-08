@@ -39,6 +39,9 @@ use wasmtime::{Config, Engine as WasmEngine};
 
 use crate::auth::{AuthConfig, BypassConfig};
 use crate::db::Pool;
+use crate::provider_cache::ProviderClientCache;
+use crate::search::{SEARCH_CACHE_TTL, SearchKeys, SearchRunOutcome};
+use crate::ttl_cache::TtlCache;
 
 /// Default poller cadence echoed from [`crate::poll`] so the runtime
 /// config has a sensible default when no override exists yet.
@@ -67,6 +70,13 @@ pub struct RuntimeConfig {
     /// the background maintenance task on every cycle so edits from
     /// `/settings` take effect without a respawn.
     pub retention_days: ArcSwap<u32>,
+    /// Keep-all override for search persistence. When `false` (default)
+    /// the search pipeline drops releases that every quality profile
+    /// rejects before writing them to `decisions`, keeping the table
+    /// lean. When `true` every evaluated release is persisted (and
+    /// universally-rejected ones are badged `rejected`). Read on every
+    /// search so `/settings` edits apply without a respawn.
+    pub persist_rejected: ArcSwap<bool>,
     /// Closure that reloads the `tracing-subscriber` env filter at
     /// runtime. Defaults to a no-op so tests don't have to wire a
     /// subscriber.
@@ -81,6 +91,7 @@ impl Default for RuntimeConfig {
             public_url: ArcSwap::from_pointee(None),
             poll_interval: ArcSwap::from_pointee(DEFAULT_POLL_INTERVAL),
             retention_days: ArcSwap::from_pointee(DEFAULT_RETENTION_DAYS),
+            persist_rejected: ArcSwap::from_pointee(false),
             log_reload: LogReloader::noop(),
         }
     }
@@ -148,6 +159,14 @@ struct Inner {
     /// deadlines actually fire. Lifetime tied to this `Inner`; the
     /// task aborts when the last `AppState` clone is dropped.
     wasm_ticker: WasmEpochTicker,
+    /// Reused HTTP tracker clients, keyed by provider id, so repeat
+    /// searches don't pay a fresh TLS handshake + cold connection pool
+    /// per call. See [`crate::provider_cache`].
+    provider_clients: ProviderClientCache,
+    /// Short-TTL cache that collapses the duplicate searches Sonarr/Radarr
+    /// issue per Interactive Search (per season/episode, once per feed).
+    /// See [`crate::ttl_cache`].
+    search_cache: TtlCache<SearchKeys, SearchRunOutcome>,
     runtime: RuntimeConfig,
 }
 
@@ -223,6 +242,8 @@ impl AppState {
                 engine,
                 wasm_engine,
                 wasm_ticker,
+                provider_clients: ProviderClientCache::new(),
+                search_cache: TtlCache::new(SEARCH_CACHE_TTL),
                 runtime,
             }),
         }
@@ -279,6 +300,14 @@ impl AppState {
         **self.inner.runtime.retention_days.load()
     }
 
+    /// Whether the search pipeline persists universally-rejected releases
+    /// (keep-all mode). `false` by default — see
+    /// [`RuntimeConfig::persist_rejected`].
+    #[must_use]
+    pub fn persist_rejected(&self) -> bool {
+        **self.inner.runtime.persist_rejected.load()
+    }
+
     /// Borrow the full runtime config so writers (the `/settings`
     /// handler) can swap individual fields directly.
     #[must_use]
@@ -304,6 +333,22 @@ impl AppState {
     #[must_use]
     pub fn wasm_engine(&self) -> &WasmEngine {
         &self.inner.wasm_engine
+    }
+
+    /// Borrow the reused HTTP tracker-client cache. Used by
+    /// [`crate::search::build_provider`] to avoid rebuilding a
+    /// `reqwest::Client` per provider per search.
+    #[must_use]
+    pub fn provider_clients(&self) -> &ProviderClientCache {
+        &self.inner.provider_clients
+    }
+
+    /// Borrow the short-TTL search-result cache. Used by the Torznab /
+    /// Newznab pull path to dedupe Sonarr/Radarr's per-search request
+    /// fan-out. The admin UI and poller bypass it (always fresh).
+    #[must_use]
+    pub fn search_cache(&self) -> &TtlCache<SearchKeys, SearchRunOutcome> {
+        &self.inner.search_cache
     }
 }
 

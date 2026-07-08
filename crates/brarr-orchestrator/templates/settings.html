@@ -124,6 +124,11 @@
             <input name="decisions_retention_days" value="{{ values.decisions_retention_days }}" inputmode="numeric" placeholder="7"
                    class="w-full px-3 h-10 rounded-md bg-bg-canvas border border-border-strong text-sm text-fg-primary placeholder:text-fg-muted focus:outline-none focus:border-accent-solid">
         </label>
+        <label class="flex items-start gap-2.5 mt-4 max-w-xl cursor-pointer">
+            <input type="checkbox" name="persist_rejected" value="1" {% if values.persist_rejected %}checked{% endif %}
+                   class="mt-0.5 h-4 w-4 rounded border-border-strong bg-bg-canvas text-accent-solid focus:outline-none focus:ring-1 focus:ring-accent-solid">
+            <span class="text-xs text-fg-muted">Guardar releases rejeitados por <strong class="text-fg-primary">todos</strong> os profiles de qualidade. Desligado (padrão): só o que é apto a pelo menos um profile vai pro banco — mantém a tabela enxuta. Ligado: o histórico mostra tudo que foi filtrado, ao custo de um banco maior.</span>
+        </label>
     </section>
 
     <section class="card-hairline bg-bg-surface border border-border-default rounded-xl p-5">
