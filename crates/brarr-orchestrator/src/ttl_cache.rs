@@ -2,15 +2,16 @@
 //! Torznab/Newznab pull path.
 //!
 //! Sonarr/Radarr fan a single Interactive Search out into many near-
-//! identical indexer requests — one per season and/or episode, and once
-//! per configured brarr indexer (the `/torznab` and `/newznab` feeds
-//! both run the *same* fan-out, differing only in which protocol's
-//! decisions they render). Without a cache each of those requests re-runs
-//! the full provider fan-out and re-persists a fresh `searches` +
-//! `decisions` set, so the *arr UI stalls for minutes while brarr hammers
-//! every upstream tracker repeatedly. This cache lets the first request
-//! for a given [`SearchKeys`](crate::search::SearchKeys) do the real work
-//! and every duplicate within `ttl` reuse the result.
+//! identical indexer requests — one per season and/or episode, and
+//! repeatedly per configured brarr indexer. Without a cache each of
+//! those requests re-runs the provider fan-out and re-persists a fresh
+//! `searches` + `decisions` set, so the *arr UI stalls for minutes while
+//! brarr hammers every upstream tracker repeatedly. This cache lets the
+//! first request for a given [`SearchKeys`](crate::search::SearchKeys) +
+//! [`ProviderScope`](crate::search::ProviderScope) pair do the real work
+//! and every duplicate within `ttl` reuse the result. (The `/torznab`
+//! and `/newznab` feeds fan out to disjoint provider scopes, so each
+//! keeps its own entry.)
 //!
 //! Staleness is bounded by `ttl` (default 60s — see
 //! [`crate::search::SEARCH_CACHE_TTL`]): an edit to a provider or quality

@@ -67,7 +67,7 @@ use tracing::{debug, warn};
 use uuid::Uuid;
 
 use crate::auth::AuthConfig;
-use crate::search::{SearchKeys, run_search_cached};
+use crate::search::{ProviderScope, SearchKeys, run_search_cached};
 use crate::{AppError, AppState};
 
 /// Build the indexer sub-router. Exposes two parallel surfaces so
@@ -79,14 +79,22 @@ use crate::{AppError, AppState};
 /// | `/newznab/api`,  `/newznab/download/{id}` | Newznab Custom (Usenet)  | Only Newznab (Usenet) providers                   |
 ///
 /// Both feeds share the orchestrator's search pipeline, rules engine,
-/// SQLite history, and apikey middleware — the split is purely about
-/// per-item protocol labelling. Sonarr / Radarr's UI tags each result
-/// row with the **indexer's** configured protocol (Torrent vs Usenet),
-/// not the per-item `<enclosure type>`. Without the split, every
+/// SQLite history, and apikey middleware. The split has two effects:
+/// per-item protocol labelling (Sonarr / Radarr's UI tags each result
+/// row with the **indexer's** configured protocol — Torrent vs Usenet —
+/// not the per-item `<enclosure type>`; without the split, every
 /// NZBGeek release shows up as "torrent" in the *arr UI and grabs fail
-/// because the *arr client tries to hand the `.nzb` to qBittorrent.
+/// because the *arr client tries to hand the `.nzb` to qBittorrent),
+/// and **scoped fan-out** — each feed only dispatches to the providers
+/// whose results it can render ([`ProviderScope`]), so the torrent feed
+/// never waits on a slow Usenet indexer and vice versa.
+///
+/// Every request through these routes is timed by [`metrics_middleware`]
+/// into `endpoint_metrics` (latency, status, cache hit/miss) for the
+/// `/health` page.
 pub fn router(state: AppState) -> Router<AppState> {
-    let auth_layer = middleware::from_fn_with_state(state, apikey_middleware);
+    let auth_layer = middleware::from_fn_with_state(state.clone(), apikey_middleware);
+    let metrics_layer = middleware::from_fn_with_state(state, metrics_middleware);
     Router::new()
         .route("/torznab/api", get(handle_torznab_api))
         .route(
@@ -98,7 +106,10 @@ pub fn router(state: AppState) -> Router<AppState> {
             "/newznab/download/{decision_id}",
             get(handle_newznab_download),
         )
+        // Layer order: the last layer is outermost, so metrics wraps
+        // auth and 401s are measured too.
         .layer(auth_layer)
+        .layer(metrics_layer)
 }
 
 /// Protocol axis of an indexer feed. Selects which decisions are
@@ -131,6 +142,17 @@ impl Protocol {
         match self {
             Self::Torrent => "application/x-bittorrent",
             Self::Nzb => "application/x-nzb",
+        }
+    }
+
+    /// Provider families this feed dispatches to. Passed to
+    /// [`run_search_cached`] so the fan-out only hits the providers
+    /// whose results this feed can render — mirrors [`Self::matches_kind`]
+    /// on the dispatch side instead of only filtering afterwards.
+    fn scope(self) -> ProviderScope {
+        match self {
+            Self::Torrent => ProviderScope::Torrent,
+            Self::Nzb => ProviderScope::Usenet,
         }
     }
 
@@ -315,6 +337,69 @@ async fn apikey_middleware(
         return Ok(next.run(req).await);
     }
     Err(error_xml(StatusCode::UNAUTHORIZED, 100, "Invalid API key").into_response())
+}
+
+/// Marker the search handlers attach to their response so the metrics
+/// middleware can record whether the short-TTL search cache absorbed the
+/// request (`true`) or a full provider fan-out ran (`false`). Absent on
+/// non-search responses (`caps`, probes, downloads, errors).
+#[derive(Debug, Clone, Copy)]
+struct SearchCacheMarker(bool);
+
+/// Outermost middleware on the indexer routes: times every request and
+/// persists one `endpoint_metrics` row (endpoint, `t=` function, HTTP
+/// status, latency, cache hit/miss). This is the latency Sonarr/Radarr
+/// actually experience, auth failures included. Insertion is
+/// best-effort — a metrics failure never affects the response.
+async fn metrics_middleware(State(state): State<AppState>, req: Request, next: Next) -> Response {
+    let started = std::time::Instant::now();
+    let path = req.uri().path();
+    let endpoint = if path.starts_with("/newznab") {
+        "newznab"
+    } else {
+        "torznab"
+    };
+    let function = if path.contains("/download/") {
+        "download".to_string()
+    } else {
+        t_function(req.uri().query())
+    };
+    let resp = next.run(req).await;
+    let metric = crate::db::metrics::EndpointMetricInsert {
+        endpoint,
+        function,
+        status: resp.status().as_u16(),
+        duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        cache_hit: resp.extensions().get::<SearchCacheMarker>().map(|m| m.0),
+    };
+    if let Err(e) = crate::db::metrics::insert_endpoint_metric(state.pool(), metric).await {
+        warn!(
+            target: "brarr_orchestrator::torznab",
+            error = %e,
+            "failed to persist endpoint metric"
+        );
+    }
+    resp
+}
+
+/// Extract the `t=` function from a raw query string for metric
+/// labelling. Mirrors [`handle_api_inner`]'s dispatch: missing/blank →
+/// `caps`. Unknown values are kept (lowercased, clamped to 32 chars) so
+/// a misconfigured client shows up in the health table as itself.
+fn t_function(query: Option<&str>) -> String {
+    let Some(q) = query else {
+        return "caps".to_string();
+    };
+    for (k, v) in url::form_urlencoded::parse(q.as_bytes()) {
+        if k == "t" {
+            let trimmed = v.trim().to_ascii_lowercase();
+            if trimmed.is_empty() {
+                return "caps".to_string();
+            }
+            return trimmed.chars().take(32).collect();
+        }
+    }
+    "caps".to_string()
 }
 
 /// Combined query string for every `t=...` dispatch. Newznab spec is
@@ -600,13 +685,14 @@ async fn handle_movie(
         }
     };
 
-    let outcome = run_search_cached(
+    let (outcome, cache_hit) = run_search_cached(
         state,
         SearchKeys {
             tmdb,
             imdb,
             ..SearchKeys::default()
         },
+        protocol.scope(),
     )
     .await?;
     // Filter to the decision rows on this feed's protocol axis, then —
@@ -635,10 +721,12 @@ async fn handle_movie(
         .filter_map(|row| decision_to_feed_item(row, CategoryAxis::Movie))
         .collect();
 
-    Ok(xml_response(
+    let mut resp = xml_response(
         StatusCode::OK,
         render_feed(&items, base_url, offset, total, protocol, apikey)?,
-    ))
+    );
+    resp.extensions_mut().insert(SearchCacheMarker(cache_hit));
+    Ok(resp)
 }
 
 async fn handle_tvsearch(
@@ -690,7 +778,7 @@ async fn handle_tvsearch(
         }
     };
 
-    let outcome = run_search_cached(
+    let (outcome, cache_hit) = run_search_cached(
         state,
         SearchKeys {
             tvdb,
@@ -698,6 +786,7 @@ async fn handle_tvsearch(
             episode,
             ..SearchKeys::default()
         },
+        protocol.scope(),
     )
     .await?;
     let matching: Vec<&crate::db::decisions::DecisionRow> = outcome
@@ -718,10 +807,12 @@ async fn handle_tvsearch(
         .filter_map(|row| decision_to_feed_item(row, CategoryAxis::Tv))
         .collect();
 
-    Ok(xml_response(
+    let mut resp = xml_response(
         StatusCode::OK,
         render_feed(&items, base_url, offset, total, protocol, apikey)?,
-    ))
+    );
+    resp.extensions_mut().insert(SearchCacheMarker(cache_hit));
+    Ok(resp)
 }
 
 /// Pair of (Release, provider kind) used by the feed renderer to pick
@@ -1494,6 +1585,94 @@ mod tests {
         assert!(
             xml.contains("<pubDate>"),
             "expected fallback pubDate, got: {xml}"
+        );
+    }
+
+    #[test]
+    fn t_function_labels_query_for_metrics() {
+        assert_eq!(t_function(None), "caps");
+        assert_eq!(t_function(Some("apikey=x")), "caps");
+        assert_eq!(t_function(Some("t=")), "caps");
+        assert_eq!(t_function(Some("t=movie&imdbid=tt1")), "movie");
+        assert_eq!(t_function(Some("t=TVSearch")), "tvsearch");
+        // Unknown values are kept so misconfigured clients are visible.
+        assert_eq!(t_function(Some("t=bogus")), "bogus");
+    }
+
+    #[test]
+    fn protocol_scope_matches_kind_predicate() {
+        // The dispatch-side scope must agree with the render-side
+        // kind filter, or a feed could fan out to providers whose
+        // results it then drops (the pre-scope behaviour).
+        for kind in ["unit3d", "torznab", "plugin", "newznab"] {
+            assert_eq!(
+                Protocol::Torrent.scope().includes(kind),
+                Protocol::Torrent.matches_kind(Some(kind)),
+                "torrent scope/filter disagree on {kind}"
+            );
+            assert_eq!(
+                Protocol::Nzb.scope().includes(kind),
+                Protocol::Nzb.matches_kind(Some(kind)),
+                "nzb scope/filter disagree on {kind}"
+            );
+        }
+    }
+
+    async fn test_state() -> (crate::db::Pool, crate::AppState) {
+        let pool = crate::db::open_memory().await.unwrap();
+        let state = crate::AppState::new(pool.clone(), brarr_decision_service::Engine::baseline());
+        (pool, state)
+    }
+
+    fn get_request(uri: &str) -> axum::http::Request<axum::body::Body> {
+        axum::http::Request::builder()
+            .uri(uri)
+            .body(axum::body::Body::empty())
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn metrics_middleware_records_endpoint_row() {
+        use tower::ServiceExt;
+        let (pool, state) = test_state().await;
+        let app = router(state.clone()).with_state(state);
+        let resp = app
+            .oneshot(get_request("/torznab/api?t=caps"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let recorded = crate::db::metrics::endpoint_stats(&pool, 0).await.unwrap();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].endpoint, "torznab");
+        assert_eq!(recorded[0].function, "caps");
+        assert_eq!(recorded[0].total, 1);
+        // caps doesn't search, so no cache signal.
+        assert_eq!(recorded[0].cache_hits, 0);
+        assert_eq!(recorded[0].cache_misses, 0);
+    }
+
+    #[tokio::test]
+    async fn movie_search_records_cache_miss_then_hit() {
+        use tower::ServiceExt;
+        let (pool, state) = test_state().await;
+        let app = router(state.clone()).with_state(state);
+        for _ in 0..2 {
+            let resp = app
+                .clone()
+                .oneshot(get_request("/torznab/api?t=movie&imdbid=tt0133093"))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+
+        let recorded = crate::db::metrics::endpoint_stats(&pool, 0).await.unwrap();
+        let movie = recorded.iter().find(|s| s.function == "movie").unwrap();
+        assert_eq!(movie.total, 2);
+        assert_eq!(movie.cache_misses, 1, "first request runs the fan-out");
+        assert_eq!(
+            movie.cache_hits, 1,
+            "second request is absorbed by the cache"
         );
     }
 

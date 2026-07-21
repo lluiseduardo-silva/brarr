@@ -10,6 +10,7 @@
 pub mod arr_instances;
 pub mod decisions;
 pub mod maintenance;
+pub mod metrics;
 pub mod providers;
 pub mod push_history;
 pub mod quality_profiles;

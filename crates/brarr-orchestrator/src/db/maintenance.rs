@@ -29,6 +29,9 @@ pub struct MaintenanceOutcome {
     pub decisions_deleted: u64,
     /// `searches` rows deleted (only those left with no decisions).
     pub searches_deleted: u64,
+    /// Observability rows deleted (`provider_metrics` +
+    /// `endpoint_metrics` combined).
+    pub metrics_deleted: u64,
 }
 
 impl MaintenanceOutcome {
@@ -36,7 +39,7 @@ impl MaintenanceOutcome {
     /// or a noisy log line.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.decisions_deleted == 0 && self.searches_deleted == 0
+        self.decisions_deleted == 0 && self.searches_deleted == 0 && self.metrics_deleted == 0
     }
 }
 
@@ -56,9 +59,11 @@ pub async fn run_prune(pool: &Pool, retention_days: u32) -> Result<MaintenanceOu
         OffsetDateTime::now_utc().unix_timestamp() - i64::from(retention_days) * SECS_PER_DAY;
     let decisions_deleted = prune_decisions(pool, cutoff).await?;
     let searches_deleted = prune_searches(pool, cutoff).await?;
+    let metrics_deleted = crate::db::metrics::prune(pool, cutoff).await?;
     Ok(MaintenanceOutcome {
         decisions_deleted,
         searches_deleted,
+        metrics_deleted,
     })
 }
 

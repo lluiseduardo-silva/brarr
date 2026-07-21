@@ -92,6 +92,7 @@ fn log_outcome(retention_days: u32, outcome: MaintenanceOutcome) {
         retention_days,
         decisions_deleted = outcome.decisions_deleted,
         searches_deleted = outcome.searches_deleted,
+        metrics_deleted = outcome.metrics_deleted,
         "maintenance cycle complete"
     );
 }

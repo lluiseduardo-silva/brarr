@@ -40,8 +40,15 @@ use wasmtime::{Config, Engine as WasmEngine};
 use crate::auth::{AuthConfig, BypassConfig};
 use crate::db::Pool;
 use crate::provider_cache::ProviderClientCache;
-use crate::search::{SEARCH_CACHE_TTL, SearchKeys, SearchRunOutcome};
+use crate::search::{ProviderScope, SEARCH_CACHE_TTL, SearchKeys, SearchRunOutcome};
 use crate::ttl_cache::TtlCache;
+
+/// Key of the pull-path search cache: the media ids plus the provider
+/// scope the feed dispatched under. The scope is part of the key because
+/// the Torznab (torrent) and Newznab (usenet) feeds fan out to disjoint
+/// provider sets — sharing an entry across scopes would serve one feed
+/// the other's (missing) results.
+pub type SearchCacheKey = (SearchKeys, ProviderScope);
 
 /// Default poller cadence echoed from [`crate::poll`] so the runtime
 /// config has a sensible default when no override exists yet.
@@ -165,8 +172,8 @@ struct Inner {
     provider_clients: ProviderClientCache,
     /// Short-TTL cache that collapses the duplicate searches Sonarr/Radarr
     /// issue per Interactive Search (per season/episode, once per feed).
-    /// See [`crate::ttl_cache`].
-    search_cache: TtlCache<SearchKeys, SearchRunOutcome>,
+    /// Keyed by [`SearchCacheKey`]. See [`crate::ttl_cache`].
+    search_cache: TtlCache<SearchCacheKey, SearchRunOutcome>,
     runtime: RuntimeConfig,
 }
 
@@ -347,7 +354,7 @@ impl AppState {
     /// Newznab pull path to dedupe Sonarr/Radarr's per-search request
     /// fan-out. The admin UI and poller bypass it (always fresh).
     #[must_use]
-    pub fn search_cache(&self) -> &TtlCache<SearchKeys, SearchRunOutcome> {
+    pub fn search_cache(&self) -> &TtlCache<SearchCacheKey, SearchRunOutcome> {
         &self.inner.search_cache
     }
 }

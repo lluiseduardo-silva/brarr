@@ -80,6 +80,44 @@ pub struct SearchKeys {
     pub episode: Option<u16>,
 }
 
+/// Which provider families a search fans out to.
+///
+/// The Torznab feed (`/torznab/api`) serves torrent results and the
+/// Newznab feed (`/newznab/api`) serves Usenet results, so each only
+/// needs to dispatch to the providers whose results it can actually
+/// render. Before this scope existed both feeds fanned out to *every*
+/// provider and filtered the decisions afterwards — the torrent feed
+/// would wait on a slow Usenet indexer (and vice versa) for results it
+/// then threw away.
+///
+/// Part of the search-cache key: the same [`SearchKeys`] under a
+/// different scope hits a different provider set and must not share a
+/// cached outcome.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum ProviderScope {
+    /// Every enabled provider (admin UI, poller, gRPC, webhooks).
+    #[default]
+    All,
+    /// Torrent-side providers: `unit3d`, `torznab`, and plugins —
+    /// everything that is not `newznab`. Mirrors the Torznab feed's
+    /// decision filter.
+    Torrent,
+    /// Usenet-side providers: `kind == "newznab"` only.
+    Usenet,
+}
+
+impl ProviderScope {
+    /// `true` when a provider row of `kind` belongs to this scope.
+    #[must_use]
+    pub fn includes(self, kind: &str) -> bool {
+        match self {
+            Self::All => true,
+            Self::Usenet => kind.eq_ignore_ascii_case("newznab"),
+            Self::Torrent => !kind.eq_ignore_ascii_case("newznab"),
+        }
+    }
+}
+
 impl SearchKeys {
     /// Convenience: build keys with only `tmdb` set.
     #[must_use]
@@ -142,17 +180,19 @@ pub async fn run_tmdb_search(state: &AppState, tmdb: TmdbId) -> Result<SearchRun
     run_search(state, SearchKeys::from_tmdb(tmdb)).await
 }
 
-/// Cache-aware wrapper around [`run_search`] for the Torznab/Newznab pull
-/// path. Returns a cached [`SearchRunOutcome`] when an identical search
-/// ran within [`SEARCH_CACHE_TTL`]; otherwise runs the real search,
-/// stores it, and returns it.
+/// Cache-aware wrapper around [`run_search_scoped`] for the
+/// Torznab/Newznab pull path. Returns a cached [`SearchRunOutcome`] (and
+/// `true` for "cache hit") when an identical search under the same
+/// [`ProviderScope`] ran within [`SEARCH_CACHE_TTL`]; otherwise runs the
+/// real search, stores it, and returns it with `false`.
 ///
 /// Sonarr/Radarr explode one Interactive Search into many near-identical
 /// indexer requests (per season/episode, and once per configured brarr
-/// feed). This collapses that burst onto a single fan-out instead of
-/// re-hammering every upstream tracker and re-persisting a `searches` +
-/// `decisions` set per request. The admin UI and the background poller
-/// call [`run_search`] directly so they always observe fresh data.
+/// feed). This collapses that burst onto a single fan-out per scope
+/// instead of re-hammering every upstream tracker and re-persisting a
+/// `searches` + `decisions` set per request. The admin UI and the
+/// background poller call [`run_search`] directly so they always observe
+/// fresh data.
 ///
 /// # Errors
 ///
@@ -160,9 +200,11 @@ pub async fn run_tmdb_search(state: &AppState, tmdb: TmdbId) -> Result<SearchRun
 pub async fn run_search_cached(
     state: &AppState,
     keys: SearchKeys,
-) -> Result<SearchRunOutcome, AppError> {
+    scope: ProviderScope,
+) -> Result<(SearchRunOutcome, bool), AppError> {
     let now = Instant::now();
-    if let Some(hit) = state.search_cache().get(&keys, now) {
+    let cache_key = (keys.clone(), scope);
+    if let Some(hit) = state.search_cache().get(&cache_key, now) {
         debug!(
             target: "brarr_orchestrator::search",
             tmdb = ?keys.tmdb.map(TmdbId::get),
@@ -170,22 +212,39 @@ pub async fn run_search_cached(
             tvdb = ?keys.tvdb.map(TvdbId::get),
             season = ?keys.season,
             episode = ?keys.episode,
+            scope = ?scope,
             "search cache hit — skipping fan-out"
         );
-        return Ok(hit);
+        return Ok((hit, true));
     }
-    let outcome = run_search(state, keys.clone()).await?;
-    state.search_cache().insert(keys, outcome.clone(), now);
-    Ok(outcome)
+    let outcome = run_search_scoped(state, keys, scope).await?;
+    state.search_cache().insert(cache_key, outcome.clone(), now);
+    Ok((outcome, false))
 }
 
 /// Execute a search across every configured tracker, persist results,
-/// and return the outcome.
+/// and return the outcome. Equivalent to [`run_search_scoped`] with
+/// [`ProviderScope::All`].
+///
+/// # Errors
+///
+/// See [`run_search_scoped`].
+pub async fn run_search(state: &AppState, keys: SearchKeys) -> Result<SearchRunOutcome, AppError> {
+    run_search_scoped(state, keys, ProviderScope::All).await
+}
+
+/// Execute a search across every configured tracker within `scope`,
+/// persist results, and return the outcome.
 ///
 /// The provider dispatch picks the right search axis per-tracker:
 /// - UNIT3D + plugin rows prefer `tmdb`, fall back to `imdb`.
 /// - Newznab rows prefer `imdb`, fall back to `tmdb` (best-effort —
 ///   most Newznab servers don't accept TMDb on movie-search).
+///
+/// Each provider dispatch is timed and persisted to `provider_metrics`
+/// (ok / error / timeout + duration) so the `/health` page can show
+/// which upstream is the bottleneck. Metric insertion is best-effort:
+/// a failure is logged, never fatal to the search.
 ///
 /// # Errors
 ///
@@ -197,7 +256,11 @@ pub async fn run_search_cached(
     clippy::too_many_lines,
     reason = "search pipeline is a single linear story (load profiles → fan out → score → persist); splitting into helpers obscures the read path"
 )]
-pub async fn run_search(state: &AppState, keys: SearchKeys) -> Result<SearchRunOutcome, AppError> {
+pub async fn run_search_scoped(
+    state: &AppState,
+    keys: SearchKeys,
+    scope: ProviderScope,
+) -> Result<SearchRunOutcome, AppError> {
     let pool = state.pool();
     let engine = state.engine();
 
@@ -220,12 +283,14 @@ pub async fn run_search(state: &AppState, keys: SearchKeys) -> Result<SearchRunO
         "search created"
     );
 
-    let providers = providers::list_enabled(pool).await?;
+    let mut providers = providers::list_enabled(pool).await?;
+    providers.retain(|p| scope.includes(&p.kind));
     if providers.is_empty() {
         warn!(
             target: "brarr_orchestrator::search",
             search_id = %search.id,
-            "no enabled providers"
+            scope = ?scope,
+            "no enabled providers in scope"
         );
         return Ok(SearchRunOutcome {
             search,
@@ -269,7 +334,13 @@ pub async fn run_search(state: &AppState, keys: SearchKeys) -> Result<SearchRunO
     // effect on the next search without a respawn.
     let persist_rejected = state.persist_rejected();
 
-    for (pr, result) in per_provider {
+    for fetch in per_provider {
+        let ProviderFetch {
+            provider: pr,
+            result,
+            duration,
+        } = fetch;
+        record_provider_metric(pool, &search.id, &pr, &result, duration).await;
         match result {
             Ok(releases) => {
                 debug!(
@@ -309,14 +380,15 @@ pub async fn run_search(state: &AppState, keys: SearchKeys) -> Result<SearchRunO
                     }
                 }
             }
-            Err(e) => {
+            Err(failure) => {
                 warn!(
                     target: "brarr_orchestrator::search",
                     provider = %pr.name,
-                    error = %e,
+                    error = %failure.message,
+                    timed_out = failure.timed_out,
                     "provider failed"
                 );
-                failures.push((pr.name.clone(), e));
+                failures.push((pr.name.clone(), failure.message));
             }
         }
     }
@@ -348,46 +420,121 @@ pub async fn run_search(state: &AppState, keys: SearchKeys) -> Result<SearchRunO
     })
 }
 
+/// One provider's dispatch result within a fan-out, with wall-clock
+/// timing. The duration covers client build + the (budgeted) upstream
+/// call, i.e. how long this provider actually held the search open.
+struct ProviderFetch {
+    provider: ProviderRow,
+    result: Result<Vec<Release>, DispatchFailure>,
+    duration: Duration,
+}
+
+/// A failed dispatch: the message surfaced to the UI plus whether the
+/// failure was a [`PER_PROVIDER_BUDGET`] overrun (recorded as a
+/// `timeout` in `provider_metrics`, vs a plain `error`).
+struct DispatchFailure {
+    message: String,
+    timed_out: bool,
+}
+
+impl DispatchFailure {
+    fn error(message: String) -> Self {
+        Self {
+            message,
+            timed_out: false,
+        }
+    }
+}
+
 async fn fan_out(
     wasm_engine: &WasmEngine,
     ticker: &WasmEpochTicker,
     clients: &ProviderClientCache,
     providers: &[ProviderRow],
     keys: &SearchKeys,
-) -> Vec<(ProviderRow, Result<Vec<Release>, String>)> {
+) -> Vec<ProviderFetch> {
     let wasm_engine = wasm_engine.clone();
     let futures = providers.iter().cloned().map(|pr| {
         let wasm_engine = wasm_engine.clone();
         let keys = keys.clone();
         async move {
-            let client = match build_provider(&wasm_engine, ticker, clients, &pr).await {
-                Ok(p) => p,
-                Err(e) => return (pr, Err(e)),
+            let started = Instant::now();
+            let result = match build_provider(&wasm_engine, ticker, clients, &pr).await {
+                Ok(client) => {
+                    with_budget(
+                        PER_PROVIDER_BUDGET,
+                        dispatch_search(&pr, client.as_ref(), &keys),
+                    )
+                    .await
+                }
+                Err(e) => Err(DispatchFailure::error(e)),
             };
-            let result = with_budget(
-                PER_PROVIDER_BUDGET,
-                dispatch_search(&pr, client.as_ref(), &keys),
-            )
-            .await;
-            (pr, result)
+            ProviderFetch {
+                provider: pr,
+                result,
+                duration: started.elapsed(),
+            }
         }
     });
     join_all(futures).await
 }
 
 /// Run `fut` (one provider's axis dispatch) under a wall-clock `budget`,
-/// folding both a provider error and a budget overrun into the `String`
-/// failure the fan-out collects. On overrun the future is dropped, so a
-/// stalled upstream stops consuming the fan-out's wall-clock instead of
-/// holding the whole search open for its own (much longer) HTTP timeout
-/// and retry budget.
-async fn with_budget<F>(budget: Duration, fut: F) -> Result<Vec<Release>, String>
+/// folding both a provider error and a budget overrun into the
+/// [`DispatchFailure`] the fan-out collects. On overrun the future is
+/// dropped, so a stalled upstream stops consuming the fan-out's
+/// wall-clock instead of holding the whole search open for its own
+/// (much longer) HTTP timeout and retry budget.
+async fn with_budget<F>(budget: Duration, fut: F) -> Result<Vec<Release>, DispatchFailure>
 where
     F: std::future::Future<Output = Result<Vec<Release>, brarr_core::ProviderError>>,
 {
     match tokio::time::timeout(budget, fut).await {
-        Ok(result) => result.map_err(|e| e.to_string()),
-        Err(_) => Err(format!("timed out after {}s", budget.as_secs())),
+        Ok(result) => result.map_err(|e| DispatchFailure::error(e.to_string())),
+        Err(_) => Err(DispatchFailure {
+            message: format!("timed out after {}s", budget.as_secs()),
+            timed_out: true,
+        }),
+    }
+}
+
+/// Persist one provider dispatch measurement. Best-effort: a metrics
+/// insert failure is logged and swallowed — observability must never
+/// fail a search.
+async fn record_provider_metric(
+    pool: &crate::db::Pool,
+    search_id: &Uuid,
+    pr: &ProviderRow,
+    result: &Result<Vec<Release>, DispatchFailure>,
+    duration: Duration,
+) {
+    use crate::db::metrics::{ProviderMetricInsert, ProviderOutcome, insert_provider_metric};
+    let (outcome, error, release_count) = match result {
+        Ok(releases) => (
+            ProviderOutcome::Ok,
+            None,
+            u32::try_from(releases.len()).unwrap_or(u32::MAX),
+        ),
+        Err(f) if f.timed_out => (ProviderOutcome::Timeout, Some(f.message.clone()), 0),
+        Err(f) => (ProviderOutcome::Error, Some(f.message.clone()), 0),
+    };
+    let metric = ProviderMetricInsert {
+        search_id: Some(*search_id),
+        provider_id: Some(pr.id),
+        provider_name: pr.name.clone(),
+        provider_kind: pr.kind.clone(),
+        outcome,
+        error,
+        duration_ms: u64::try_from(duration.as_millis()).unwrap_or(u64::MAX),
+        release_count,
+    };
+    if let Err(e) = insert_provider_metric(pool, metric).await {
+        warn!(
+            target: "brarr_orchestrator::search",
+            provider = %pr.name,
+            error = %e,
+            "failed to persist provider metric"
+        );
     }
 }
 
@@ -574,9 +721,12 @@ mod tests {
 
     use std::time::Duration;
 
-    use super::{persistence_verdict, run_tmdb_search, with_budget};
+    use super::{
+        ProviderScope, SearchKeys, persistence_verdict, run_search_cached, run_search_scoped,
+        run_tmdb_search, with_budget,
+    };
     use crate::AppState;
-    use crate::db::open_memory;
+    use crate::db::{open_memory, providers};
     use brarr_core::{ProviderError, Release, TmdbId};
     use brarr_decision_service::Engine;
 
@@ -637,7 +787,8 @@ mod tests {
         })
         .await;
         let err = res.expect_err("slow future must hit the budget");
-        assert!(err.contains("timed out"), "got: {err}");
+        assert!(err.timed_out);
+        assert!(err.message.contains("timed out"), "got: {}", err.message);
     }
 
     #[tokio::test]
@@ -647,7 +798,115 @@ mod tests {
         })
         .await;
         let err = res.expect_err("provider error must surface");
-        assert!(err.contains("boom"), "got: {err}");
+        assert!(!err.timed_out);
+        assert!(err.message.contains("boom"), "got: {}", err.message);
+    }
+
+    #[test]
+    fn scope_includes_maps_kinds_to_protocol_side() {
+        // Torrent side: everything that is not newznab.
+        assert!(ProviderScope::Torrent.includes("unit3d"));
+        assert!(ProviderScope::Torrent.includes("torznab"));
+        assert!(ProviderScope::Torrent.includes("plugin"));
+        assert!(!ProviderScope::Torrent.includes("newznab"));
+        assert!(!ProviderScope::Torrent.includes("NEWZNAB"));
+        // Usenet side: newznab only.
+        assert!(ProviderScope::Usenet.includes("newznab"));
+        assert!(ProviderScope::Usenet.includes("Newznab"));
+        assert!(!ProviderScope::Usenet.includes("unit3d"));
+        assert!(!ProviderScope::Usenet.includes("torznab"));
+        // All includes both sides.
+        assert!(ProviderScope::All.includes("unit3d"));
+        assert!(ProviderScope::All.includes("newznab"));
+    }
+
+    /// Seed one unreachable provider of each protocol side. Port 9 on
+    /// localhost is unassigned, so dispatches fail fast with a
+    /// connection error instead of consuming the per-provider budget.
+    async fn seed_unreachable_providers(pool: &crate::db::Pool) {
+        let base = url::Url::parse("http://127.0.0.1:9/").unwrap();
+        for (name, kind) in [("torrent-side", "unit3d"), ("usenet-side", "newznab")] {
+            providers::insert(
+                pool,
+                providers::NewProvider {
+                    name,
+                    base_url: &base,
+                    api_token: "t",
+                    kind,
+                    plugin_path: None,
+                },
+            )
+            .await
+            .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn scoped_search_only_dispatches_matching_providers() {
+        let pool = open_memory().await.unwrap();
+        let state = AppState::new(pool.clone(), Engine::baseline());
+        seed_unreachable_providers(&pool).await;
+
+        let keys = SearchKeys::from_tmdb(TmdbId::new(603).unwrap());
+        let outcome = run_search_scoped(&state, keys.clone(), ProviderScope::Torrent)
+            .await
+            .unwrap();
+        // Only the unit3d provider was dispatched (and failed fast).
+        assert_eq!(outcome.failures.len(), 1);
+        assert_eq!(outcome.failures[0].0, "torrent-side");
+
+        let outcome = run_search_scoped(&state, keys.clone(), ProviderScope::Usenet)
+            .await
+            .unwrap();
+        assert_eq!(outcome.failures.len(), 1);
+        assert_eq!(outcome.failures[0].0, "usenet-side");
+
+        let outcome = run_search_scoped(&state, keys, ProviderScope::All)
+            .await
+            .unwrap();
+        assert_eq!(outcome.failures.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn scoped_search_records_provider_metrics() {
+        let pool = open_memory().await.unwrap();
+        let state = AppState::new(pool.clone(), Engine::baseline());
+        seed_unreachable_providers(&pool).await;
+
+        let keys = SearchKeys::from_tmdb(TmdbId::new(603).unwrap());
+        run_search_scoped(&state, keys, ProviderScope::Torrent)
+            .await
+            .unwrap();
+
+        let recorded = crate::db::metrics::provider_stats(&pool, 0).await.unwrap();
+        assert_eq!(recorded.len(), 1, "only the in-scope provider is measured");
+        assert_eq!(recorded[0].provider_name, "torrent-side");
+        assert_eq!(recorded[0].total, 1);
+        assert_eq!(recorded[0].errors, 1);
+        assert!(recorded[0].last_error.is_some());
+    }
+
+    #[tokio::test]
+    async fn cached_search_is_keyed_by_scope() {
+        let pool = open_memory().await.unwrap();
+        let state = AppState::new(pool, Engine::baseline());
+        let keys = SearchKeys::from_tmdb(TmdbId::new(603).unwrap());
+
+        let (_, hit) = run_search_cached(&state, keys.clone(), ProviderScope::Torrent)
+            .await
+            .unwrap();
+        assert!(!hit, "first torrent-scoped search is a miss");
+        let (_, hit) = run_search_cached(&state, keys.clone(), ProviderScope::Torrent)
+            .await
+            .unwrap();
+        assert!(hit, "identical torrent-scoped search hits the cache");
+        let (_, hit) = run_search_cached(&state, keys, ProviderScope::Usenet)
+            .await
+            .unwrap();
+        assert!(
+            !hit,
+            "same keys under another scope must not share the entry"
+        );
     }
 
     #[tokio::test]
