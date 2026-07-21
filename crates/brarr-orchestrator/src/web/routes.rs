@@ -945,7 +945,8 @@ async fn health_index(State(state): State<AppState>) -> Result<Response, AppErro
         .into_iter()
         .map(|r| EndpointRequestView {
             recorded_at: format_ts(r.recorded_at),
-            ok: (200..300).contains(&r.status),
+            // Redirects (3xx) are the download proxy's success path.
+            ok: r.status < 400,
             endpoint: r.endpoint,
             function: r.function,
             status: r.status,

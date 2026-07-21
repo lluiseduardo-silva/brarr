@@ -302,7 +302,7 @@ pub struct EndpointHealthView {
     pub function: String,
     /// Total requests in the window.
     pub total: u64,
-    /// Requests answered non-2xx.
+    /// Requests answered 4xx/5xx (3xx redirects are successes).
     pub errors: u64,
     /// Search requests absorbed by the TTL cache.
     pub cache_hits: u64,
@@ -331,7 +331,8 @@ pub struct EndpointRequestView {
     pub function: String,
     /// HTTP status returned.
     pub status: u16,
-    /// `true` for 2xx — drives the status badge color.
+    /// `true` for 2xx/3xx (redirects are the download proxy's success
+    /// path) — drives the status badge color.
     pub ok: bool,
     /// Handler latency (ms).
     pub duration_ms: u64,

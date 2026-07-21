@@ -173,7 +173,8 @@ pub struct EndpointStats {
     pub function: String,
     /// Total requests in the window.
     pub total: u64,
-    /// Requests answered with a non-2xx status.
+    /// Requests answered with a 4xx/5xx status. Redirects (3xx) are the
+    /// download proxy's success path and don't count.
     pub errors: u64,
     /// Search requests absorbed by the TTL cache.
     pub cache_hits: u64,
@@ -314,7 +315,11 @@ pub async fn endpoint_stats(pool: &Pool, since_unix: i64) -> Result<Vec<Endpoint
         let cache: Option<String> = row.try_get("cache")?;
         let acc = by_key.entry((endpoint, function)).or_default();
         acc.durations.push(u64::try_from(duration).unwrap_or(0));
-        if !(200..300).contains(&status) {
+        // 3xx is a success on this surface: the newznab/torznab download
+        // proxy answers with a redirect to the upstream indexer by
+        // design (the apikey travels in the redirected URL). Only
+        // 4xx/5xx count as failures.
+        if status >= 400 {
             acc.errors += 1;
         }
         match cache.as_deref() {
@@ -559,11 +564,38 @@ mod tests {
         // BTreeMap ordering: newznab < torznab.
         assert_eq!(stats[0].endpoint, "newznab");
         assert_eq!(stats[0].errors, 1);
+        assert_eq!(stats[1].errors, 0);
         assert_eq!(stats[1].endpoint, "torznab");
         assert_eq!(stats[1].total, 2);
         assert_eq!(stats[1].cache_hits, 1);
         assert_eq!(stats[1].cache_misses, 1);
         assert_eq!(stats[1].max_ms, 900);
+    }
+
+    #[tokio::test]
+    async fn download_redirect_is_not_counted_as_error() {
+        // Regression: the newznab/torznab download proxy answers 307 to
+        // hand the *arr client the upstream URL — that's the success
+        // path, not a failure. Only 4xx/5xx may count as errors.
+        let pool = open_memory().await.unwrap();
+        for status in [307_u16, 302, 200, 404] {
+            insert_endpoint_metric(
+                &pool,
+                EndpointMetricInsert {
+                    endpoint: "newznab",
+                    function: "download".to_string(),
+                    status,
+                    duration_ms: 1,
+                    cache_hit: None,
+                },
+            )
+            .await
+            .unwrap();
+        }
+        let stats = endpoint_stats(&pool, 0).await.unwrap();
+        assert_eq!(stats.len(), 1);
+        assert_eq!(stats[0].total, 4);
+        assert_eq!(stats[0].errors, 1, "only the 404 is an error");
     }
 
     #[tokio::test]
