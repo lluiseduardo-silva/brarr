@@ -1,0 +1,177 @@
+{% extends "base.html" %}
+{% block title %}Saúde · brarr{% endblock %}
+{% block content %}
+
+<section class="mb-6">
+    <h1 class="text-2xl font-semibold text-fg-primary mb-1">Saúde</h1>
+    <p class="text-sm text-fg-secondary">
+        Desempenho das APIs externas (providers) e dos endpoints
+        <span class="font-mono">/torznab</span> / <span class="font-mono">/newznab</span>
+        nas últimas {{ window_hours }}h. Use o p95 para enxergar inconsistência:
+        média baixa com p95 alto significa que <em>algumas</em> chamadas travam.
+    </p>
+</section>
+
+<section class="mb-8">
+    <h2 class="text-lg font-semibold text-fg-primary mb-3">Providers (fan-out de busca)</h2>
+    {% if providers.is_empty() %}
+    <div class="card-hairline bg-bg-surface border border-border-default rounded-xl p-8 text-center">
+        <p class="text-sm text-fg-secondary">
+            Nenhuma métrica de provider ainda. Rode uma busca (admin, poller ou via *arr)
+            e cada despacho aparece aqui com duração e resultado.
+        </p>
+    </div>
+    {% else %}
+    <div class="card-hairline bg-bg-surface border border-border-default rounded-xl overflow-x-auto">
+        <table class="w-full text-sm">
+            <thead>
+                <tr class="text-left bg-bg-muted">
+                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Provider</th>
+                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted text-right">Chamadas</th>
+                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted text-right">OK / Erro / Timeout</th>
+                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted text-right">Média</th>
+                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted text-right">p50</th>
+                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted text-right">p95</th>
+                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted text-right">Máx</th>
+                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted text-right">Releases</th>
+                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Último erro</th>
+                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Visto por último</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for p in providers %}
+                <tr class="border-t border-border-default align-top">
+                    <td class="px-4 py-3 whitespace-nowrap">
+                        {% if p.healthy %}
+                        <span class="inline-block w-2 h-2 rounded-full bg-success-solid mr-1.5" title="sem erros na janela"></span>
+                        {% else %}
+                        <span class="inline-block w-2 h-2 rounded-full bg-danger-solid mr-1.5" title="houve erros/timeouts na janela"></span>
+                        {% endif %}
+                        <span class="text-fg-primary">{{ p.name }}</span>
+                        <span class="ml-1.5 px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase tracking-[0.06em] bg-bg-muted text-fg-secondary">{{ p.kind }}</span>
+                    </td>
+                    <td class="px-4 py-3 text-right font-mono text-xs">{{ p.total }}</td>
+                    <td class="px-4 py-3 text-right font-mono text-xs whitespace-nowrap">
+                        <span class="text-success-soft-fg">{{ p.ok }}</span> /
+                        <span class="{% if p.errors > 0 %}text-danger-soft-fg{% else %}text-fg-muted{% endif %}">{{ p.errors }}</span> /
+                        <span class="{% if p.timeouts > 0 %}text-warning-soft-fg{% else %}text-fg-muted{% endif %}">{{ p.timeouts }}</span>
+                    </td>
+                    <td class="px-4 py-3 text-right font-mono text-xs whitespace-nowrap">{{ p.avg_ms }} ms</td>
+                    <td class="px-4 py-3 text-right font-mono text-xs whitespace-nowrap">{{ p.p50_ms }} ms</td>
+                    <td class="px-4 py-3 text-right font-mono text-xs whitespace-nowrap">{{ p.p95_ms }} ms</td>
+                    <td class="px-4 py-3 text-right font-mono text-xs whitespace-nowrap">{{ p.max_ms }} ms</td>
+                    <td class="px-4 py-3 text-right font-mono text-xs">{{ p.releases }}</td>
+                    <td class="px-4 py-3 max-w-xs">
+                        {% if let Some(err) = p.last_error %}
+                        <span class="text-xs text-danger-soft-fg break-all">{{ err }}</span>
+                        {% else %}
+                        <span class="text-fg-muted text-xs">—</span>
+                        {% endif %}
+                    </td>
+                    <td class="px-4 py-3 whitespace-nowrap">
+                        <time class="text-xs text-fg-secondary font-mono"
+                              data-datetime="{{ p.last_seen }}" data-datetime-style="short">{{ p.last_seen }}</time>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+</section>
+
+<section class="mb-8">
+    <h2 class="text-lg font-semibold text-fg-primary mb-3">Endpoints torznab/newznab</h2>
+    {% if endpoints.is_empty() %}
+    <div class="card-hairline bg-bg-surface border border-border-default rounded-xl p-8 text-center">
+        <p class="text-sm text-fg-secondary">
+            Nenhuma requisição do Sonarr/Radarr registrada ainda.
+        </p>
+    </div>
+    {% else %}
+    <div class="card-hairline bg-bg-surface border border-border-default rounded-xl overflow-x-auto">
+        <table class="w-full text-sm">
+            <thead>
+                <tr class="text-left bg-bg-muted">
+                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Endpoint</th>
+                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Função</th>
+                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted text-right">Requisições</th>
+                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted text-right">Erros</th>
+                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted text-right">Cache (hit/miss)</th>
+                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted text-right">Média</th>
+                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted text-right">p50</th>
+                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted text-right">p95</th>
+                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted text-right">Máx</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for e in endpoints %}
+                <tr class="border-t border-border-default">
+                    <td class="px-4 py-3 font-mono text-xs">/{{ e.endpoint }}</td>
+                    <td class="px-4 py-3">
+                        <span class="px-2 py-0.5 rounded text-[11px] font-medium bg-accent-soft text-accent-soft-fg">{{ e.function }}</span>
+                    </td>
+                    <td class="px-4 py-3 text-right font-mono text-xs">{{ e.total }}</td>
+                    <td class="px-4 py-3 text-right font-mono text-xs {% if e.errors > 0 %}text-danger-soft-fg{% endif %}">{{ e.errors }}</td>
+                    <td class="px-4 py-3 text-right font-mono text-xs whitespace-nowrap">
+                        {% if e.cache_hits + e.cache_misses > 0 %}
+                        {{ e.cache_hits }} / {{ e.cache_misses }}
+                        <span class="text-fg-muted">({{ e.hit_rate_pct }}%)</span>
+                        {% else %}
+                        <span class="text-fg-muted">—</span>
+                        {% endif %}
+                    </td>
+                    <td class="px-4 py-3 text-right font-mono text-xs whitespace-nowrap">{{ e.avg_ms }} ms</td>
+                    <td class="px-4 py-3 text-right font-mono text-xs whitespace-nowrap">{{ e.p50_ms }} ms</td>
+                    <td class="px-4 py-3 text-right font-mono text-xs whitespace-nowrap">{{ e.p95_ms }} ms</td>
+                    <td class="px-4 py-3 text-right font-mono text-xs whitespace-nowrap">{{ e.max_ms }} ms</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+</section>
+
+<section class="mb-8">
+    <h2 class="text-lg font-semibold text-fg-primary mb-3">Requisições recentes</h2>
+    {% if recent.is_empty() %}
+    <div class="card-hairline bg-bg-surface border border-border-default rounded-xl p-8 text-center">
+        <p class="text-sm text-fg-secondary">Nada registrado ainda.</p>
+    </div>
+    {% else %}
+    <div class="card-hairline bg-bg-surface border border-border-default rounded-xl overflow-x-auto">
+        <table class="w-full text-sm">
+            <thead>
+                <tr class="text-left bg-bg-muted">
+                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Quando</th>
+                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Endpoint</th>
+                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Função</th>
+                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted text-right">Status</th>
+                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted text-right">Duração</th>
+                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted text-right">Cache</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for r in recent %}
+                <tr class="border-t border-border-default">
+                    <td class="px-4 py-3 whitespace-nowrap">
+                        <time class="text-xs text-fg-secondary font-mono"
+                              data-datetime="{{ r.recorded_at }}" data-datetime-style="short">{{ r.recorded_at }}</time>
+                    </td>
+                    <td class="px-4 py-3 font-mono text-xs">/{{ r.endpoint }}</td>
+                    <td class="px-4 py-3">
+                        <span class="px-2 py-0.5 rounded text-[11px] font-medium bg-accent-soft text-accent-soft-fg">{{ r.function }}</span>
+                    </td>
+                    <td class="px-4 py-3 text-right font-mono text-xs {% if r.ok %}text-success-soft-fg{% else %}text-danger-soft-fg{% endif %}">{{ r.status }}</td>
+                    <td class="px-4 py-3 text-right font-mono text-xs whitespace-nowrap">{{ r.duration_ms }} ms</td>
+                    <td class="px-4 py-3 text-right font-mono text-xs text-fg-secondary">{{ r.cache }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+</section>
+
+{% endblock %}

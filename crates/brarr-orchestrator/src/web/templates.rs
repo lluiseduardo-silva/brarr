@@ -244,6 +244,101 @@ pub struct WebhookEventView {
     pub payload_preview: String,
 }
 
+/// `/health` view — provider fan-out health and Torznab/Newznab
+/// endpoint latency aggregates over a rolling window.
+#[derive(Debug, Template)]
+#[template(path = "health.html")]
+pub struct HealthTemplate {
+    /// Aggregation window in hours (currently fixed at 24).
+    pub window_hours: u32,
+    /// Per-provider aggregates, sorted by name.
+    pub providers: Vec<ProviderHealthView>,
+    /// Per-endpoint-function aggregates, sorted by (endpoint, function).
+    pub endpoints: Vec<EndpointHealthView>,
+    /// Most recent endpoint requests, newest first.
+    pub recent: Vec<EndpointRequestView>,
+}
+
+/// One row in the provider-health table.
+#[derive(Debug)]
+pub struct ProviderHealthView {
+    /// Provider display name.
+    pub name: String,
+    /// `unit3d` / `newznab` / `torznab` / `plugin`.
+    pub kind: String,
+    /// Total dispatches in the window.
+    pub total: u64,
+    /// Successful dispatches.
+    pub ok: u64,
+    /// Errored dispatches.
+    pub errors: u64,
+    /// Budget-overrun dispatches.
+    pub timeouts: u64,
+    /// Mean dispatch duration (ms).
+    pub avg_ms: u64,
+    /// Median dispatch duration (ms).
+    pub p50_ms: u64,
+    /// 95th-percentile dispatch duration (ms) — the inconsistency signal.
+    pub p95_ms: u64,
+    /// Worst dispatch duration (ms).
+    pub max_ms: u64,
+    /// Total releases returned in the window.
+    pub releases: u64,
+    /// Most recent error text, when any dispatch failed.
+    pub last_error: Option<String>,
+    /// Timestamp of the latest sample (ISO-8601; reformatted
+    /// client-side by `datetime.js`).
+    pub last_seen: String,
+    /// `true` when the window has no errors/timeouts — drives the badge.
+    pub healthy: bool,
+}
+
+/// One row in the endpoint-latency table.
+#[derive(Debug)]
+pub struct EndpointHealthView {
+    /// `torznab` / `newznab`.
+    pub endpoint: String,
+    /// `caps` / `movie` / `tvsearch` / `search` / `download`.
+    pub function: String,
+    /// Total requests in the window.
+    pub total: u64,
+    /// Requests answered non-2xx.
+    pub errors: u64,
+    /// Search requests absorbed by the TTL cache.
+    pub cache_hits: u64,
+    /// Search requests that ran a full fan-out.
+    pub cache_misses: u64,
+    /// `100 * hits / (hits + misses)`; 0 when no search ran.
+    pub hit_rate_pct: u32,
+    /// Mean latency (ms).
+    pub avg_ms: u64,
+    /// Median latency (ms).
+    pub p50_ms: u64,
+    /// 95th-percentile latency (ms).
+    pub p95_ms: u64,
+    /// Worst latency (ms).
+    pub max_ms: u64,
+}
+
+/// One row in the recent-requests table.
+#[derive(Debug)]
+pub struct EndpointRequestView {
+    /// Request timestamp (ISO-8601; reformatted client-side).
+    pub recorded_at: String,
+    /// `torznab` / `newznab`.
+    pub endpoint: String,
+    /// `t=` function or `download`.
+    pub function: String,
+    /// HTTP status returned.
+    pub status: u16,
+    /// `true` for 2xx — drives the status badge color.
+    pub ok: bool,
+    /// Handler latency (ms).
+    pub duration_ms: u64,
+    /// `"hit"` / `"miss"` / `"—"` (non-search).
+    pub cache: String,
+}
+
 /// `/pushes` view — recent push attempts grouped by release + *arr.
 #[derive(Debug, Template)]
 #[template(path = "pushes.html")]

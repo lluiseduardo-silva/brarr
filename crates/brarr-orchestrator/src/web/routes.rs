@@ -49,12 +49,13 @@ use crate::search::run_tmdb_search;
 use crate::web::render::html;
 use crate::web::templates::{
     ArrInstanceView, ArrInstancesListPartial, ArrInstancesTemplate, DashboardTemplate,
-    DecisionView, EditArrInstanceModalPartial, EditProviderModalPartial, ErrorTemplate,
-    LoginTemplate, NewProfileModalPartial, NewSearchModalPartial, ProfileEditorTemplate,
-    ProfileView, ProfilesTemplate, ProviderView, ProvidersListPartial, ProvidersTemplate,
-    PushGroupView, PushHistoryView, PushesFilterView, PushesTemplate, RecentSearchView,
-    ReleasesTemplate, SearchDetailTemplate, SearchesFilterView, SearchesIndexTemplate,
-    SettingsFlash, SettingsTemplate, SettingsValues, WebhookEventView, WebhooksTemplate,
+    DecisionView, EditArrInstanceModalPartial, EditProviderModalPartial, EndpointHealthView,
+    EndpointRequestView, ErrorTemplate, HealthTemplate, LoginTemplate, NewProfileModalPartial,
+    NewSearchModalPartial, ProfileEditorTemplate, ProfileView, ProfilesTemplate,
+    ProviderHealthView, ProviderView, ProvidersListPartial, ProvidersTemplate, PushGroupView,
+    PushHistoryView, PushesFilterView, PushesTemplate, RecentSearchView, ReleasesTemplate,
+    SearchDetailTemplate, SearchesFilterView, SearchesIndexTemplate, SettingsFlash,
+    SettingsTemplate, SettingsValues, WebhookEventView, WebhooksTemplate,
 };
 use crate::{AppError, AppState};
 use brarr_core::TmdbId;
@@ -110,6 +111,7 @@ pub fn router(state: AppState, static_dir: &std::path::Path) -> Router {
         .route("/searches/new", get(new_search_modal))
         .route("/searches/{id}", get(search_detail))
         .route("/webhooks", get(webhooks_index))
+        .route("/health", get(health_index))
         .route("/settings", get(settings_index))
         .route("/settings/general", post(settings_general))
         .route("/settings/token", post(settings_token))
@@ -879,6 +881,89 @@ async fn webhooks_index(State(state): State<AppState>) -> Result<Response, AppEr
         })
         .collect();
     html(&WebhooksTemplate { events: views })
+}
+
+/// `GET /health` — provider fan-out health + Torznab/Newznab endpoint
+/// latency over the last 24h. Answers "which upstream API is the
+/// bottleneck" (per-provider p95/timeouts) and "is the slowness in
+/// brarr's endpoints or in the trackers" (endpoint latency vs provider
+/// latency, cache hit rate).
+async fn health_index(State(state): State<AppState>) -> Result<Response, AppError> {
+    const WINDOW_HOURS: u32 = 24;
+    let pool = state.pool();
+    let since = OffsetDateTime::now_utc().unix_timestamp() - i64::from(WINDOW_HOURS) * 3600;
+
+    let providers = crate::db::metrics::provider_stats(pool, since)
+        .await?
+        .into_iter()
+        .map(|s| ProviderHealthView {
+            healthy: s.errors == 0 && s.timeouts == 0,
+            name: s.provider_name,
+            kind: s.provider_kind,
+            total: s.total,
+            ok: s.ok,
+            errors: s.errors,
+            timeouts: s.timeouts,
+            avg_ms: s.avg_ms,
+            p50_ms: s.p50_ms,
+            p95_ms: s.p95_ms,
+            max_ms: s.max_ms,
+            releases: s.releases,
+            last_error: s.last_error,
+            last_seen: OffsetDateTime::from_unix_timestamp(s.last_seen_unix)
+                .map(format_ts)
+                .unwrap_or_default(),
+        })
+        .collect();
+
+    let endpoints = crate::db::metrics::endpoint_stats(pool, since)
+        .await?
+        .into_iter()
+        .map(|s| {
+            let searches = s.cache_hits + s.cache_misses;
+            EndpointHealthView {
+                hit_rate_pct: (s.cache_hits * 100)
+                    .checked_div(searches)
+                    .and_then(|pct| u32::try_from(pct).ok())
+                    .unwrap_or(0),
+                endpoint: s.endpoint,
+                function: s.function,
+                total: s.total,
+                errors: s.errors,
+                cache_hits: s.cache_hits,
+                cache_misses: s.cache_misses,
+                avg_ms: s.avg_ms,
+                p50_ms: s.p50_ms,
+                p95_ms: s.p95_ms,
+                max_ms: s.max_ms,
+            }
+        })
+        .collect();
+
+    let recent = crate::db::metrics::recent_endpoint_requests(pool, 30)
+        .await?
+        .into_iter()
+        .map(|r| EndpointRequestView {
+            recorded_at: format_ts(r.recorded_at),
+            ok: (200..300).contains(&r.status),
+            endpoint: r.endpoint,
+            function: r.function,
+            status: r.status,
+            duration_ms: r.duration_ms,
+            cache: match r.cache_hit {
+                Some(true) => "hit".to_string(),
+                Some(false) => "miss".to_string(),
+                None => "—".to_string(),
+            },
+        })
+        .collect();
+
+    html(&HealthTemplate {
+        window_hours: WINDOW_HOURS,
+        providers,
+        endpoints,
+        recent,
+    })
 }
 
 /// Clamp a webhook payload to a bounded preview for the expandable
@@ -2195,8 +2280,8 @@ async fn settings_maintenance_prune(State(state): State<AppState>) -> Result<Res
         "Retenção desativada (0 dias) — nada podado.".to_string()
     } else {
         format!(
-            "Poda concluída: {} decisão(ões) e {} busca(s) removidas (janela de {days} dia(s)).",
-            outcome.decisions_deleted, outcome.searches_deleted
+            "Poda concluída: {} decisão(ões), {} busca(s) e {} métrica(s) removidas (janela de {days} dia(s)).",
+            outcome.decisions_deleted, outcome.searches_deleted, outcome.metrics_deleted
         )
     };
     settings_flash_render(
