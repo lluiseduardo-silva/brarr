@@ -35,6 +35,13 @@ pub enum AppError {
     #[error("tracker error: {0}")]
     Tracker(#[from] brarr_tracker_unit3d::ClientError),
 
+    /// TMDB metadata client error. Deliberately **not** `#[from]`: the
+    /// conversion in `tmdb_sync` peels off 401 and 404 first so the
+    /// operator gets "check the read access token" instead of a bare
+    /// HTTP status, and only the rest lands here.
+    #[error("tmdb error: {0}")]
+    Tmdb(#[source] brarr_tmdb::TmdbError),
+
     /// Configuration/parse error (URL, etc.).
     #[error("invalid input: {0}")]
     InvalidInput(String),

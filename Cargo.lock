@@ -436,6 +436,7 @@ dependencies = [
  "brarr-core",
  "brarr-decision-service",
  "brarr-plugin-host",
+ "brarr-tmdb",
  "brarr-tracker-newznab",
  "brarr-tracker-unit3d",
  "futures",

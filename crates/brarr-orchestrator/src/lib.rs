@@ -60,6 +60,7 @@ pub mod provider_cache;
 pub mod push;
 pub mod search;
 pub mod state;
+pub mod tmdb_sync;
 pub mod ttl_cache;
 pub mod web;
 

@@ -33,6 +33,19 @@ pub const KEY_DECISIONS_RETENTION_DAYS: &str = "decisions_retention_days";
 /// rejects; empty / `0` ⇒ drop universally-rejected releases (default).
 /// Replaces `BRARR_PERSIST_REJECTED`.
 pub const KEY_PERSIST_REJECTED: &str = "persist_rejected";
+/// TMDB **v4 read access token** (replaces `BRARR_TMDB_TOKEN`). Not the
+/// v3 API key: that is a different string from the same account page and
+/// is sent as a query parameter, so passing it here yields a 401.
+pub const KEY_TMDB_TOKEN: &str = "tmdb_token";
+/// Metadata language for TMDB calls. Default `pt-BR`.
+pub const KEY_TMDB_LANGUAGE: &str = "tmdb_language";
+/// Country used to resolve per-country release dates. Default `BR`.
+pub const KEY_TMDB_COUNTRY: &str = "tmdb_country";
+/// How stale a library item's metadata may get before the sweep
+/// refreshes it. Default 30 days; the TMDB terms cap caching at six
+/// months, so values above ~180 are not legitimate.
+pub const KEY_TMDB_TTL_DAYS: &str = "tmdb_ttl_days";
+
 /// `tracing-subscriber` env filter (replaces `RUST_LOG`).
 pub const KEY_LOG_LEVEL: &str = "log_level";
 /// Backtrace mode — `0` / `1` / `full`. Restart required (workspace
