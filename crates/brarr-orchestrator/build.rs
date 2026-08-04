@@ -35,9 +35,9 @@ fn main() {
     println!("cargo:rerun-if-changed=proto/brarr.proto");
     println!("cargo:rerun-if-changed=build.rs");
 
-    // Askama compila os templates em build time, então mudanças em
-    // `templates/` precisam reconstruir o crate. Os assets estáticos
-    // (CSS/JS) são servidos de disco em runtime e não entram aqui —
-    // não há mais passo de compilação de CSS.
+    // Askama compiles templates at build time, so any change under
+    // `templates/` has to rebuild the crate. Static assets (CSS/JS) are
+    // served from disk at runtime and deliberately aren't listed here —
+    // there is no CSS compile step any more.
     println!("cargo:rerun-if-changed=templates");
 }

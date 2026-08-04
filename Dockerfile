@@ -40,8 +40,8 @@ ARG APP_UID=10001
 # ------------------------------------------------------------------
 # Stage 1 — build the workspace in release mode.
 #
-# Não há mais estágio de CSS: `static/app.css` é escrito à mão e
-# versionado, então entra na imagem junto com os outros assets.
+# No CSS stage any more: `static/app.css` is hand-authored and
+# committed, so it ships with the other static assets.
 # ------------------------------------------------------------------
 FROM rust:${RUST_VERSION}-slim-bookworm AS builder
 
@@ -101,7 +101,7 @@ RUN groupadd --system --gid ${APP_UID} brarr \
     && chown -R brarr:brarr /data /plugins /static
 
 # Static assets the orchestrator's `nest_service("/static", ...)` mounts.
-# CSS, JS e ícones são todos versionados no repo — nada é gerado em build.
+# CSS, JS and icons are all committed — nothing is generated at build time.
 COPY --chown=brarr:brarr crates/brarr-orchestrator/static /static
 
 # Binaries.

@@ -1,8 +1,8 @@
 //! Axum-based admin web UI.
 //!
 //! Server-side rendered with Askama templates and HTMX for partial
-//! updates. O CSS é artesanal e versionado em `static/app.css` — não há
-//! pipeline de frontend nem passo de build.
+//! updates. CSS is hand-authored and committed at `static/app.css` —
+//! there is no frontend pipeline and no build step.
 
 pub mod ip;
 pub mod render;
