@@ -485,6 +485,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "brarr-tmdb"
+version = "0.1.6"
+dependencies = [
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "time",
+ "tokio",
+ "tracing",
+ "url",
+ "wiremock",
+]
+
+[[package]]
 name = "brarr-tracker-newznab"
 version = "0.1.6"
 dependencies = [
