@@ -45,8 +45,8 @@ want the inversion talk to brarr as a single virtual indexer.
 
 - **Rust** (workspace, MSRV 1.85, `edition = "2024"`).
 - **Axum** for HTTP, **tonic** for gRPC, **sqlx** + **SQLite** for state.
-- **Askama** + **HTMX** + **Tailwind v4** for the admin UI — server-
-  rendered, no SPA, no Node build pipeline at runtime.
+- **Askama** + **HTMX** for the admin UI with hand-authored CSS —
+  server-rendered, no SPA, no frontend build step at all.
 - **wasmtime** for the plugin sandbox (epoch-interrupted, capability-
   gated `host_fetch` with allowed-hosts allowlist).
 
@@ -125,10 +125,8 @@ push buttons and a warning alert listing any provider failures.
 
 #### Prerequisites
 
-- **Rust** 1.85+ (rustup recommended).
-- **Tailwind v4** standalone binary at `tools/tailwindcss.exe` (or
-  `tools/tailwindcss` on Linux). Install with
-  `scripts/install-tailwind.{ps1,sh}`.
+- **Rust** 1.85+ (rustup recommended). That's it — the CSS is
+  hand-authored and committed, so there is no frontend toolchain.
 
 #### Run locally
 
@@ -136,13 +134,10 @@ push buttons and a warning alert listing any provider failures.
 # 1. Re-establish cargo PATH (Windows)
 $env:Path = "C:\Users\pc\.cargo\bin;$env:Path"
 
-# 2. Build the CSS bundle (runs Tailwind v4 → static/app.css)
-powershell -ExecutionPolicy Bypass -File scripts/build-css.ps1
-
-# 3. Optional: enable session auth
+# 2. Optional: enable session auth
 $env:BRARR_AUTH_TOKEN = "$(openssl rand -hex 32)"
 
-# 4. Run the orchestrator (HTTP + gRPC)
+# 3. Run the orchestrator (HTTP + gRPC)
 cargo run -p brarr-orchestrator
 # → http://127.0.0.1:3000  (admin UI)
 # → 127.0.0.1:50051         (gRPC)
@@ -205,8 +200,8 @@ All four pass on `master` with zero warnings.
 - ✅ **brarr-cli** — `brarr search` + `brarr remote` subcommands.
 - ✅ **brarr-decision-service** — declarative rules engine with
   serde-derived `RuleSet`.
-- ✅ **brarr-orchestrator** — Axum HTTP + tonic gRPC + Askama / HTMX /
-  Tailwind admin UI + SQLite. Auto-push pipeline + Torznab outbound
+- ✅ **brarr-orchestrator** — Axum HTTP + tonic gRPC + Askama / HTMX
+  admin UI + SQLite. Auto-push pipeline + Torznab outbound
   endpoint. Quality Profile editor with live preview.
 - ✅ **brarr-plugin-host** — wasmtime-backed sandbox for tracker
   plugins. Epoch-interrupted, capability-gated `host_fetch`.
@@ -248,7 +243,7 @@ quer a inversão falar com o brarr como indexer virtual único.
 
 - **Rust** (workspace, MSRV 1.85, `edition = "2024"`).
 - **Axum** para HTTP, **tonic** para gRPC, **sqlx** + **SQLite** para estado.
-- **Askama** + **HTMX** + **Tailwind v4** para UI admin — renderizada
+- **Askama** + **HTMX** para UI admin, com CSS artesanal — renderizada
   no servidor, sem SPA, sem pipeline Node em runtime.
 - **wasmtime** para sandbox de plugins (epoch-interrupted, `host_fetch`
   capability-gated com allowlist de hosts permitidos).
@@ -329,10 +324,8 @@ push por instância e alerta com falhas de provider se houver.
 
 #### Pré-requisitos
 
-- **Rust** 1.85+ (rustup recomendado).
-- Binário standalone do **Tailwind v4** em `tools/tailwindcss.exe`
-  (ou `tools/tailwindcss` no Linux). Instala com
-  `scripts/install-tailwind.{ps1,sh}`.
+- **Rust** 1.85+ (rustup recomendado). Só isso — o CSS é artesanal e
+  versionado, então não há toolchain de frontend.
 
 #### Rodar local
 
@@ -340,13 +333,10 @@ push por instância e alerta com falhas de provider se houver.
 # 1. Restabelece PATH do cargo (Windows)
 $env:Path = "C:\Users\pc\.cargo\bin;$env:Path"
 
-# 2. Builda o bundle CSS (roda Tailwind v4 → static/app.css)
-powershell -ExecutionPolicy Bypass -File scripts/build-css.ps1
-
-# 3. Opcional: habilita auth de sessão
+# 2. Opcional: habilita auth de sessão
 $env:BRARR_AUTH_TOKEN = "$(openssl rand -hex 32)"
 
-# 4. Roda o orchestrator (HTTP + gRPC)
+# 3. Roda o orchestrator (HTTP + gRPC)
 cargo run -p brarr-orchestrator
 # → http://127.0.0.1:3000  (UI admin)
 # → 127.0.0.1:50051         (gRPC)
@@ -410,7 +400,7 @@ Os quatro passam em `master` com zero warnings.
 - ✅ **brarr-decision-service** — motor de regras declarativas com
   `RuleSet` derivando serde.
 - ✅ **brarr-orchestrator** — HTTP Axum + gRPC tonic + UI admin Askama
-  / HTMX / Tailwind + SQLite. Pipeline de auto-push + endpoint Torznab
+  / HTMX + SQLite. Pipeline de auto-push + endpoint Torznab
   outbound. Editor de Quality Profile com preview ao vivo.
 - ✅ **brarr-plugin-host** — sandbox wasmtime para plugins de tracker.
   Epoch-interrupted, `host_fetch` capability-gated.

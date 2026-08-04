@@ -1,8 +1,8 @@
 //! Axum-based admin web UI.
 //!
 //! Server-side rendered with Askama templates and HTMX for partial
-//! updates. Tailwind ships via CDN per the project spec — no frontend
-//! build pipeline.
+//! updates. O CSS é artesanal e versionado em `static/app.css` — não há
+//! pipeline de frontend nem passo de build.
 
 pub mod ip;
 pub mod render;

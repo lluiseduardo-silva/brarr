@@ -83,7 +83,7 @@ permitir clientes externos.
 ### `brarr-orchestrator` (Fase 6+)
 - Servidor gRPC (via `tonic`) com o contrato consumido pelo CLI e por
   integrações.
-- UI web administrativa (Axum + Askama + HTMX, Tailwind via CDN no MVP,
+- UI web administrativa (Axum + Askama + HTMX, CSS artesanal versionado,
   build pipeline depois se justificar). Templates em
   `crates/brarr-orchestrator/templates/`. Assets estáticos via
   `tower_http::services::ServeDir`.

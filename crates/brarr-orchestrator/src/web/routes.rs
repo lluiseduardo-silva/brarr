@@ -708,7 +708,7 @@ async fn arr_instances_poll_now(
     let row = arr_instances::get_by_id(state.pool(), uuid).await?;
     let summary = crate::poll::run_once_for_instance(&state, &row).await?;
     let html_fragment = format!(
-        r#"<span id="arr-ping-{aid}" class="badge bg-blue-100 text-blue-800" title="searched {searched} of {considered} monitored movies; pushed {pushed}; {errors} search errors">{pushed} push / {searched} buscas</span>"#,
+        r#"<span id="arr-ping-{aid}" class="badge bg-info-soft text-info-soft-fg" title="searched {searched} of {considered} monitored movies; pushed {pushed}; {errors} search errors">{pushed} push / {searched} buscas</span>"#,
         aid = crate::web::templates::escape(&row.id.to_string()),
         searched = summary.searched,
         considered = summary.considered,

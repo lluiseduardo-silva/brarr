@@ -1,7 +1,7 @@
 //! `brarr-orchestrator` — long-running service that exposes the brarr
 //! pipeline over both gRPC (consumed by the CLI and external integrations)
-//! and a server-rendered admin web UI (Axum + Askama + HTMX, Tailwind via
-//! CDN per the project spec).
+//! and a server-rendered admin web UI (Axum + Askama + HTMX, com CSS
+//! artesanal versionado em `static/app.css` — sem passo de build).
 //!
 //! ## Layering
 //!
