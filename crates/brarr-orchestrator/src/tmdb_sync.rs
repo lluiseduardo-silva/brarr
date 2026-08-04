@@ -469,6 +469,42 @@ mod tests {
         assert!(matches!(err, AppError::InvalidInput(_)));
     }
 
+    /// End-to-end smoke test against the real TMDB. Ignored by default
+    /// because it needs a credential and network; run it with
+    ///
+    /// ```text
+    /// BRARR_TMDB_TOKEN=<key> cargo test -p brarr-orchestrator -- --ignored tmdb_live
+    /// ```
+    ///
+    /// Accepts either credential shape — the client detects whether it
+    /// holds a v4 read access token or a v3 API key.
+    #[tokio::test]
+    #[ignore = "hits the live TMDB API; needs BRARR_TMDB_TOKEN"]
+    async fn tmdb_live_add_movie_and_series() {
+        let pool = crate::db::open_memory().await.unwrap();
+        let tmdb = client(&pool)
+            .await
+            .expect("BRARR_TMDB_TOKEN must be set for the live test");
+
+        tmdb.verify_token().await.expect("credential must work");
+
+        let matrix = add_movie(&pool, &tmdb, 603).await.unwrap();
+        assert_eq!(matrix.tmdb_id, 603);
+        assert_eq!(matrix.imdb_id.as_deref(), Some("tt0133093"));
+        assert!(!matrix.title.is_empty());
+
+        let boys = add_series(&pool, &tmdb, 76_479).await.unwrap();
+        assert_eq!(boys.tvdb_id, Some(355_567));
+        let seasons = library::seasons(&pool, boys.id).await.unwrap();
+        let episodes = library::episodes(&pool, boys.id).await.unwrap();
+        assert!(seasons.len() >= 5, "got {} seasons", seasons.len());
+        assert!(
+            episodes.len() > 30,
+            "the whole episode tree should land, got {}",
+            episodes.len()
+        );
+    }
+
     #[tokio::test]
     async fn stale_lists_only_items_past_the_ttl() {
         let pool = crate::db::open_memory().await.unwrap();

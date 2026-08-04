@@ -210,7 +210,14 @@ where
 }
 
 /// Extract a release date of `kind` for the preferred country, falling
-/// back to US and then to whatever country reports one.
+/// back to US and then giving up.
+///
+/// Deliberately **no** "any country" fallback. The live data makes the
+/// reason concrete: The Matrix reports no digital date for BR or US, but
+/// does for AE (2016-01-07). A date from an unrelated market says nothing
+/// about when a release becomes findable here, and this value gates
+/// whether searching is worth attempting at all — a confident wrong
+/// answer is worse than `None`.
 fn release_date_of(
     dates: &dto::ReleaseDatesDto,
     preferred_country: &str,
@@ -228,16 +235,7 @@ fn release_date_of(
                     .and_then(|e| e.release_date)
             })
     };
-    find_in(preferred_country)
-        .or_else(|| find_in("US"))
-        .or_else(|| {
-            dates.results.iter().find_map(|c| {
-                c.release_dates
-                    .iter()
-                    .find(|e| e.kind == kind)
-                    .and_then(|e| e.release_date)
-            })
-        })
+    find_in(preferred_country).or_else(|| find_in("US"))
 }
 
 impl MovieSummary {
@@ -465,7 +463,7 @@ mod tests {
     }
 
     #[test]
-    fn falls_back_to_us_then_to_any_country() {
+    fn falls_back_to_us_and_then_stops() {
         // No FR block at all → US.
         assert_eq!(
             release_date_of(&release_dates(), "FR", TYPE_DIGITAL),
@@ -473,6 +471,22 @@ mod tests {
         );
         // Physical exists nowhere.
         assert_eq!(release_date_of(&release_dates(), "BR", TYPE_PHYSICAL), None);
+    }
+
+    #[test]
+    fn an_unrelated_market_is_not_used_as_a_fallback() {
+        // The shape The Matrix actually has: a digital date exists, but
+        // only in a market that says nothing about availability here.
+        let far_away = dto::ReleaseDatesDto {
+            results: vec![dto::ReleaseDateCountryDto {
+                iso_3166_1: "AE".to_owned(),
+                release_dates: vec![dto::ReleaseDateEntryDto {
+                    kind: TYPE_DIGITAL,
+                    release_date: Some(date!(2016 - 01 - 07)),
+                }],
+            }],
+        };
+        assert_eq!(release_date_of(&far_away, "BR", TYPE_DIGITAL), None);
     }
 
     #[test]

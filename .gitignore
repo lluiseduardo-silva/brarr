@@ -17,6 +17,14 @@ brarr.db-wal
 !.env.example
 config.local.toml
 
+# Credenciais soltas deixadas na raiz durante o desenvolvimento.
+# Nunca devem ser commitadas — prefira BRARR_TMDB_TOKEN no ambiente ou
+# a chave salva em /settings, que fica no banco (também ignorado).
+tmdbapikey.txt
+*apikey*.txt
+*token*.txt
+*.secret
+
 # IDE / editor
 .idea/
 .vscode/

@@ -23,8 +23,15 @@ fn fixture(name: &str) -> String {
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()))
 }
 
+/// Shaped like a real v4 read access token (a JWT) so the client picks
+/// the bearer path. A non-JWT string would be treated as a v3 API key.
+const FAKE_V4_TOKEN: &str = "eyJhbGciOiJIUzI1NiJ9.cGF5bG9hZA.c2ln";
+
+/// Shaped like a v3 API key: 32 hex characters, no dots.
+const FAKE_V3_KEY: &str = "94d0f0e1a2b3c4d5e6f708192a3b4c5d";
+
 fn client(server: &MockServer) -> TmdbClient {
-    TmdbClient::new("read-access-token")
+    TmdbClient::new(FAKE_V4_TOKEN)
         .unwrap()
         .with_base_url(&server.uri())
         .unwrap()
@@ -36,17 +43,75 @@ fn json(body: &str) -> ResponseTemplate {
 }
 
 #[tokio::test]
-async fn sends_the_token_as_a_bearer_header() {
+async fn a_v4_token_travels_as_a_bearer_header() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/search/movie"))
-        .and(header("authorization", "Bearer read-access-token"))
+        .and(header("authorization", &*format!("Bearer {FAKE_V4_TOKEN}")))
         .respond_with(json(&fixture("search_movie_duna.json")))
         .expect(1)
         .mount(&server)
         .await;
 
     client(&server).search_movies("duna", None).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_v3_api_key_travels_as_a_query_parameter() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/search/movie"))
+        .and(query_param("api_key", FAKE_V3_KEY))
+        .respond_with(json(&fixture("search_movie_duna.json")))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    // Verified against the live API: this key sent as a bearer header
+    // returns 401, and as `?api_key=` returns 200. Detecting the shape
+    // spares the operator having to know which string they pasted.
+    TmdbClient::new(FAKE_V3_KEY)
+        .unwrap()
+        .with_base_url(&server.uri())
+        .unwrap()
+        .with_retry(RetryConfig::disabled())
+        .search_movies("duna", None)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_v3_api_key_sends_no_authorization_header() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/search/movie"))
+        .and(wiremock::matchers::header_exists("accept"))
+        .respond_with(json(&fixture("search_movie_duna.json")))
+        .mount(&server)
+        .await;
+
+    TmdbClient::new(FAKE_V3_KEY)
+        .unwrap()
+        .with_base_url(&server.uri())
+        .unwrap()
+        .with_retry(RetryConfig::disabled())
+        .search_movies("duna", None)
+        .await
+        .unwrap();
+
+    let sent = &server.received_requests().await.unwrap()[0];
+    assert!(
+        !sent.headers.contains_key("authorization"),
+        "a v3 key must not also be offered as a bearer token"
+    );
+}
+
+#[tokio::test]
+async fn a_blank_credential_is_refused_before_any_request() {
+    assert!(matches!(
+        TmdbClient::new("   "),
+        Err(TmdbError::InvalidToken)
+    ));
 }
 
 #[tokio::test]
@@ -62,17 +127,23 @@ async fn search_movies_maps_results_and_survives_null_poster() {
 
     let hits = client(&server).search_movies("duna", None).await.unwrap();
 
-    assert_eq!(hits.len(), 3);
-    assert_eq!(hits[0].tmdb_id, 693_134);
-    assert_eq!(hits[0].title, "Duna: Parte Dois");
-    assert_eq!(hits[0].year(), Some(2024));
+    // A real page of results: 20 hits, ranked by TMDB's own relevance.
+    assert_eq!(hits.len(), 20);
+    assert_eq!(hits[0].tmdb_id, 438_631);
+    assert_eq!(hits[0].title, "Duna");
+    assert_eq!(hits[0].year(), Some(2021));
+
+    // The long tail of a real search is messy, and the parser has to
+    // survive all of it rather than only the well-formed head.
     assert_eq!(
-        hits[2].poster_path, None,
-        "null poster must not fail the row"
+        hits.iter().filter(|h| h.poster_path.is_none()).count(),
+        3,
+        "obscure entries carry no poster"
     );
     assert_eq!(
-        hits[2].overview, None,
-        "empty-string overview reads as absent"
+        hits.iter().filter(|h| h.overview.is_none()).count(),
+        14,
+        "most results have no pt-BR synopsis — TMDB sends \"\" not null"
     );
 }
 
@@ -112,32 +183,19 @@ async fn movie_details_fold_in_append_to_response() {
     assert_eq!(movie.imdb_id.as_deref(), Some("tt0133093"));
     assert_eq!(movie.title, "Matrix");
     assert_eq!(movie.runtime_minutes, Some(136));
-    assert_eq!(movie.release_date, Some(date!(1999 - 03 - 30)));
-}
-
-#[tokio::test]
-async fn empty_overview_falls_back_to_the_pt_br_translation() {
-    let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/movie/603"))
-        .respond_with(json(&fixture("movie_603.json")))
-        .mount(&server)
-        .await;
-
-    let movie = client(&server).movie(603).await.unwrap();
-
-    // TMDB returned "" at the top level — the pt-BR text has to come out
-    // of `translations`, not out of the English entry that sits first.
-    assert_eq!(
-        movie.overview.as_deref(),
-        Some(
-            "Um hacker descobre que a realidade em que vive é uma simulação e se junta à rebelião contra as máquinas."
-        )
+    assert_eq!(movie.release_date, Some(date!(1999 - 03 - 31)));
+    assert_eq!(movie.status.as_deref(), Some("Released"));
+    assert!(
+        movie
+            .overview
+            .as_deref()
+            .is_some_and(|o| o.contains("Thomas Anderson")),
+        "pt-BR synopsis comes back on the top level for this title"
     );
 }
 
 #[tokio::test]
-async fn release_dates_resolve_per_country_and_type() {
+async fn an_old_film_has_a_physical_date_but_no_digital_one() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/movie/603"))
@@ -147,31 +205,56 @@ async fn release_dates_resolve_per_country_and_type() {
 
     let movie = client(&server).movie(603).await.unwrap();
 
-    // BR is the default preferred country: digital is type 4, physical 5.
-    assert_eq!(movie.digital_release, Some(date!(1999 - 11 - 05)));
-    assert_eq!(movie.physical_release, Some(date!(2000 - 02 - 18)));
+    // BR reports theatrical (type 3) and Blu-ray (type 5) only. Neither
+    // BR nor US carries a digital date, and the one that does exist —
+    // AE, 2016-01-07 — is deliberately not borrowed: see release_date_of.
+    assert_eq!(
+        movie.digital_release, None,
+        "no digital window in BR or US means we do not know one"
+    );
+    assert_eq!(movie.physical_release, Some(date!(2008 - 10 - 14)));
 }
 
 #[tokio::test]
-async fn a_different_country_selects_a_different_digital_date() {
+async fn a_recent_film_resolves_the_brazilian_digital_window() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(path("/movie/603"))
-        .respond_with(json(&fixture("movie_603.json")))
+        .and(path("/movie/693134"))
+        .respond_with(json(&fixture("movie_693134.json")))
         .mount(&server)
         .await;
 
-    let movie = TmdbClient::new("t")
+    let movie = client(&server).movie(693_134).await.unwrap();
+
+    assert_eq!(movie.title, "Duna: Parte Dois");
+    assert_eq!(movie.imdb_id.as_deref(), Some("tt15239678"));
+    assert_eq!(movie.runtime_minutes, Some(166));
+    // This is the date that decides when searching stops being wasted.
+    assert_eq!(movie.digital_release, Some(date!(2024 - 05 - 21)));
+}
+
+#[tokio::test]
+async fn the_preferred_country_changes_which_digital_date_wins() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/movie/693134"))
+        .respond_with(json(&fixture("movie_693134.json")))
+        .mount(&server)
+        .await;
+
+    let movie = TmdbClient::new(FAKE_V4_TOKEN)
         .unwrap()
         .with_base_url(&server.uri())
         .unwrap()
         .with_retry(RetryConfig::disabled())
         .with_country("US")
-        .movie(603)
+        .movie(693_134)
         .await
         .unwrap();
 
-    assert_eq!(movie.digital_release, Some(date!(1999 - 09 - 21)));
+    // The US block lists two type-4 entries; the first one wins, and it
+    // is five weeks earlier than the Brazilian window.
+    assert_eq!(movie.digital_release, Some(date!(2024 - 04 - 16)));
 }
 
 #[tokio::test]
@@ -196,18 +279,22 @@ async fn tv_details_expose_tvdb_id_and_sorted_seasons() {
         Some(355_567),
         "series carry a tvdb id; movies never do"
     );
-    assert_eq!(show.status.as_deref(), Some("Returning Series"));
-    assert!(show.in_production);
-    assert_eq!(show.next_air_date, Some(date!(2026 - 08 - 12)));
-    assert_eq!(show.episode_runtime, Some(60));
+
+    // The show has wrapped, and a finished series exposes exactly the
+    // shape a naive parser trips on: no next episode, and an *empty*
+    // episode_run_time array rather than a missing field.
+    assert_eq!(show.status.as_deref(), Some("Ended"));
+    assert!(!show.in_production);
+    assert_eq!(show.next_air_date, None);
+    assert_eq!(show.episode_runtime, None);
 
     let numbers: Vec<i32> = show.seasons.iter().map(|s| s.season_number).collect();
+    assert_eq!(numbers, vec![0, 1, 2, 3, 4, 5]);
     assert_eq!(
-        numbers,
-        vec![0, 1, 2, 3, 4],
-        "TMDB returns seasons unordered; the client sorts them"
+        show.seasons[0].episode_count, 76,
+        "season 0 is the specials bucket and is far bigger than a real season"
     );
-    assert_eq!(show.seasons[0].episode_count, 3, "season 0 is the specials");
+    assert_eq!(show.seasons[1].episode_count, 8);
 }
 
 #[tokio::test]
@@ -219,18 +306,20 @@ async fn season_details_keep_unaired_episodes_with_no_date() {
         .mount(&server)
         .await;
 
-    let season = client(&server).season(76479, 4).await.unwrap();
+    let season = client(&server).season(76_479, 4).await.unwrap();
 
     assert_eq!(season.season_number, 4);
-    assert_eq!(season.episodes.len(), 3);
-    assert_eq!(season.episodes[0].air_date, Some(date!(2024 - 06 - 13)));
+    assert_eq!(season.air_date, Some(date!(2024 - 06 - 13)));
+    assert_eq!(season.episodes.len(), 8);
+    assert_eq!(season.episodes[0].episode_number, 1);
     assert_eq!(
-        season.episodes[2].air_date, None,
-        "an unaired episode has air_date \"\" and must still be listed"
+        season.episodes[0].title.as_deref(),
+        Some("Departamento de Truques Sujos")
     );
-    assert_eq!(
-        season.episodes[2].title.as_deref(),
-        Some("Ainda sem título")
+    assert_eq!(season.episodes[0].air_date, Some(date!(2024 - 06 - 13)));
+    assert!(
+        season.episodes.iter().all(|e| e.season_number == 4),
+        "every episode reports the season it belongs to"
     );
 }
 

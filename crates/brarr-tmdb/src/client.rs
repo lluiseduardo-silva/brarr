@@ -36,43 +36,85 @@ const MOVIE_APPEND: &str = "external_ids,release_dates,translations";
 /// Series need no `release_dates` — air dates live on the season records.
 const TV_APPEND: &str = "external_ids,translations";
 
+/// How the credential is presented to TMDB.
+///
+/// The same account page issues two different strings and they are *not*
+/// interchangeable:
+///
+/// - the **v4 read access token** is a JWT and travels in an
+///   `Authorization: Bearer` header;
+/// - the **v3 API key** is 32 hex characters and travels as an `api_key`
+///   query parameter.
+///
+/// Sending one the other's way yields a 401 (verified against the live
+/// API). Rather than make the operator work out which they pasted, the
+/// client detects the shape and uses the matching mechanism.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Auth {
+    /// v4 read access token, sent as a bearer header.
+    BearerToken,
+    /// v3 API key, appended to every request's query string.
+    ApiKey(String),
+}
+
+impl Auth {
+    /// JWTs are three base64url segments and always start with `eyJ`
+    /// (`{"` encoded). Anything else is treated as a v3 key.
+    fn detect(credential: &str) -> Self {
+        if credential.starts_with("eyJ") {
+            Self::BearerToken
+        } else {
+            Self::ApiKey(credential.to_owned())
+        }
+    }
+}
+
 /// Client for the TMDB v3 API.
 ///
 /// Cheap to clone: the inner `reqwest::Client` is reference counted, so
 /// a single instance can be shared across tasks.
 ///
-/// Authentication uses the **v4 read access token** in an
-/// `Authorization: Bearer` header, not the v3 API key as a query
-/// parameter. Both are issued from the same TMDB account page and are
-/// easy to mix up; a v3 key sent as a bearer token yields a 401.
+/// Accepts either TMDB credential — see [`Auth`] for how they differ and
+/// how the right one is picked.
 #[derive(Debug, Clone)]
 pub struct TmdbClient {
     http: Client,
     base_url: Url,
+    auth: Auth,
     language: String,
     country: String,
     retry: RetryConfig,
 }
 
 impl TmdbClient {
-    /// Build a client from a TMDB read access token.
+    /// Build a client from a TMDB credential — either the v4 read access
+    /// token or the v3 API key. The shape decides how it is sent; see
+    /// [`Auth`].
     ///
     /// # Errors
     ///
-    /// - [`TmdbError::InvalidToken`] when the token cannot become an HTTP
-    ///   header value.
+    /// - [`TmdbError::InvalidToken`] when the credential is blank, or
+    ///   cannot become an HTTP header value.
     /// - [`TmdbError::ClientBuild`] when the `reqwest` builder fails.
     /// - [`TmdbError::BadUrl`] if the compiled-in base URL is unparseable.
-    pub fn new(token: &str) -> Result<Self, TmdbError> {
+    pub fn new(credential: &str) -> Result<Self, TmdbError> {
+        let credential = credential.trim();
+        if credential.is_empty() {
+            return Err(TmdbError::InvalidToken);
+        }
+        let auth = Auth::detect(credential);
+
         let mut headers = header::HeaderMap::new();
-        let mut auth = header::HeaderValue::from_str(&format!("Bearer {token}"))
-            .map_err(|_| TmdbError::InvalidToken)?;
-        auth.set_sensitive(true);
-        headers.insert(header::AUTHORIZATION, auth);
         headers.insert(
             header::ACCEPT,
             header::HeaderValue::from_static("application/json"),
         );
+        if auth == Auth::BearerToken {
+            let mut value = header::HeaderValue::from_str(&format!("Bearer {credential}"))
+                .map_err(|_| TmdbError::InvalidToken)?;
+            value.set_sensitive(true);
+            headers.insert(header::AUTHORIZATION, value);
+        }
 
         let http = Client::builder()
             .user_agent(USER_AGENT)
@@ -84,6 +126,7 @@ impl TmdbClient {
         Ok(Self {
             http,
             base_url: Url::parse(DEFAULT_BASE_URL)?,
+            auth,
             language: DEFAULT_LANGUAGE.to_owned(),
             country: DEFAULT_COUNTRY.to_owned(),
             retry: RetryConfig::default(),
@@ -140,13 +183,15 @@ impl TmdbClient {
         query: &[(&str, String)],
     ) -> Result<T, TmdbError> {
         let url = self.base_url.join(path)?;
-        let resp = self
+        let mut req = self
             .http
             .get(url)
             .query(&[("language", self.language.as_str())])
-            .query(query)
-            .send()
-            .await?;
+            .query(query);
+        if let Auth::ApiKey(key) = &self.auth {
+            req = req.query(&[("api_key", key.as_str())]);
+        }
+        let resp = req.send().await?;
 
         match resp.status() {
             StatusCode::UNAUTHORIZED => return Err(TmdbError::Unauthorized),
