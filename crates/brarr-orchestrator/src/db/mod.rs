@@ -9,6 +9,8 @@
 
 pub mod arr_instances;
 pub mod decisions;
+pub mod grabs;
+pub mod library;
 pub mod maintenance;
 pub mod metrics;
 pub mod providers;
