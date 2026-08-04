@@ -25,6 +25,10 @@ const USER_AGENT: &str = concat!("brarr/", env!("CARGO_PKG_VERSION"));
 /// [`crate::model`] walks pt-BR → pt-PT → en-US when a field is empty.
 const DEFAULT_LANGUAGE: &str = "pt-BR";
 
+/// TMDB's own default locale, and by far its most complete one. Used to
+/// backfill search results — see [`TmdbClient::search_movies`].
+const FALLBACK_LANGUAGE: &str = "en-US";
+
 /// Default country for release-date lookups.
 const DEFAULT_COUNTRY: &str = "BR";
 
@@ -182,11 +186,24 @@ impl TmdbClient {
         path: &str,
         query: &[(&str, String)],
     ) -> Result<T, TmdbError> {
+        self.get_in(path, query, &self.language).await
+    }
+
+    /// Same as [`Self::get`] with an explicit locale. Kept separate so the
+    /// search backfill can ask for en-US without emitting `language`
+    /// twice — reqwest appends query pairs rather than replacing them,
+    /// and a duplicated parameter is resolved at TMDB's discretion.
+    async fn get_in<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        query: &[(&str, String)],
+        language: &str,
+    ) -> Result<T, TmdbError> {
         let url = self.base_url.join(path)?;
         let mut req = self
             .http
             .get(url)
-            .query(&[("language", self.language.as_str())])
+            .query(&[("language", language)])
             .query(query);
         if let Auth::ApiKey(key) = &self.auth {
             req = req.query(&[("api_key", key.as_str())]);
@@ -207,7 +224,26 @@ impl TmdbClient {
         serde_json::from_str(&body).map_err(TmdbError::BadJson)
     }
 
+    /// Whether a backfill pass is worth making: only when the configured
+    /// language is not already TMDB's default.
+    fn wants_backfill(&self) -> bool {
+        !self.language.eq_ignore_ascii_case(FALLBACK_LANGUAGE)
+    }
+
     /// Search movies by free text, optionally pinned to a release year.
+    ///
+    /// Runs the query twice when the configured language is not en-US.
+    /// The search endpoints do not accept `append_to_response`, so unlike
+    /// the details calls there is no translations array to fall back to —
+    /// and asking in pt-BR leaves most synopses empty (measured on live
+    /// data: 14 of 20 hits for "duna", 12 of 20 for "the boys"). Asking in
+    /// en-US instead fixes the synopses but loses the localised titles
+    /// ("My Life with the Walter Boys" rather than "Minha Vida com a
+    /// Família Walter").
+    ///
+    /// So: titles come from the configured language, and only the missing
+    /// synopses are filled from en-US. Results are matched by TMDB id
+    /// because the two locales rank them differently.
     ///
     /// # Errors
     ///
@@ -226,14 +262,39 @@ impl TmdbClient {
                 self.get("search/movie", &params)
             })
             .await?;
-        Ok(page
+        let mut hits: Vec<MovieSummary> = page
             .results
             .into_iter()
             .map(MovieSummary::from_dto)
-            .collect())
+            .collect();
+
+        if self.wants_backfill() && hits.iter().any(|h| h.overview.is_none()) {
+            // A backfill failure must not sink the search: the caller
+            // still gets localised titles, just with the gaps intact.
+            if let Ok(page) = self
+                .get_in::<dto::PageDto<dto::MovieSummaryDto>>(
+                    "search/movie",
+                    &params,
+                    FALLBACK_LANGUAGE,
+                )
+                .await
+            {
+                for source in page.results {
+                    if let Some(target) = hits
+                        .iter_mut()
+                        .find(|h| h.tmdb_id == source.id && h.overview.is_none())
+                    {
+                        target.overview = source.overview;
+                    }
+                }
+            }
+        }
+        Ok(hits)
     }
 
     /// Search series by free text, optionally pinned to a first-air year.
+    ///
+    /// Same two-pass shape as [`Self::search_movies`].
     ///
     /// # Errors
     ///
@@ -249,7 +310,24 @@ impl TmdbClient {
         }
         let page: dto::PageDto<dto::TvSummaryDto> =
             run_with_retry(self.retry, "search_tv", || self.get("search/tv", &params)).await?;
-        Ok(page.results.into_iter().map(TvSummary::from_dto).collect())
+        let mut hits: Vec<TvSummary> = page.results.into_iter().map(TvSummary::from_dto).collect();
+
+        if self.wants_backfill() && hits.iter().any(|h| h.overview.is_none()) {
+            if let Ok(page) = self
+                .get_in::<dto::PageDto<dto::TvSummaryDto>>("search/tv", &params, FALLBACK_LANGUAGE)
+                .await
+            {
+                for source in page.results {
+                    if let Some(target) = hits
+                        .iter_mut()
+                        .find(|h| h.tmdb_id == source.id && h.overview.is_none())
+                    {
+                        target.overview = source.overview;
+                    }
+                }
+            }
+        }
+        Ok(hits)
     }
 
     /// Resolve an external id to TMDB records. This is what closes the

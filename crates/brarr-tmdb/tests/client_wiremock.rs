@@ -48,6 +48,7 @@ async fn a_v4_token_travels_as_a_bearer_header() {
     Mock::given(method("GET"))
         .and(path("/search/movie"))
         .and(header("authorization", &*format!("Bearer {FAKE_V4_TOKEN}")))
+        .and(query_param("language", "pt-BR"))
         .respond_with(json(&fixture("search_movie_duna.json")))
         .expect(1)
         .mount(&server)
@@ -62,6 +63,7 @@ async fn a_v3_api_key_travels_as_a_query_parameter() {
     Mock::given(method("GET"))
         .and(path("/search/movie"))
         .and(query_param("api_key", FAKE_V3_KEY))
+        .and(query_param("language", "pt-BR"))
         .respond_with(json(&fixture("search_movie_duna.json")))
         .expect(1)
         .mount(&server)
@@ -140,6 +142,8 @@ async fn search_movies_maps_results_and_survives_null_poster() {
         3,
         "obscure entries carry no poster"
     );
+    // No en-US mock is mounted here, so the backfill pass 404s and is
+    // swallowed: the gaps stay visible, which is the un-backfilled shape.
     assert_eq!(
         hits.iter().filter(|h| h.overview.is_none()).count(),
         14,
@@ -148,11 +152,80 @@ async fn search_movies_maps_results_and_survives_null_poster() {
 }
 
 #[tokio::test]
+async fn missing_synopses_are_backfilled_from_the_default_locale() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/search/movie"))
+        .and(query_param("language", "pt-BR"))
+        .respond_with(json(&fixture("search_movie_duna.json")))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/search/movie"))
+        .and(query_param("language", "en-US"))
+        .respond_with(json(&fixture("search_movie_duna_en.json")))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let hits = client(&server).search_movies("duna", None).await.unwrap();
+
+    // Search endpoints take no append_to_response, so unlike the details
+    // calls there is no translations array to fall back to. Asking twice
+    // is what closes the gap: 14 of the 20 pt-BR synopses are empty, and
+    // the en-US pass fills 12 of them.
+    //
+    // The two that remain are entries TMDB has no synopsis for in either
+    // locale. Note this is not simply "the 5 the en-US page is missing":
+    // the two locales rank and populate the page differently, which is
+    // exactly why the merge keys on TMDB id rather than on position.
+    assert_eq!(hits.len(), 20);
+    assert_eq!(
+        hits.iter().filter(|h| h.overview.is_none()).count(),
+        2,
+        "only entries with no synopsis in either locale stay empty"
+    );
+
+    // …and the titles are still the localised ones, which is the whole
+    // reason the first pass is not simply made in en-US.
+    assert_eq!(hits[0].title, "Duna");
+    assert!(
+        hits.iter().any(|h| h.title == "Duna: Parte Dois"),
+        "pt-BR titles survive the backfill"
+    );
+}
+
+#[tokio::test]
+async fn no_backfill_pass_when_already_asking_in_the_default_locale() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/search/movie"))
+        .respond_with(json(&fixture("search_movie_duna_en.json")))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    TmdbClient::new(FAKE_V4_TOKEN)
+        .unwrap()
+        .with_base_url(&server.uri())
+        .unwrap()
+        .with_retry(RetryConfig::disabled())
+        .with_language("en-US")
+        .search_movies("duna", None)
+        .await
+        .unwrap();
+    // `.expect(1)` is the assertion: a second identical request would be
+    // pure waste.
+}
+
+#[tokio::test]
 async fn search_movies_pins_the_year_when_given() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/search/movie"))
         .and(query_param("primary_release_year", "2024"))
+        .and(query_param("language", "pt-BR"))
         .respond_with(json(&fixture("search_movie_duna.json")))
         .expect(1)
         .mount(&server)
