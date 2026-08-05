@@ -261,6 +261,42 @@ pub async fn run_search_scoped(
     keys: SearchKeys,
     scope: ProviderScope,
 ) -> Result<SearchRunOutcome, AppError> {
+    run_search_inner(state, keys, scope, false).await
+}
+
+/// A search that hides nothing.
+///
+/// [`run_search_scoped`] drops releases that every quality profile
+/// rejects — junk to everyone, and keeping it would grow `decisions`
+/// for nothing. That is right for the automatic path and **wrong for
+/// the interactive one**, whose entire purpose is to show what the
+/// rules would not take and let the operator decide anyway.
+///
+/// Found with real data: a search that returned 102 releases from four
+/// providers rendered an empty table, because both of the operator's
+/// profiles rejected all of them. Nothing was broken in the UI — the
+/// releases never reached it.
+///
+/// # Errors
+///
+/// Same as [`run_search_scoped`].
+pub async fn run_search_unfiltered(
+    state: &AppState,
+    keys: SearchKeys,
+) -> Result<SearchRunOutcome, AppError> {
+    run_search_inner(state, keys, ProviderScope::All, true).await
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "search pipeline is a single linear story (load profiles → fan out → score → persist); splitting into helpers obscures the read path"
+)]
+async fn run_search_inner(
+    state: &AppState,
+    keys: SearchKeys,
+    scope: ProviderScope,
+    keep_rejected: bool,
+) -> Result<SearchRunOutcome, AppError> {
     let pool = state.pool();
     let engine = state.engine();
 
@@ -332,7 +368,10 @@ pub async fn run_search_scoped(
     // when off (default) they're dropped before insert to keep the
     // `decisions` table lean. Read once per run so `/settings` edits take
     // effect on the next search without a respawn.
-    let persist_rejected = state.persist_rejected();
+    //
+    // `keep_rejected` forces it on for the interactive search, which has
+    // to show the operator everything that was found.
+    let persist_rejected = keep_rejected || state.persist_rejected();
 
     for fetch in per_provider {
         let ProviderFetch {
@@ -375,7 +414,10 @@ pub async fn run_search_scoped(
                     outcome.rejected = verdict.rejected;
                     let ins = build_insert(&search.id, &pr, &release, &outcome, profile_scores);
                     let row = decisions::insert(pool, ins).await?;
-                    if !verdict.rejected {
+                    // The automatic path only wants what it could act on;
+                    // the interactive one wants the whole picture, badge
+                    // and all.
+                    if keep_rejected || !verdict.rejected {
                         decisions_out.push(row);
                     }
                 }

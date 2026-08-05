@@ -54,3 +54,13 @@ tmp_*.py
 
 # Ferramentas locais baixadas ad-hoc
 /tools/
+
+# Chaves privadas. `claude_pmx` é a chave de acesso à LXC de produção e
+# estava na raiz do repo sem estar ignorada — um `git add -A` a teria
+# commitado num repositório com remote no GitHub. Padrão amplo de
+# propósito: uma chave privada nunca deve entrar aqui.
+claude_pmx*
+id_rsa*
+id_ed25519*
+*.pem
+*.key

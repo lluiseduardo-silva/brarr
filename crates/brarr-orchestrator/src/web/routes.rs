@@ -1562,7 +1562,9 @@ async fn library_interactive(
         });
     }
 
-    let outcome = crate::search::run_search(&state, keys).await?;
+    // Unfiltered on purpose: the automatic path drops releases every
+    // profile rejects, and this screen exists precisely to show those.
+    let outcome = crate::search::run_search_unfiltered(&state, keys).await?;
     let profile = match item.profile_id {
         Some(pid) => quality_profiles::get_by_id(state.pool(), pid).await.ok(),
         None => None,
