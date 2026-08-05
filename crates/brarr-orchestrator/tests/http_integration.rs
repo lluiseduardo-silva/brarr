@@ -1214,3 +1214,339 @@ async fn decisions_push_records_transport_failure_against_dead_arr() {
         "push history should mention the *arr name, body = {body}"
     );
 }
+
+// ---------------------------------------------------------------------
+// Remote path mapping
+// ---------------------------------------------------------------------
+
+/// Register a download client through the real handler, returning its id.
+async fn seed_client(addr: SocketAddr, name: &str) -> String {
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{addr}/download-clients"))
+        .form(&[
+            ("name", name),
+            ("kind", "qbittorrent"),
+            ("base_url", "http://127.0.0.1:8080/"),
+            ("username", "u"),
+            ("password", "p"),
+            ("category", "brarr"),
+            ("priority", "1"),
+        ])
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 200, "seeding a client must succeed");
+
+    // The id is only in the rendered table; pull it off the edit link.
+    let body = resp.text().await.unwrap();
+    let marker = "/download-clients/";
+    let start = body.find(marker).expect("a client row with an id") + marker.len();
+    body[start..]
+        .chars()
+        .take_while(|c| c.is_ascii_hexdigit() || *c == '-')
+        .collect()
+}
+
+#[tokio::test]
+async fn the_download_clients_page_offers_path_mapping() {
+    let (addr, _state) = spawn().await;
+    let client = reqwest::Client::new();
+    let body = client
+        .get(format!("http://{addr}/download-clients"))
+        .send()
+        .await
+        .expect("send")
+        .text()
+        .await
+        .unwrap();
+
+    assert!(
+        body.contains("Mapeamento de caminhos"),
+        "the mapping block has to be on the screen that configures clients"
+    );
+    assert!(
+        body.contains("Nenhum mapeamento"),
+        "zero state, body = {body}"
+    );
+}
+
+#[tokio::test]
+async fn a_path_mapping_round_trips_through_the_form() {
+    let (addr, _state) = spawn().await;
+    let id = seed_client(addr, "qb").await;
+    let http = reqwest::Client::new();
+
+    // The local side must exist — it is checked at registration, exactly
+    // like a root folder.
+    let local = std::env::temp_dir();
+    let local = local.to_string_lossy();
+
+    let resp = http
+        .post(format!("http://{addr}/path-mappings"))
+        .form(&[
+            ("client_id", id.as_str()),
+            // Deliberately noisy: trailing and doubled separators.
+            ("remote_prefix", "/data//torrents/"),
+            ("local_prefix", &local),
+        ])
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 200);
+
+    let body = resp.text().await.unwrap();
+    assert!(
+        body.contains("/data/torrents"),
+        "the stored prefix is canonical, body = {body}"
+    );
+    assert!(body.contains("qb"), "the row names its client");
+}
+
+#[tokio::test]
+async fn a_local_side_that_does_not_exist_is_refused_with_400_not_500() {
+    let (addr, _state) = spawn().await;
+    let id = seed_client(addr, "qb").await;
+    let http = reqwest::Client::new();
+
+    let resp = http
+        .post(format!("http://{addr}/path-mappings"))
+        .form(&[
+            ("client_id", id.as_str()),
+            ("remote_prefix", "/data/torrents"),
+            ("local_prefix", "/isto/nao/existe/em/lugar/nenhum"),
+        ])
+        .send()
+        .await
+        .expect("send");
+
+    assert_eq!(
+        resp.status(),
+        400,
+        "a typo in the form is form input, not a server fault"
+    );
+}
+
+#[tokio::test]
+async fn a_remote_prefix_that_would_match_everything_is_refused() {
+    let (addr, _state) = spawn().await;
+    let id = seed_client(addr, "qb").await;
+    let http = reqwest::Client::new();
+    let local = std::env::temp_dir();
+
+    let resp = http
+        .post(format!("http://{addr}/path-mappings"))
+        .form(&[
+            ("client_id", id.as_str()),
+            ("remote_prefix", "/"),
+            ("local_prefix", local.to_string_lossy().as_ref()),
+        ])
+        .send()
+        .await
+        .expect("send");
+
+    assert_eq!(resp.status(), 400, "a bare root would rewrite every path");
+}
+
+#[tokio::test]
+async fn a_duplicate_mapping_is_refused_with_400_not_500() {
+    let (addr, _state) = spawn().await;
+    let id = seed_client(addr, "qb").await;
+    let http = reqwest::Client::new();
+    let local = std::env::temp_dir();
+    let local = local.to_string_lossy();
+
+    for expected in [200, 400] {
+        let resp = http
+            .post(format!("http://{addr}/path-mappings"))
+            .form(&[
+                ("client_id", id.as_str()),
+                ("remote_prefix", "/data/torrents"),
+                ("local_prefix", &local),
+            ])
+            .send()
+            .await
+            .expect("send");
+        assert_eq!(
+            resp.status(),
+            expected,
+            "the second insert collides on UNIQUE and must be a form error"
+        );
+    }
+}
+
+#[tokio::test]
+async fn deleting_a_mapping_answers_the_refreshed_block() {
+    let (addr, _state) = spawn().await;
+    let id = seed_client(addr, "qb").await;
+    let http = reqwest::Client::new();
+    let local = std::env::temp_dir();
+    let local = local.to_string_lossy();
+
+    let created = http
+        .post(format!("http://{addr}/path-mappings"))
+        .form(&[
+            ("client_id", id.as_str()),
+            ("remote_prefix", "/data/torrents"),
+            ("local_prefix", &local),
+        ])
+        .send()
+        .await
+        .expect("send")
+        .text()
+        .await
+        .unwrap();
+
+    let marker = "/path-mappings/";
+    let start = created.find(marker).expect("a delete link") + marker.len();
+    let mapping_id: String = created[start..]
+        .chars()
+        .take_while(|c| c.is_ascii_hexdigit() || *c == '-')
+        .collect();
+
+    let resp = http
+        .delete(format!("http://{addr}/path-mappings/{mapping_id}"))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+    assert!(
+        body.contains("Nenhum mapeamento"),
+        "back to the zero state, body = {body}"
+    );
+}
+
+#[tokio::test]
+async fn requeueing_an_unknown_grab_is_not_an_error() {
+    // The button posts an id that may already have been requeued in
+    // another tab. The refreshed block tells the truth either way; a 500
+    // would be theatre.
+    let (addr, _state) = spawn().await;
+    let http = reqwest::Client::new();
+    let resp = http
+        .post(format!(
+            "http://{addr}/grabs/{}/requeue-import",
+            uuid::Uuid::new_v4()
+        ))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 200);
+}
+
+// ---------------------------------------------------------------------
+// Add-with-options dialog
+// ---------------------------------------------------------------------
+
+#[tokio::test]
+async fn the_add_screen_opens_a_dialog_instead_of_adding_blind() {
+    let (addr, _state) = spawn().await;
+    let client = reqwest::Client::new();
+    let body = client
+        .get(format!("http://{addr}/library/add"))
+        .send()
+        .await
+        .expect("send")
+        .text()
+        .await
+        .unwrap();
+
+    assert!(
+        !body.contains(r#"<form method="post" action="/library/add""#),
+        "the bare POST form is what made every choice an invisible default"
+    );
+}
+
+#[tokio::test]
+async fn the_options_dialog_shows_what_will_be_used() {
+    let (addr, _state) = spawn().await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!(
+            "http://{addr}/library/add/options?tmdb_id=603&media_type=tv&title=The%20Matrix"
+        ))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+
+    assert!(body.contains("<dialog"), "it is a modal, body = {body}");
+    assert!(body.contains("Pasta raiz"));
+    assert!(body.contains("Perfil de qualidade"));
+    assert!(body.contains("Monitorar"), "a series gets the scope select");
+    assert!(
+        body.contains("Buscar agora"),
+        "searching on add is an explicit choice"
+    );
+    assert!(
+        body.contains("corte padrão em 150"),
+        "the fallback threshold is shown rather than being another invisible default"
+    );
+}
+
+#[tokio::test]
+async fn a_movie_dialog_has_no_season_scope() {
+    let (addr, _state) = spawn().await;
+    let client = reqwest::Client::new();
+    let body = client
+        .get(format!(
+            "http://{addr}/library/add/options?tmdb_id=603&media_type=movie&title=Matrix"
+        ))
+        .send()
+        .await
+        .expect("send")
+        .text()
+        .await
+        .unwrap();
+
+    assert!(
+        !body.contains("Só a primeira temporada"),
+        "a movie has no season tree, body = {body}"
+    );
+    assert!(body.contains("Pasta raiz"), "but it still picks a folder");
+}
+
+#[tokio::test]
+async fn an_unregistered_root_folder_is_refused_on_add() {
+    // The dialog only offers registered folders, but the request is
+    // anybody's and this value becomes a directory brarr writes into.
+    let (addr, _state) = spawn().await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{addr}/library/add"))
+        .form(&[
+            ("tmdb_id", "603"),
+            ("media_type", "movie"),
+            ("root_folder", "/etc"),
+        ])
+        .send()
+        .await
+        .expect("send");
+
+    assert_eq!(resp.status(), 400);
+}
+
+#[tokio::test]
+async fn an_unknown_monitor_scope_is_refused() {
+    let (addr, _state) = spawn().await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{addr}/library/add"))
+        .form(&[
+            ("tmdb_id", "603"),
+            ("media_type", "tv"),
+            ("monitor_scope", "latest-season"),
+        ])
+        .send()
+        .await
+        .expect("send");
+
+    assert_eq!(
+        resp.status(),
+        400,
+        "there is deliberately no latest-season scope — one stored value \
+         cannot both monitor a new season and unmonitor the previous one"
+    );
+}
