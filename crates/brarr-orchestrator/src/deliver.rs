@@ -109,7 +109,17 @@ impl DeliveryOutcome {
 /// file — is a [`DeliveryOutcome`], not an `Err`: those are results the
 /// operator needs to see, not bugs to propagate.
 pub async fn deliver(state: &AppState, grab: &Grab) -> Result<DeliveryOutcome, AppError> {
-    let picked = download_clients::pick_for_protocol(state.pool(), protocol(grab)).await?;
+    let Some(transport) = protocol(grab) else {
+        return record(
+            state,
+            grab,
+            DeliveryOutcome::Permanent(
+                "um arquivo local já está no disco — não há o que entregar".to_owned(),
+            ),
+        )
+        .await;
+    };
+    let picked = download_clients::pick_for_protocol(state.pool(), transport).await?;
     let Some(client_row) = picked else {
         // Nothing to deliver to. Release rather than fail: the moment the
         // operator adds a client, this release becomes grabbable again,
@@ -139,7 +149,7 @@ pub async fn deliver(state: &AppState, grab: &Grab) -> Result<DeliveryOutcome, A
     let fetched = if url.starts_with("magnet:") {
         None
     } else {
-        match fetch_release_file(url, grab.protocol).await {
+        match fetch_release_file(url, transport).await {
             Ok(bytes) => Some(bytes),
             Err(FetchFailure::Transient(reason)) => {
                 return record(state, grab, DeliveryOutcome::Retryable(reason)).await;
@@ -174,10 +184,15 @@ pub async fn deliver(state: &AppState, grab: &Grab) -> Result<DeliveryOutcome, A
 /// The transport a grab travels over, as the download-client crate
 /// spells it. The two enums are deliberately separate types — see
 /// `brarr_download_client::Protocol`.
-fn protocol(grab: &Grab) -> brarr_download_client::Protocol {
+///
+/// `None` for [`Protocol::Local`]: an adopted file has no transport
+/// because it was never downloaded. Such a grab is created already
+/// `imported`, so delivery should never see one.
+fn protocol(grab: &Grab) -> Option<brarr_download_client::Protocol> {
     match grab.protocol {
-        Protocol::Torrent => brarr_download_client::Protocol::Torrent,
-        Protocol::Usenet => brarr_download_client::Protocol::Usenet,
+        Protocol::Torrent => Some(brarr_download_client::Protocol::Torrent),
+        Protocol::Usenet => Some(brarr_download_client::Protocol::Usenet),
+        Protocol::Local => None,
     }
 }
 
@@ -275,7 +290,10 @@ enum FetchFailure {
 ///
 /// The URL carries whatever credential the provider needs (UNIT3D embeds
 /// the token, Newznab the apikey), so this is a plain GET.
-async fn fetch_release_file(url: &str, protocol: Protocol) -> Result<Vec<u8>, FetchFailure> {
+async fn fetch_release_file(
+    url: &str,
+    protocol: brarr_download_client::Protocol,
+) -> Result<Vec<u8>, FetchFailure> {
     let http = reqwest::Client::builder()
         .user_agent(concat!("brarr/", env!("CARGO_PKG_VERSION")))
         .timeout(FETCH_TIMEOUT)
@@ -327,10 +345,10 @@ async fn fetch_release_file(url: &str, protocol: Protocol) -> Result<Vec<u8>, Fe
     Ok(bytes)
 }
 
-fn expected_kind(protocol: Protocol) -> &'static str {
+fn expected_kind(protocol: brarr_download_client::Protocol) -> &'static str {
     match protocol {
-        Protocol::Torrent => ".torrent",
-        Protocol::Usenet => ".nzb",
+        brarr_download_client::Protocol::Torrent => ".torrent",
+        brarr_download_client::Protocol::Usenet => ".nzb",
     }
 }
 
@@ -340,11 +358,11 @@ fn expected_kind(protocol: Protocol) -> &'static str {
 /// `200`, and both download clients would take that file and sit on it.
 /// A bencoded torrent starts with `d`; an nzb is XML, so the first
 /// non-whitespace byte is `<`.
-fn looks_like(bytes: &[u8], protocol: Protocol) -> bool {
+fn looks_like(bytes: &[u8], protocol: brarr_download_client::Protocol) -> bool {
     let trimmed = trim_leading(bytes);
     match protocol {
-        Protocol::Torrent => trimmed.first() == Some(&b'd'),
-        Protocol::Usenet => trimmed.first() == Some(&b'<'),
+        brarr_download_client::Protocol::Torrent => trimmed.first() == Some(&b'd'),
+        brarr_download_client::Protocol::Usenet => trimmed.first() == Some(&b'<'),
     }
 }
 
@@ -377,7 +395,7 @@ mod tests {
     fn a_bencoded_torrent_is_recognised() {
         assert!(looks_like(
             b"d8:announce20:https://x/anneee",
-            Protocol::Torrent
+            brarr_download_client::Protocol::Torrent
         ));
     }
 
@@ -386,7 +404,7 @@ mod tests {
         // The failure this check exists for: HTTP 200, HTML body.
         assert!(!looks_like(
             b"<!DOCTYPE html><html><body>Login</body></html>",
-            Protocol::Torrent
+            brarr_download_client::Protocol::Torrent
         ));
     }
 
@@ -394,20 +412,29 @@ mod tests {
     fn an_nzb_is_recognised_through_whitespace_and_a_bom() {
         assert!(looks_like(
             b"\xEF\xBB\xBF\n  <?xml version=\"1.0\"?><nzb/>",
-            Protocol::Usenet
+            brarr_download_client::Protocol::Usenet
         ));
     }
 
     #[test]
     fn a_torrent_is_not_accepted_as_an_nzb() {
-        assert!(!looks_like(b"d8:announce", Protocol::Usenet));
-        assert!(!looks_like(b"<?xml version=\"1.0\"?>", Protocol::Torrent));
+        assert!(!looks_like(
+            b"d8:announce",
+            brarr_download_client::Protocol::Usenet
+        ));
+        assert!(!looks_like(
+            b"<?xml version=\"1.0\"?>",
+            brarr_download_client::Protocol::Torrent
+        ));
     }
 
     #[test]
     fn an_empty_body_is_not_a_release_file() {
-        assert!(!looks_like(b"", Protocol::Torrent));
-        assert!(!looks_like(b"   \n", Protocol::Usenet));
+        assert!(!looks_like(b"", brarr_download_client::Protocol::Torrent));
+        assert!(!looks_like(
+            b"   \n",
+            brarr_download_client::Protocol::Usenet
+        ));
     }
 
     #[test]

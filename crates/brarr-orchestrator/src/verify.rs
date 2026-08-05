@@ -264,7 +264,7 @@ mod tests {
             "it was imported; rewriting that would erase what happened"
         );
         assert!(
-            grabs::blocking_for(&pool, after.item_id, None)
+            grabs::blocking_for(&pool, after.item_id, grabs::GrabTarget::item())
                 .await
                 .unwrap()
                 .is_empty(),

@@ -221,6 +221,17 @@ struct Target {
     episode_marker: Option<(u16, u16)>,
 }
 
+impl Target {
+    /// What the barrier is being asked about. An episode carries its
+    /// season so a pack of *another* season does not answer for it.
+    fn grab_target(&self) -> grabs::GrabTarget {
+        match &self.episode {
+            Some(e) => grabs::GrabTarget::episode(e.id, e.season_number),
+            None => grabs::GrabTarget::item(),
+        }
+    }
+}
+
 async fn scan_item(
     state: &AppState,
     item: &LibraryItem,
@@ -232,9 +243,7 @@ async fn scan_item(
 
     for target in targets {
         summary.targets += 1;
-        let covered =
-            grabs::blocking_for(state.pool(), item.id, target.episode.as_ref().map(|e| e.id))
-                .await?;
+        let covered = grabs::blocking_for(state.pool(), item.id, target.grab_target()).await?;
         if !covered.is_empty() {
             summary.skipped_covered += 1;
             continue;

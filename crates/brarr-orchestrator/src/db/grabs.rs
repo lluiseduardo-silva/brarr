@@ -35,6 +35,10 @@ pub enum Protocol {
     Torrent,
     /// Usenet — Newznab indexers.
     Usenet,
+    /// Neither: a file that was already on disk when brarr met it, taken
+    /// over by the library adoption. It has no download client and no
+    /// provider — only a path.
+    Local,
 }
 
 impl Protocol {
@@ -44,6 +48,7 @@ impl Protocol {
         match self {
             Self::Torrent => "torrent",
             Self::Usenet => "usenet",
+            Self::Local => "local",
         }
     }
 
@@ -57,6 +62,7 @@ impl Protocol {
         match s {
             "torrent" => Ok(Self::Torrent),
             "usenet" => Ok(Self::Usenet),
+            "local" => Ok(Self::Local),
             other => Err(AppError::InvalidInput(format!(
                 "unknown grabs.protocol: {other}"
             ))),
@@ -413,13 +419,21 @@ pub async fn active_for_item(pool: &Pool, item_id: Uuid) -> Result<Vec<Grab>, Ap
 }
 
 /// Grabs that keep the scanner away from an item — see
-/// [`GrabStatus::blocks_search`]. Movie-level: pass `episode_id = None`
-/// to ask "is this whole item taken care of", or `Some(id)` to ask about
-/// one episode.
+/// [`GrabStatus::blocks_search`].
 ///
-/// A movie-level grab (`episode_id IS NULL`) blocks the episode query
-/// too: a season pack or a full-series grab covers the episode even
-/// though no row names it.
+/// `target` says what is being asked about: the whole item (a movie), or
+/// one episode. A grab covers the target when it names that episode, or
+/// when it names no episode *and* its season does not exclude it:
+///
+/// | grab | covers |
+/// |---|---|
+/// | `episode_id = X` | episode X only |
+/// | no episode, no season | the whole item — a movie, or a full-series grab |
+/// | no episode, `season_number = 4` | every episode of season 4 |
+///
+/// That last row is why the season has to travel with the question. A
+/// pack of season 4 used to satisfy the query for *any* episode, so
+/// season 5 read as acquired the moment one pack landed.
 ///
 /// # Errors
 ///
@@ -427,20 +441,53 @@ pub async fn active_for_item(pool: &Pool, item_id: Uuid) -> Result<Vec<Grab>, Ap
 pub async fn blocking_for(
     pool: &Pool,
     item_id: Uuid,
-    episode_id: Option<Uuid>,
+    target: GrabTarget,
 ) -> Result<Vec<Grab>, AppError> {
     let rows = sqlx::query(&format!(
         "SELECT {GRAB_COLUMNS} FROM grabs \
          WHERE item_id = ? AND status NOT IN ('failed', 'rejected') \
            AND file_missing_at IS NULL \
-           AND (episode_id IS NULL OR episode_id IS ?) \
+           AND ( \
+                 episode_id IS ? \
+              OR (episode_id IS NULL AND (season_number IS NULL OR season_number IS ?)) \
+           ) \
          ORDER BY grabbed_at DESC"
     ))
     .bind(item_id.to_string())
-    .bind(episode_id.map(|e| e.to_string()))
+    .bind(target.episode_id.map(|e| e.to_string()))
+    .bind(target.season_number.map(i64::from))
     .fetch_all(pool)
     .await?;
     rows.iter().map(row_to_grab).collect()
+}
+
+/// What [`blocking_for`] is being asked about.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GrabTarget {
+    /// The episode in question. `None` asks about the item as a whole,
+    /// which is what a movie always does.
+    pub episode_id: Option<Uuid>,
+    /// Season the episode belongs to, so a pack of another season does
+    /// not answer for it. Ignored when `episode_id` is `None`.
+    pub season_number: Option<i32>,
+}
+
+impl GrabTarget {
+    /// The item as a whole — a movie, or "is anything covering this
+    /// series at all".
+    #[must_use]
+    pub fn item() -> Self {
+        Self::default()
+    }
+
+    /// One episode of a season.
+    #[must_use]
+    pub fn episode(episode_id: Uuid, season_number: i32) -> Self {
+        Self {
+            episode_id: Some(episode_id),
+            season_number: Some(season_number),
+        }
+    }
 }
 
 /// Record a successful hand-off: the client accepted the release.
@@ -926,7 +973,10 @@ mod tests {
         ] {
             set_status(&pool, grab.id, status, None).await.unwrap();
             assert!(
-                !blocking_for(&pool, item_id, None).await.unwrap().is_empty(),
+                !blocking_for(&pool, item_id, GrabTarget::item())
+                    .await
+                    .unwrap()
+                    .is_empty(),
                 "{} must keep the item out of the sweep",
                 status.label()
             );
@@ -934,7 +984,10 @@ mod tests {
         for status in [GrabStatus::Failed, GrabStatus::Rejected] {
             set_status(&pool, grab.id, status, None).await.unwrap();
             assert!(
-                blocking_for(&pool, item_id, None).await.unwrap().is_empty(),
+                blocking_for(&pool, item_id, GrabTarget::item())
+                    .await
+                    .unwrap()
+                    .is_empty(),
                 "{} is exactly when trying again is right",
                 status.label()
             );
@@ -988,7 +1041,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(
-            !blocking_for(&pool, series.id, Some(eps[0].id))
+            !blocking_for(&pool, series.id, GrabTarget::episode(eps[0].id, 4))
                 .await
                 .unwrap()
                 .is_empty()
@@ -1036,13 +1089,13 @@ mod tests {
         only_first.episode_id = Some(eps2[0].id);
         reserve(&pool2, &only_first).await.unwrap().unwrap();
         assert!(
-            !blocking_for(&pool2, series2.id, Some(eps2[0].id))
+            !blocking_for(&pool2, series2.id, GrabTarget::episode(eps2[0].id, 4))
                 .await
                 .unwrap()
                 .is_empty()
         );
         assert!(
-            blocking_for(&pool2, series2.id, Some(eps2[1].id))
+            blocking_for(&pool2, series2.id, GrabTarget::episode(eps2[1].id, 4))
                 .await
                 .unwrap()
                 .is_empty(),
@@ -1066,14 +1119,20 @@ mod tests {
         .await
         .unwrap();
         assert!(
-            !blocking_for(&pool, item_id, None).await.unwrap().is_empty(),
+            !blocking_for(&pool, item_id, GrabTarget::item())
+                .await
+                .unwrap()
+                .is_empty(),
             "an imported grab covers its item"
         );
 
         mark_file_missing(&pool, grab.id).await.unwrap();
 
         assert!(
-            blocking_for(&pool, item_id, None).await.unwrap().is_empty(),
+            blocking_for(&pool, item_id, GrabTarget::item())
+                .await
+                .unwrap()
+                .is_empty(),
             "…until the file is gone, and then the item is wanted again"
         );
         // And the barrier lets the *same* release through, which is
@@ -1124,6 +1183,93 @@ mod tests {
         // Already known missing ⇒ not checked again.
         mark_file_missing(&pool, imported.id).await.unwrap();
         assert!(imported_present(&pool).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_season_pack_covers_its_own_season_and_no_other() {
+        let pool = open_memory().await.unwrap();
+        let (_, provider_id) = fixture(&pool).await;
+        let series = library::upsert(
+            &pool,
+            &NewLibraryItem {
+                media_type: Some(MediaType::Tv),
+                tmdb_id: 76479,
+                title: "The Boys".to_owned(),
+                ..NewLibraryItem::default()
+            },
+        )
+        .await
+        .unwrap();
+        library::sync_seasons(
+            &pool,
+            series.id,
+            &[
+                NewSeason {
+                    season_number: 4,
+                    episode_count: 1,
+                    air_date: None,
+                    episodes: vec![NewEpisode {
+                        episode_number: 1,
+                        title: None,
+                        air_date: None,
+                    }],
+                },
+                NewSeason {
+                    season_number: 5,
+                    episode_count: 1,
+                    air_date: None,
+                    episodes: vec![NewEpisode {
+                        episode_number: 1,
+                        title: None,
+                        air_date: None,
+                    }],
+                },
+            ],
+        )
+        .await
+        .unwrap();
+        let eps = library::episodes(&pool, series.id).await.unwrap();
+        let s4 = eps.iter().find(|e| e.season_number == 4).unwrap();
+        let s5 = eps.iter().find(|e| e.season_number == 5).unwrap();
+
+        // A pack: no episode named, but a season is.
+        let mut pack = new_grab(series.id, provider_id, "s04-pack");
+        pack.season_number = Some(4);
+        reserve(&pool, &pack).await.unwrap().unwrap();
+
+        assert!(
+            !blocking_for(&pool, series.id, GrabTarget::episode(s4.id, 4))
+                .await
+                .unwrap()
+                .is_empty(),
+            "the pack covers its own season"
+        );
+        assert!(
+            blocking_for(&pool, series.id, GrabTarget::episode(s5.id, 5))
+                .await
+                .unwrap()
+                .is_empty(),
+            "…and must not make the next season look acquired"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_adopted_file_has_no_transport() {
+        let pool = open_memory().await.unwrap();
+        let (item_id, provider_id) = fixture(&pool).await;
+        let mut local = new_grab(
+            item_id,
+            provider_id,
+            "/mnt/midias/Filmes/Matrix (1999)/Matrix.mkv",
+        );
+        local.protocol = Protocol::Local;
+        local.download_url = None;
+        let grab = reserve(&pool, &local).await.unwrap().unwrap();
+        assert_eq!(
+            get_by_id(&pool, grab.id).await.unwrap().protocol,
+            Protocol::Local,
+            "the CHECK has to accept a file that was never downloaded"
+        );
     }
 
     #[tokio::test]
