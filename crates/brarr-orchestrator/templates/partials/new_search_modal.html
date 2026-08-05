@@ -134,12 +134,15 @@
                     </span>
                 </div>
                 <div class="flex items-center gap-2">
-                    <form method="dialog" class="contents">
-                        <button type="submit"
-                                class="btn btn-md btn-secondary">
-                            Cancelar
-                        </button>
-                    </form>
+                    {# NOT a nested <form method="dialog">. HTML forbids
+                       nesting, so the parser drops the inner tag and this
+                       button becomes a submit of the form around it — the
+                       "Cancelar" button used to run the search. #}
+                    <button type="button"
+                            onclick="this.closest('dialog').close()"
+                            class="btn btn-md btn-secondary">
+                        Cancelar
+                    </button>
                     <button type="submit"
                             class="btn btn-md btn-brand"
                             style="box-shadow: 0 6px 16px var(--color-glow);">
