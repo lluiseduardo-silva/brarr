@@ -793,6 +793,11 @@ pub struct SettingsValues {
     /// `BRARR_PERSIST_REJECTED`). `true` ⇒ persist even releases that
     /// every quality profile rejects; `false` (default) ⇒ drop them.
     pub persist_rejected: bool,
+    /// How the importer places files: `hardlink` / `copy` / `move`.
+    /// See [`crate::import::ImportMode`] — the default keeps the
+    /// download client's copy in place so a private tracker keeps
+    /// seeding.
+    pub import_mode: String,
     /// Tracing env-filter spec (matches `RUST_LOG`).
     pub log_level: String,
     /// Backtrace mode persisted in the DB (matches `RUST_BACKTRACE`).

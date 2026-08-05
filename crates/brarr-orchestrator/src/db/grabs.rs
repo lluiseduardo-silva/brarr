@@ -183,6 +183,10 @@ pub struct Grab {
     pub status: GrabStatus,
     /// Failure reason when [`GrabStatus::Failed`].
     pub error: Option<String>,
+    /// Where the import placed the file. `None` until the grab reaches
+    /// [`GrabStatus::Imported`] — and the only record of which path in
+    /// the library belongs to this acquisition.
+    pub imported_path: Option<String>,
     /// When the reservation was taken.
     pub grabbed_at: OffsetDateTime,
     /// Last status change.
@@ -217,7 +221,7 @@ pub struct NewGrab<'a> {
 
 const GRAB_COLUMNS: &str = "id, item_id, episode_id, season_number, decision_id, provider_id, \
      provider_name, release_id_remote, release_name, download_url, protocol, \
-     client_id, client_item_id, status, error, grabbed_at, updated_at";
+     client_id, client_item_id, status, error, imported_path, grabbed_at, updated_at";
 
 fn opt_uuid_at(row: &SqliteRow, col: &str) -> Result<Option<Uuid>, AppError> {
     let raw: Option<String> = row.try_get(col)?;
@@ -258,6 +262,7 @@ fn row_to_grab(row: &SqliteRow) -> Result<Grab, AppError> {
         client_item_id: row.try_get("client_item_id")?,
         status: GrabStatus::from_label(&status_raw)?,
         error: row.try_get("error")?,
+        imported_path: row.try_get("imported_path")?,
         grabbed_at: OffsetDateTime::from_unix_timestamp(grabbed)
             .map_err(|e| AppError::InvalidInput(format!("invalid grabs.grabbed_at: {e}")))?,
         updated_at: OffsetDateTime::from_unix_timestamp(updated)
@@ -449,6 +454,45 @@ pub async fn mark_sent(
     )
     .bind(client_id.to_string())
     .bind(client_item_id)
+    .bind(OffsetDateTime::now_utc().unix_timestamp())
+    .bind(id.to_string())
+    .execute(pool)
+    .await?;
+    if res.rows_affected() == 0 {
+        return Err(AppError::NotFound(format!("grab {id}")));
+    }
+    Ok(())
+}
+
+/// Grabs the download client has finished with, waiting for the import
+/// to move them into the library. Oldest first — the one that has been
+/// waiting longest goes first.
+///
+/// # Errors
+///
+/// Returns [`AppError::Database`] on SQL failure.
+pub async fn awaiting_import(pool: &Pool) -> Result<Vec<Grab>, AppError> {
+    let rows = sqlx::query(&format!(
+        "SELECT {GRAB_COLUMNS} FROM grabs WHERE status = 'completed' ORDER BY updated_at ASC"
+    ))
+    .fetch_all(pool)
+    .await?;
+    rows.iter().map(row_to_grab).collect()
+}
+
+/// Record a finished import: the grab is done, and `path` is where the
+/// file now lives.
+///
+/// # Errors
+///
+/// - [`AppError::NotFound`] when the id is absent.
+/// - [`AppError::Database`] on SQL failure.
+pub async fn mark_imported(pool: &Pool, id: Uuid, path: &str) -> Result<(), AppError> {
+    let res = sqlx::query(
+        "UPDATE grabs SET status = 'imported', error = NULL, imported_path = ?, \
+         updated_at = ? WHERE id = ?",
+    )
+    .bind(path)
     .bind(OffsetDateTime::now_utc().unix_timestamp())
     .bind(id.to_string())
     .execute(pool)

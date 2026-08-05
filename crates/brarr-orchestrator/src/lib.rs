@@ -55,6 +55,7 @@ pub mod db;
 pub mod deliver;
 pub mod error;
 pub mod grpc;
+pub mod import;
 pub mod maintenance;
 pub mod poll;
 pub mod provider_cache;

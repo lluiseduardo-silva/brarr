@@ -489,12 +489,16 @@ fn protocol_of(decision: &DecisionRow) -> Protocol {
 
 /// `true` when the title positively identifies this episode.
 ///
+/// Shared with [`crate::import`], which faces the same question from the
+/// other end — which file inside a finished download is episode 7 — and
+/// must answer it the same way the scanner did when it chose the release.
+///
 /// Accepts the two spellings that appear in the wild — `S01E02` and
 /// `1x02` — case-insensitively. A title with no recognisable marker is
 /// **not** accepted: it is most likely a season pack, and grabbing one
 /// while recording it against a single episode would leave the rest of
 /// the season looking acquired when it is not.
-fn title_matches_episode(title: &str, season: u16, episode: u16) -> bool {
+pub(crate) fn title_matches_episode(title: &str, season: u16, episode: u16) -> bool {
     let lowered = title.to_ascii_lowercase();
     let s_e = format!("s{season:02}e{episode:02}");
     if lowered.contains(&s_e) {

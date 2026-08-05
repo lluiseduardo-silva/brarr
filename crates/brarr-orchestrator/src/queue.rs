@@ -295,6 +295,7 @@ mod tests {
             client_item_id: Some("hash".to_owned()),
             status,
             error: None,
+            imported_path: None,
             grabbed_at: now,
             updated_at: now - Duration::from_secs((updated_minutes_ago * 60).unsigned_abs()),
         }

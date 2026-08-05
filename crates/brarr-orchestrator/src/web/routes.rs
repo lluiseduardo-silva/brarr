@@ -2828,6 +2828,9 @@ async fn load_settings_values(state: &AppState) -> Result<SettingsValues, AppErr
         // Reflect the live runtime value so the checkbox always matches
         // what the pipeline is actually doing.
         persist_rejected: state.persist_rejected(),
+        import_mode: crate::import::ImportMode::from_label(&get(crate::import::KEY_IMPORT_MODE))
+            .label()
+            .to_string(),
         log_level: get(settings::KEY_LOG_LEVEL),
         backtrace: {
             let v = get(settings::KEY_BACKTRACE);
@@ -2882,6 +2885,8 @@ struct SettingsGeneralForm {
     // Checkbox: present (`"1"`) when ticked, absent (`""`) when not.
     #[serde(default)]
     persist_rejected: String,
+    #[serde(default)]
+    import_mode: String,
     #[serde(default)]
     log_level: String,
     #[serde(default)]
@@ -3053,6 +3058,12 @@ async fn settings_general(
         pool,
         settings::KEY_PERSIST_REJECTED,
         if persist_rejected { "1" } else { "0" },
+    )
+    .await?;
+    settings::set(
+        pool,
+        crate::import::KEY_IMPORT_MODE,
+        crate::import::ImportMode::from_label(&form.import_mode).label(),
     )
     .await?;
     settings::set(pool, settings::KEY_LOG_LEVEL, log_spec).await?;

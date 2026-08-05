@@ -1,0 +1,11 @@
+-- Where the import put the file.
+--
+-- Recorded because it is the only record: after an import the release
+-- exists twice on disk (once in the download client's folder, once in
+-- the library) and only this column says which path in the library
+-- belongs to which grab. A future "remove this from the library" has no
+-- other way to find it, and the operator asking "where did it go?"
+-- deserves an answer that is not a directory listing.
+--
+-- NULL until the grab reaches `imported`.
+ALTER TABLE grabs ADD COLUMN imported_path TEXT;

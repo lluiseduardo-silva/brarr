@@ -54,7 +54,8 @@ use brarr_orchestrator::db::settings::{
 };
 use brarr_orchestrator::state::{LogReloader, RuntimeConfig};
 use brarr_orchestrator::{
-    AppState, AuthConfig, BypassConfig, TrustedPeers, db, grpc, maintenance, poll, queue, scan, web,
+    AppState, AuthConfig, BypassConfig, TrustedPeers, db, grpc, import, maintenance, poll, queue,
+    scan, web,
 };
 use tracing::warn;
 use tracing_subscriber::layer::SubscriberExt;
@@ -225,6 +226,11 @@ async fn main() -> Result<()> {
     // Long-lived queue sync — walks handed-over grabs through
     // downloading → completed from what the clients report.
     let _queue_handle = queue::spawn(state.clone());
+    // Long-lived importer — the only task that writes to the operator's
+    // files. Its own task rather than a step inside the queue sync: a
+    // cross-device copy takes minutes and must not stall download
+    // tracking. It no-ops while no root folder is configured.
+    let _import_handle = import::spawn(state.clone());
 
     tokio::select! {
         res = web_task => res.context("web task panicked")?.context("web server")?,
