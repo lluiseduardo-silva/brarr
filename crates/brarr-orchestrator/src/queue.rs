@@ -252,6 +252,20 @@ fn next_status(entry: &QueueEntry, now: OffsetDateTime) -> Option<(GrabStatus, O
             if entry.grab.status == GrabStatus::Reserved {
                 return None;
             }
+            // A finished download the client no longer lists is not a
+            // loss: it downloaded, and the file is on disk waiting for
+            // the importer. The operator clearing a completed torrent
+            // out of qBittorrent is normal housekeeping.
+            //
+            // This matters most for a grab the import is *waiting* on:
+            // waiting does not move `updated_at`, so the grace period
+            // is already spent by the time the client forgets the
+            // download. Failing it here would drop it out of
+            // `blocks_search`, and the scanner would go buy the same
+            // episode again — the exact churn this release removes.
+            if entry.grab.status == GrabStatus::Completed {
+                return None;
+            }
             let age = now - entry.grab.updated_at;
             if age >= MISSING_GRACE {
                 Some((
@@ -297,6 +311,8 @@ mod tests {
             error: None,
             imported_path: None,
             file_missing_at: None,
+            import_wait_reason: None,
+            import_attempted_at: None,
             grabbed_at: now,
             updated_at: now - Duration::from_secs((updated_minutes_ago * 60).unsigned_abs()),
         }

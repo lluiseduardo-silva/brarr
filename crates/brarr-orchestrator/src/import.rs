@@ -59,7 +59,7 @@ use tracing::{debug, info, warn};
 use crate::db::grabs::{self, Grab, GrabStatus};
 use crate::db::library::{self, LibraryItem};
 use crate::db::root_folders::{self, RootFolder};
-use crate::db::{download_clients, settings};
+use crate::db::{download_clients, path_mappings, settings};
 use crate::{AppError, AppState};
 
 /// How often the importer looks for finished downloads.
@@ -238,14 +238,23 @@ pub async fn import_pending(state: &AppState) -> Result<ImportSummary, AppError>
 /// Returns [`AppError::Database`] when reading the catalogue or writing
 /// the outcome fails.
 pub async fn import_grab(state: &AppState, grab: &Grab) -> Result<ImportOutcome, AppError> {
+    // Stamped before the attempt, not after: a pass that dies part-way
+    // must not leave this grab first in line forever.
+    grabs::mark_import_attempted(state.pool(), grab.id).await?;
+
     let outcome = plan_and_place(state, grab).await?;
     match &outcome {
         ImportOutcome::Imported { path, .. } => {
             grabs::mark_imported(state.pool(), grab.id, &path.to_string_lossy()).await?;
         }
         // Left as `completed` on purpose: the next pass tries again, and
-        // `blocks_search` already keeps the scanner off the item.
-        ImportOutcome::Waiting(_) => {}
+        // `blocks_search` already keeps the scanner off the item. The
+        // reason is persisted because waiting used to be invisible — it
+        // lived in a debug! log, and five finished downloads sat on disk
+        // with nothing in the UI able to say why.
+        ImportOutcome::Waiting(reason) => {
+            grabs::set_import_wait_reason(state.pool(), grab.id, Some(reason)).await?;
+        }
         ImportOutcome::Permanent(reason) => {
             grabs::set_status(state.pool(), grab.id, GrabStatus::Failed, Some(reason)).await?;
         }
@@ -271,10 +280,16 @@ async fn plan_and_place(state: &AppState, grab: &Grab) -> Result<ImportOutcome, 
         )));
     };
 
-    let source = match locate_download(state, grab).await? {
-        Ok(path) => path,
+    let located = match locate_download(state, grab).await? {
+        Ok(located) => located,
         Err(reason) => return Ok(ImportOutcome::Waiting(reason)),
     };
+    // A path in a namespace this machine cannot open is not worth a
+    // syscall, and "does not exist" would be a useless thing to tell the
+    // operator about it.
+    if !located.usable {
+        return Ok(ImportOutcome::Waiting(unreachable_path_message(&located)));
+    }
 
     let episode = match grab.episode_id {
         Some(id) => library::episodes(state.pool(), item.id)
@@ -290,19 +305,75 @@ async fn plan_and_place(state: &AppState, grab: &Grab) -> Result<ImportOutcome, 
         ))
     });
 
-    let mode = configured_mode(state).await;
+    let plan = Placement {
+        root: root.path.clone(),
+        title: item.title.clone(),
+        year: item.year,
+        episode: marker,
+        mode: configured_mode(state).await,
+    };
 
     // Everything past here touches the filesystem, so it runs on the
     // blocking pool: a 60 GB copy on a runtime worker would stall every
     // other task in the process.
-    let root_path = root.path.clone();
-    let item_title = item.title.clone();
-    let year = item.year;
-    tokio::task::spawn_blocking(move || {
-        place_download(&source, &root_path, &item_title, year, marker, mode)
+    let source = located.path.clone();
+    let outcome = tokio::task::spawn_blocking(move || place_download(&source, &plan))
+        .await
+        .map_err(|e| AppError::InvalidInput(format!("tarefa de import falhou: {e}")))?;
+
+    // `place_download` only knows a path it could not open. Only here do
+    // we know *which* client reported it, what it said verbatim, and
+    // whether a mapping rewrote it — which is the difference between
+    // "não existe mais" and a sentence the operator can act on.
+    Ok(match outcome {
+        ImportOutcome::Waiting(_) if !matches!(locate_state(&located), LocateState::Translated) => {
+            ImportOutcome::Waiting(unreachable_path_message(&located))
+        }
+        other => other,
     })
-    .await
-    .map_err(|e| AppError::InvalidInput(format!("tarefa de import falhou: {e}")))
+}
+
+/// Whether a mapping rewrote the path, for message selection.
+enum LocateState {
+    /// A mapping fired.
+    Translated,
+    /// The client's path came through untouched.
+    Verbatim,
+}
+
+fn locate_state(located: &Located) -> LocateState {
+    if located.applied.is_some() {
+        LocateState::Translated
+    } else {
+        LocateState::Verbatim
+    }
+}
+
+/// The sentence an operator can act on when brarr cannot see a finished
+/// download.
+///
+/// "não existe mais" was the old message, and it was actively
+/// misleading: the file existed, fully downloaded, the whole time. What
+/// the operator needs is what the client said, what brarr looked for,
+/// and the name of the thing that reconciles the two.
+fn unreachable_path_message(located: &Located) -> String {
+    match &located.applied {
+        Some(rule) => format!(
+            "o mapeamento {} → {} traduziu o caminho de {} para {}, e o brarr não conseguiu abrir. \
+             O download está lá — confira se o lado local do mapeamento é o caminho certo \
+             dentro do contêiner do brarr.",
+            rule.remote_prefix,
+            rule.local_prefix.display(),
+            located.client_name,
+            located.path.display(),
+        ),
+        None => format!(
+            "{} salvou em {}, e esse caminho não existe para o brarr. \
+             Os dois montam o mesmo disco em lugares diferentes: cadastre um mapeamento \
+             de caminho em /download-clients dizendo o que {} é para o brarr.",
+            located.client_name, located.reported, located.reported,
+        ),
+    }
 }
 
 /// Root folder for this item — its own override first, then the rule.
@@ -327,14 +398,37 @@ async fn resolve_root(
     root_folders::resolve(state.pool(), item.media_type).await
 }
 
-/// Ask the download client where it put the files.
+/// Where a download is, in brarr's namespace, plus what it took to get
+/// there — so a failure downstream can name the real cause.
+#[derive(Debug, Clone)]
+struct Located {
+    /// The path to open, already translated.
+    path: PathBuf,
+    /// What the client actually said, kept verbatim for the message.
+    reported: String,
+    /// Client display name.
+    client_name: String,
+    /// The mapping that fired, if any.
+    applied: Option<crate::remote_path::AppliedRule>,
+    /// `false` when the path cannot be opened on this machine at all —
+    /// relative, or written in a namespace this host does not speak.
+    usable: bool,
+}
+
+/// Ask the download client where it put the files, and translate the
+/// answer into brarr's namespace.
+///
+/// **This is the only place a client-supplied path enters brarr.**
+/// `verify` stats `grabs.imported_path`, which brarr wrote itself, and
+/// nothing else reads `save_path`. Keeping it to one site is what makes
+/// the mapping trustworthy.
 ///
 /// The outer `Result` is a real failure; the inner one carries a reason
 /// to wait — an unreachable client is not the grab's fault.
 async fn locate_download(
     state: &AppState,
     grab: &Grab,
-) -> Result<Result<PathBuf, String>, AppError> {
+) -> Result<Result<Located, String>, AppError> {
     let (Some(client_id), Some(item_id)) = (grab.client_id, grab.client_item_id.as_deref()) else {
         return Ok(Err(
             "o grab não registrou cliente ou identificador".to_owned()
@@ -351,17 +445,29 @@ async fn locate_download(
         Ok(c) => c,
         Err(e) => return Ok(Err(format!("{}: {e}", row.name))),
     };
-    match client.status(item_id).await {
+    let reported = match client.status(item_id).await {
         Ok(Some(status)) => match status.save_path {
-            Some(path) if !path.is_empty() => Ok(Ok(PathBuf::from(path))),
-            _ => Ok(Err(format!(
-                "{} não informou onde salvou o download",
-                row.name
-            ))),
+            Some(path) if !path.is_empty() => path,
+            _ => {
+                return Ok(Err(format!(
+                    "{} não informou onde salvou o download",
+                    row.name
+                )));
+            }
         },
-        Ok(None) => Ok(Err(format!("{} não conhece mais este download", row.name))),
-        Err(e) => Ok(Err(format!("{}: {e}", row.name))),
-    }
+        Ok(None) => return Ok(Err(format!("{} não conhece mais este download", row.name))),
+        Err(e) => return Ok(Err(format!("{}: {e}", row.name))),
+    };
+
+    let mappings = path_mappings::for_client(state.pool(), client_id).await?;
+    let translation = crate::remote_path::translate(&mappings, &reported);
+    Ok(Ok(Located {
+        path: translation.local.clone(),
+        reported,
+        client_name: row.name,
+        usable: crate::remote_path::is_usable(&translation),
+        applied: translation.applied,
+    }))
 }
 
 async fn configured_mode(state: &AppState) -> ImportMode {
@@ -377,26 +483,61 @@ async fn configured_mode(state: &AppState) -> ImportMode {
 // tested against a temporary directory without a pool or a client.
 // ---------------------------------------------------------------------
 
-/// Pick the file, build the destination, and place it.
-fn place_download(
-    source: &Path,
-    root: &Path,
-    title: &str,
+/// Why [`pick_video`] could not choose a file.
+///
+/// The split is the whole point: one of these means "fix your
+/// configuration and I will succeed", the other means "this download
+/// will never be importable". Collapsing them is what marked five
+/// finished downloads as failed while their files sat on disk.
+#[derive(Debug)]
+enum PickError {
+    /// The path could not be opened — it is not there, or brarr is not
+    /// allowed to look, or it names a place on another machine. Always a
+    /// reason to **wait**: the file may be perfectly fine and one
+    /// mapping away.
+    NotVisible(std::io::Error),
+    /// The path opened and what is inside cannot be imported. Permanent:
+    /// retrying reads the same bytes forever.
+    BadContent(String),
+}
+
+/// Everything `place_download` needs, as one value.
+///
+/// A struct rather than seven parameters because `clippy.toml` sets
+/// `too-many-arguments-threshold = 6` and the old signature was already
+/// at six.
+#[derive(Debug, Clone)]
+struct Placement {
+    /// Destination root.
+    root: PathBuf,
+    /// Catalogue title.
+    title: String,
+    /// Release year, for the folder name.
     year: Option<i32>,
+    /// Season and episode, for a series.
     episode: Option<(u16, u16)>,
+    /// Hardlink, copy or move.
     mode: ImportMode,
-) -> ImportOutcome {
-    let video = match pick_video(source, episode) {
+}
+
+/// Pick the file, build the destination, and place it.
+fn place_download(source: &Path, plan: &Placement) -> ImportOutcome {
+    let video = match pick_video(source, plan.episode) {
         Ok(path) => path,
-        Err(reason) => return ImportOutcome::Permanent(reason),
+        // The caller turns this into a sentence that names the mapping;
+        // here we only know it could not be opened.
+        Err(PickError::NotVisible(e)) => {
+            return ImportOutcome::Waiting(format!("não consegui abrir {}: {e}", source.display()));
+        }
+        Err(PickError::BadContent(reason)) => return ImportOutcome::Permanent(reason),
     };
     let extension = video.extension().map_or_else(
         || "mkv".to_owned(),
         |e| e.to_string_lossy().to_ascii_lowercase(),
     );
-    let destination = destination(root, title, year, episode, &extension);
+    let destination = destination(&plan.root, &plan.title, plan.year, plan.episode, &extension);
 
-    match place(&video, &destination, mode) {
+    match place(&video, &destination, plan.mode) {
         Ok(used) => ImportOutcome::Imported {
             path: destination,
             mode: used,
@@ -412,26 +553,51 @@ fn place_download(
 /// refinement for episodes: when several videos are present and one
 /// names the episode, that one wins — a season pack that slipped through
 /// must not import its first file as episode 7.
-fn pick_video(source: &Path, episode: Option<(u16, u16)>) -> Result<PathBuf, String> {
-    if source.is_file() {
+fn pick_video(source: &Path, episode: Option<(u16, u16)>) -> Result<PathBuf, PickError> {
+    // One `metadata` call at the top, instead of `is_file()` then
+    // `is_dir()`. Those two throw the error away, so "the directory is
+    // not there" and "I am not allowed to look" came out identical — and
+    // both were treated as permanent, which burned a release per sweep
+    // over what was really a container configuration problem.
+    let meta = match std::fs::metadata(source) {
+        Ok(meta) => meta,
+        Err(e) => return Err(PickError::NotVisible(e)),
+    };
+    if meta.is_file() {
         return if is_video(source) {
             Ok(source.to_path_buf())
         } else {
-            Err(format!("{} não é um arquivo de vídeo", source.display()))
+            Err(PickError::BadContent(format!(
+                "{} não é um arquivo de vídeo",
+                source.display()
+            )))
         };
     }
-    if !source.is_dir() {
-        return Err(format!("{} não existe mais", source.display()));
+    if !meta.is_dir() {
+        return Err(PickError::BadContent(format!(
+            "{} não é nem arquivo nem diretório",
+            source.display()
+        )));
+    }
+
+    // The top-level listing is the other half of the same problem: a
+    // release folder brarr can `stat` but not `read_dir` (the client
+    // runs as a different uid) yields zero candidates, which used to
+    // read as "no video in here" — permanent — instead of "I cannot see
+    // inside". Subdirectories stay tolerant: one unreadable `Subs/` must
+    // not sink an import whose video is right there.
+    if let Err(e) = std::fs::read_dir(source) {
+        return Err(PickError::NotVisible(e));
     }
 
     let mut candidates: Vec<(PathBuf, u64)> = Vec::new();
     collect_videos(source, &mut candidates, 0);
     candidates.retain(|(path, _)| !looks_like_sample(path, source));
     if candidates.is_empty() {
-        return Err(format!(
+        return Err(PickError::BadContent(format!(
             "nenhum arquivo de vídeo encontrado em {}",
             source.display()
-        ));
+        )));
     }
 
     if let Some((season, number)) = episode {
@@ -447,11 +613,11 @@ fn pick_video(source: &Path, episode: Option<(u16, u16)>) -> Result<PathBuf, Str
             return Ok(named[0].0.clone());
         }
         if named.is_empty() && candidates.len() > 1 {
-            return Err(format!(
+            return Err(PickError::BadContent(format!(
                 "{} vídeos em {} e nenhum identifica S{season:02}E{number:02}",
                 candidates.len(),
                 source.display()
-            ));
+            )));
         }
     }
 
@@ -848,7 +1014,14 @@ mod tests {
         dir.file("Pack/part1.mkv", 100);
         dir.file("Pack/part2.mkv", 200);
         let err = pick_video(&dir.path().join("Pack"), Some((4, 7))).unwrap_err();
-        assert!(err.contains("S04E07"), "got {err}");
+        match err {
+            PickError::BadContent(reason) => {
+                assert!(reason.contains("S04E07"), "got {reason}");
+            }
+            other @ PickError::NotVisible(_) => {
+                panic!("an ambiguous pack is permanent, got {other:?}")
+            }
+        }
     }
 
     #[test]
@@ -934,11 +1107,13 @@ mod tests {
 
         let outcome = place_download(
             &dir.path().join("download/The.Boys.S04E07.1080p.WEB-DL"),
-            &root,
-            "The Boys",
-            Some(2019),
-            Some((4, 7)),
-            ImportMode::Hardlink,
+            &Placement {
+                root: root.clone(),
+                title: "The Boys".to_owned(),
+                year: Some(2019),
+                episode: Some((4, 7)),
+                mode: ImportMode::Hardlink,
+            },
         );
         match outcome {
             ImportOutcome::Imported { path, .. } => {
@@ -1043,6 +1218,107 @@ mod tests {
             grabs::get_by_id(&pool, grab.id).await.unwrap().status,
             GrabStatus::Completed
         );
+    }
+
+    #[test]
+    fn a_source_brarr_cannot_see_waits_instead_of_failing() {
+        // The production incident, at the unit that decides it. The
+        // client reports a path; brarr's container has no such path.
+        // Marking this permanent burned a release per sweep.
+        let dir = TempDir::new("invisible");
+        let root = dir.path().join("library");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let outcome = place_download(
+            &dir.path().join("nao/existe/em/lugar/nenhum"),
+            &Placement {
+                root,
+                title: "The Matrix".to_owned(),
+                year: Some(1999),
+                episode: None,
+                mode: ImportMode::Hardlink,
+            },
+        );
+
+        assert!(
+            matches!(outcome, ImportOutcome::Waiting(_)),
+            "a path brarr cannot open is configuration, not a dead release — got {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn a_folder_with_no_video_is_still_permanent() {
+        // The other side of the split: this one really will never work,
+        // and waiting on it forever would be its own bug.
+        let dir = TempDir::new("novideo");
+        dir.file("Release/leiame.txt", 10);
+        let root = dir.path().join("library");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let outcome = place_download(
+            &dir.path().join("Release"),
+            &Placement {
+                root,
+                title: "The Matrix".to_owned(),
+                year: Some(1999),
+                episode: None,
+                mode: ImportMode::Hardlink,
+            },
+        );
+
+        assert!(
+            matches!(outcome, ImportOutcome::Permanent(_)),
+            "got {outcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn waiting_records_a_reason_the_operator_can_act_on() {
+        let pool = crate::db::open_memory().await.unwrap();
+        let grab = pending_grab(&pool).await;
+        let state = test_state(pool.clone());
+
+        import_pending(&state).await.unwrap();
+
+        let after = grabs::get_by_id(&pool, grab.id).await.unwrap();
+        assert_eq!(after.status, GrabStatus::Completed);
+        assert!(
+            after.import_wait_reason.is_some(),
+            "waiting used to be invisible — it lived in a debug! log while five \
+             finished downloads sat on disk with nothing in the UI able to say why"
+        );
+        assert!(
+            after.error.is_none(),
+            "waiting is not failing, so the failure column stays empty"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stuck_grab_does_not_starve_the_import_queue() {
+        // `awaiting_import` used to order by `updated_at` alone. Waiting
+        // does not move `updated_at`, so with MAX_IMPORTS_PER_PASS = 3
+        // the same three stuck rows were retried forever and everything
+        // behind them was never attempted.
+        let pool = crate::db::open_memory().await.unwrap();
+        let state = test_state(pool.clone());
+
+        let first = pending_grab(&pool).await;
+        import_pending(&state).await.unwrap();
+
+        let after = grabs::get_by_id(&pool, first.id).await.unwrap();
+        assert!(
+            after.import_attempted_at.is_some(),
+            "the importer needs its own clock, distinct from updated_at"
+        );
+        assert_eq!(
+            after.updated_at, first.updated_at,
+            "an attempt is not a state change: moving updated_at would keep \
+             resetting the queue's MISSING_GRACE window"
+        );
+
+        // A never-attempted grab sorts ahead of the stuck one.
+        let queue = grabs::awaiting_import(&pool).await.unwrap();
+        assert_eq!(queue.len(), 1);
     }
 
     #[test]

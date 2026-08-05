@@ -199,6 +199,17 @@ pub struct Grab {
     /// barrier key, so the same release can be acquired again — usually
     /// exactly what an operator who deleted a file by accident wants.
     pub file_missing_at: Option<OffsetDateTime>,
+    /// Why the last import attempt could not proceed. `None` when it
+    /// could. Deliberately not [`Self::error`]: that column means "this
+    /// grab failed" everywhere else in the code, and the whole point of
+    /// this one is that waiting is not failing.
+    pub import_wait_reason: Option<String>,
+    /// When the importer last looked at this grab, whatever it
+    /// concluded. Distinct from [`Self::updated_at`], which means "the
+    /// state changed" — waiting changes no state, so without a separate
+    /// clock a stuck grab keeps its place at the head of the import
+    /// queue forever and starves everything behind it.
+    pub import_attempted_at: Option<OffsetDateTime>,
     /// When the reservation was taken.
     pub grabbed_at: OffsetDateTime,
     /// Last status change.
@@ -234,7 +245,7 @@ pub struct NewGrab<'a> {
 const GRAB_COLUMNS: &str = "id, item_id, episode_id, season_number, decision_id, provider_id, \
      provider_name, release_id_remote, release_name, download_url, protocol, \
      client_id, client_item_id, status, error, imported_path, file_missing_at, \
-     grabbed_at, updated_at";
+     import_wait_reason, import_attempted_at, grabbed_at, updated_at";
 
 fn opt_uuid_at(row: &SqliteRow, col: &str) -> Result<Option<Uuid>, AppError> {
     let raw: Option<String> = row.try_get(col)?;
@@ -278,6 +289,10 @@ fn row_to_grab(row: &SqliteRow) -> Result<Grab, AppError> {
         imported_path: row.try_get("imported_path")?,
         file_missing_at: row
             .try_get::<Option<i64>, _>("file_missing_at")?
+            .and_then(|ts| OffsetDateTime::from_unix_timestamp(ts).ok()),
+        import_wait_reason: row.try_get("import_wait_reason")?,
+        import_attempted_at: row
+            .try_get::<Option<i64>, _>("import_attempted_at")?
             .and_then(|ts| OffsetDateTime::from_unix_timestamp(ts).ok()),
         grabbed_at: OffsetDateTime::from_unix_timestamp(grabbed)
             .map_err(|e| AppError::InvalidInput(format!("invalid grabs.grabbed_at: {e}")))?,
@@ -371,13 +386,16 @@ pub async fn set_status(
     } else {
         None
     };
-    let res = sqlx::query("UPDATE grabs SET status = ?, error = ?, updated_at = ? WHERE id = ?")
-        .bind(status.label())
-        .bind(error)
-        .bind(OffsetDateTime::now_utc().unix_timestamp())
-        .bind(id.to_string())
-        .execute(pool)
-        .await?;
+    let res = sqlx::query(
+        "UPDATE grabs SET status = ?, error = ?, import_wait_reason = NULL, \
+         updated_at = ? WHERE id = ?",
+    )
+    .bind(status.label())
+    .bind(error)
+    .bind(OffsetDateTime::now_utc().unix_timestamp())
+    .bind(id.to_string())
+    .execute(pool)
+    .await?;
     if res.rows_affected() == 0 {
         return Err(AppError::NotFound(format!("grab {id}")));
     }
@@ -523,15 +541,120 @@ pub async fn mark_sent(
 }
 
 /// Grabs the download client has finished with, waiting for the import
-/// to move them into the library. Oldest first — the one that has been
-/// waiting longest goes first.
+/// to move them into the library.
+///
+/// **Least recently attempted first, then oldest.** Ordering by
+/// `updated_at` alone starves the queue: a grab that waits does not
+/// change state, so `updated_at` does not move, so the same few rows sit
+/// at the head of a `MAX_IMPORTS_PER_PASS`-sized window forever and
+/// everything behind them is never tried. `import_attempted_at` is the
+/// importer's own clock — when it *looked*, not when the grab *changed*.
+/// NULL sorts first in ASC on SQLite, so a freshly completed grab still
+/// cuts ahead of the stuck set.
 ///
 /// # Errors
 ///
 /// Returns [`AppError::Database`] on SQL failure.
 pub async fn awaiting_import(pool: &Pool) -> Result<Vec<Grab>, AppError> {
     let rows = sqlx::query(&format!(
-        "SELECT {GRAB_COLUMNS} FROM grabs WHERE status = 'completed' ORDER BY updated_at ASC"
+        "SELECT {GRAB_COLUMNS} FROM grabs WHERE status = 'completed' \
+         ORDER BY import_attempted_at ASC, updated_at ASC"
+    ))
+    .fetch_all(pool)
+    .await?;
+    rows.iter().map(row_to_grab).collect()
+}
+
+/// Record that the importer looked at this grab.
+///
+/// Deliberately does not touch `updated_at`: nothing about the grab
+/// changed state, and `updated_at` is what [`crate::queue`]'s
+/// `MISSING_GRACE` measures from — moving it here would keep resetting
+/// that grace period. Deliberately does not check `rows_affected`: a
+/// grab deleted mid-pass is not worth aborting the pass over.
+///
+/// # Errors
+///
+/// Returns [`AppError::Database`] on SQL failure.
+pub async fn mark_import_attempted(pool: &Pool, id: Uuid) -> Result<(), AppError> {
+    sqlx::query("UPDATE grabs SET import_attempted_at = ? WHERE id = ?")
+        .bind(OffsetDateTime::now_utc().unix_timestamp())
+        .bind(id.to_string())
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Record why the last import attempt could not proceed, or clear it.
+/// Also leaves `updated_at` alone, for the same reason.
+///
+/// # Errors
+///
+/// Returns [`AppError::Database`] on SQL failure.
+pub async fn set_import_wait_reason(
+    pool: &Pool,
+    id: Uuid,
+    reason: Option<&str>,
+) -> Result<(), AppError> {
+    sqlx::query("UPDATE grabs SET import_wait_reason = ? WHERE id = ?")
+        .bind(reason)
+        .bind(id.to_string())
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Put a failed grab back in the import queue. `true` when a row moved.
+///
+/// One statement rather than read-then-write: the `WHERE` clause **is**
+/// the lock, so a double click is a no-op and no URL can drag a
+/// `reserved` or `imported` grab into `completed`. The two client
+/// conditions are there because a grab that failed during *delivery*
+/// never reached a client at all — requeuing it would only make it wait
+/// forever on "o grab não registrou cliente ou identificador".
+/// Re-delivering is a different feature.
+///
+/// Nothing is downloaded again, and the barrier key does not change
+/// hands: it is the same row moving between two states that both occupy
+/// it. `import_attempted_at = NULL` sends it to the front of the queue —
+/// the operator asked for this one, now.
+///
+/// # Errors
+///
+/// Returns [`AppError::Database`] on SQL failure.
+pub async fn requeue_import(pool: &Pool, id: Uuid) -> Result<bool, AppError> {
+    let res = sqlx::query(
+        "UPDATE grabs \
+            SET status = 'completed', error = NULL, import_wait_reason = NULL, \
+                import_attempted_at = NULL, updated_at = ? \
+          WHERE id = ? AND status = 'failed' AND imported_path IS NULL \
+            AND client_id IS NOT NULL AND client_item_id IS NOT NULL",
+    )
+    .bind(OffsetDateTime::now_utc().unix_timestamp())
+    .bind(id.to_string())
+    .execute(pool)
+    .await?;
+    Ok(res.rows_affected() > 0)
+}
+
+/// Failed grabs whose download a client may still hold — exactly the set
+/// [`requeue_import`] can act on, and what the mappings screen lists.
+///
+/// **No filtering by message.** The predicate does not know *why* each
+/// one failed, and pretending it does is how a "reimport everything"
+/// button stays lit forever: it requeues genuinely permanent failures,
+/// they fail again, and the count never drops. The UI shows each row's
+/// `error` and lets the operator decide.
+///
+/// # Errors
+///
+/// Returns [`AppError::Database`] on SQL failure.
+pub async fn retryable_imports(pool: &Pool) -> Result<Vec<Grab>, AppError> {
+    let rows = sqlx::query(&format!(
+        "SELECT {GRAB_COLUMNS} FROM grabs \
+          WHERE status = 'failed' AND imported_path IS NULL \
+            AND client_id IS NOT NULL AND client_item_id IS NOT NULL \
+          ORDER BY updated_at DESC"
     ))
     .fetch_all(pool)
     .await?;
@@ -547,8 +670,8 @@ pub async fn awaiting_import(pool: &Pool) -> Result<Vec<Grab>, AppError> {
 /// - [`AppError::Database`] on SQL failure.
 pub async fn mark_imported(pool: &Pool, id: Uuid, path: &str) -> Result<(), AppError> {
     let res = sqlx::query(
-        "UPDATE grabs SET status = 'imported', error = NULL, imported_path = ?, \
-         updated_at = ? WHERE id = ?",
+        "UPDATE grabs SET status = 'imported', error = NULL, import_wait_reason = NULL, \
+         imported_path = ?, updated_at = ? WHERE id = ?",
     )
     .bind(path)
     .bind(OffsetDateTime::now_utc().unix_timestamp())
