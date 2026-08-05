@@ -20,9 +20,30 @@
 </div>
 {% endif %}
 
+{# Duas colunas: um menu à esquerda e uma seção por vez à direita.
+   A tela tinha nove cartões numa coluna só e ficou impossível de ler.
+
+   As seções escondidas continuam no DOM, e isso é de propósito: o form
+   grande manda Conectividade, Workers, TMDB, Retenção, Import e
+   Diagnóstico num POST só. Fatiar o POST exigiria que todo campo
+   virasse "ausente = manter", e um erro ali apaga configuração de
+   verdade. Esconder com CSS mantém os inputs no envio. #}
+<div class="grid grid-cols-1 md:grid-cols-[200px_1fr] gap-6 items-start">
+
+<nav class="flex flex-col gap-0.5 md:sticky lg:top-4">
+    <a class="settings-nav-link" {% if section == "acesso" %}data-active="true"{% endif %} href="/settings?s=acesso">Acesso</a>
+    <a class="settings-nav-link" {% if section == "automacao" %}data-active="true"{% endif %} href="/settings?s=automacao">Automação</a>
+    <a class="settings-nav-link" {% if section == "metadados" %}data-active="true"{% endif %} href="/settings?s=metadados">Metadados</a>
+    <a class="settings-nav-link" {% if section == "dados" %}data-active="true"{% endif %} href="/settings?s=dados">Dados</a>
+    <a class="settings-nav-link" {% if section == "integracao" %}data-active="true"{% endif %} href="/settings?s=integracao">Integração</a>
+    <a class="settings-nav-link" {% if section == "diagnostico" %}data-active="true"{% endif %} href="/settings?s=diagnostico">Diagnóstico</a>
+</nav>
+
+<div class="min-w-0">
+
 {# Token rotation — separate form because changing it logs the
    current session out, and we want a hard confirmation step. #}
-<section class="card-hairline bg-bg-surface border border-border-default rounded-xl p-5 mb-6">
+<section class="settings-section {% if section != "acesso" %}hidden{% endif %} card-hairline bg-bg-surface border border-border-default rounded-xl p-5 mb-6">
     <header class="flex items-center justify-between mb-4">
         <h2 class="text-lg font-semibold text-fg-primary">Token de acesso</h2>
         <span class="text-xs px-2 py-0.5 rounded font-medium
@@ -60,7 +81,7 @@
         </label>
         <div class="md:col-span-3 flex items-center gap-2">
             <button type="submit"
-                    class="px-4 h-10 rounded-md bg-accent-solid text-on-accent-solid text-sm font-semibold hover:bg-accent-solid-hover">
+                    class="btn btn-md btn-primary">
                 Trocar token
             </button>
             <span class="text-xs text-fg-muted">Sugestão: <code class="font-mono">openssl rand -hex 32</code></span>
@@ -73,7 +94,7 @@
    filled. #}
 <form method="post" action="/settings/general" class="space-y-6">
 
-    <section class="card-hairline bg-bg-surface border border-border-default rounded-xl p-5">
+    <section class="settings-section {% if section != "acesso" %}hidden{% endif %} card-hairline bg-bg-surface border border-border-default rounded-xl p-5">
         <header class="mb-4">
             <h2 class="text-lg font-semibold text-fg-primary">Conectividade</h2>
             <p class="text-xs text-fg-muted mt-1">Bypass de auth por IP, proxies confiáveis para <code class="font-mono">X-Forwarded-For</code> e URL pública para links de download.</p>
@@ -102,7 +123,7 @@
         </div>
     </section>
 
-    <section class="card-hairline bg-bg-surface border border-border-default rounded-xl p-5">
+    <section class="settings-section {% if section != "automacao" %}hidden{% endif %} card-hairline bg-bg-surface border border-border-default rounded-xl p-5">
         <header class="mb-4">
             <h2 class="text-lg font-semibold text-fg-primary">Workers</h2>
             <p class="text-xs text-fg-muted mt-1">Cadência do poller que checa *arr/wanted. Mínimo 60s.</p>
@@ -114,7 +135,7 @@
         </label>
     </section>
 
-    <section class="card-hairline bg-bg-surface border border-border-default rounded-xl p-5">
+    <section class="settings-section {% if section != "metadados" %}hidden{% endif %} card-hairline bg-bg-surface border border-border-default rounded-xl p-5">
         <header class="mb-4">
             <div class="flex items-center gap-2">
                 <h2 class="text-lg font-semibold text-fg-primary">TMDB</h2>
@@ -154,7 +175,7 @@
         </div>
     </section>
 
-    <section class="card-hairline bg-bg-surface border border-border-default rounded-xl p-5">
+    <section class="settings-section {% if section != "dados" %}hidden{% endif %} card-hairline bg-bg-surface border border-border-default rounded-xl p-5">
         <header class="mb-4">
             <h2 class="text-lg font-semibold text-fg-primary">Histórico &amp; retenção</h2>
             <p class="text-xs text-fg-muted mt-1">Quantos dias de <code class="font-mono">decisions</code>/<code class="font-mono">searches</code> manter antes da poda automática. <code class="font-mono">0</code> = manter pra sempre. Decisões já empurradas ao *arr são preservadas.</p>
@@ -171,7 +192,7 @@
         </label>
     </section>
 
-    <section class="card-hairline bg-bg-surface border border-border-default rounded-xl p-5">
+    <section class="settings-section {% if section != "automacao" %}hidden{% endif %} card-hairline bg-bg-surface border border-border-default rounded-xl p-5">
         <header class="mb-4">
             <h2 class="text-lg font-semibold text-fg-primary">Import</h2>
             <p class="text-xs text-fg-muted mt-1">Como o arquivo sai da pasta do cliente de download e entra na biblioteca.</p>
@@ -194,7 +215,7 @@
         </p>
     </section>
 
-    <section class="card-hairline bg-bg-surface border border-border-default rounded-xl p-5">
+    <section class="settings-section {% if section != "diagnostico" %}hidden{% endif %} card-hairline bg-bg-surface border border-border-default rounded-xl p-5">
         <header class="mb-4">
             <h2 class="text-lg font-semibold text-fg-primary">Diagnóstico</h2>
             <p class="text-xs text-fg-muted mt-1">Filtro do <code class="font-mono">tracing</code> e modo de backtrace.</p>
@@ -224,7 +245,7 @@
 
     <div class="flex items-center gap-2">
         <button type="submit"
-                class="px-4 h-10 rounded-md bg-accent-solid text-on-accent-solid text-sm font-semibold hover:bg-accent-solid-hover">
+                class="btn btn-md btn-primary">
             Salvar configurações
         </button>
         <span class="text-xs text-fg-muted">Persistido em <code class="font-mono">settings</code> e propagado no próximo request.</span>
@@ -233,7 +254,7 @@
 
 {# Maintenance actions live outside the general form: each posts to its
    own endpoint and runs on demand (HTML forbids nested forms). #}
-<section class="card-hairline bg-bg-surface border border-border-default rounded-xl p-5 mt-6">
+<section class="settings-section {% if section != "dados" %}hidden{% endif %} card-hairline bg-bg-surface border border-border-default rounded-xl p-5 mt-6">
     <header class="mb-4">
         <h2 class="text-lg font-semibold text-fg-primary">Manutenção do banco</h2>
         <p class="text-xs text-fg-muted mt-1">
@@ -245,14 +266,14 @@
     <div class="flex flex-wrap items-center gap-3">
         <form method="post" action="/settings/maintenance/prune">
             <button type="submit"
-                    class="px-4 h-10 rounded-md bg-accent-solid text-on-accent-solid text-sm font-semibold hover:bg-accent-solid-hover">
+                    class="btn btn-md btn-primary">
                 Podar agora
             </button>
         </form>
         <form method="post" action="/settings/maintenance/vacuum"
               onsubmit="return confirm('VACUUM reescreve o banco inteiro e trava escritas durante a operação. Continuar?');">
             <button type="submit"
-                    class="px-4 h-10 rounded-md bg-bg-canvas border border-border-strong text-fg-primary text-sm font-semibold hover:border-accent-solid">
+                    class="btn btn-md btn-secondary">
                 Compactar (VACUUM)
             </button>
         </form>
@@ -264,7 +285,7 @@
          data-base-torznab="{{ values.torznab_base }}"
          data-base-newznab="{{ values.newznab_base }}"
          data-apikey="{{ values.indexer_apikey }}"
-         class="card-hairline bg-bg-surface border border-border-default rounded-xl p-5 mt-6">
+         class="settings-section {% if section != "integracao" %}hidden{% endif %} card-hairline bg-bg-surface border border-border-default rounded-xl p-5 mt-6">
     <header class="mb-4">
         <h2 class="text-lg font-semibold text-fg-primary">Indexer (brarr como provider)</h2>
         <p class="text-xs text-fg-muted mt-1">
@@ -297,7 +318,7 @@
             <input id="tz-url" readonly value=""
                    class="flex-1 px-3 h-10 rounded-md bg-bg-canvas border border-border-strong text-[12px] font-mono text-fg-secondary focus:outline-none">
             <button type="button" data-copy-target="#tz-url"
-                    class="px-4 h-10 rounded-md bg-accent-solid text-on-accent-solid text-sm font-semibold hover:bg-accent-solid-hover whitespace-nowrap">Copiar URL</button>
+                    class="btn btn-md btn-primary whitespace-nowrap">Copiar URL</button>
         </div>
     </div>
 
@@ -325,5 +346,8 @@
   };
   brarrTzBuild();
 </script>
+
+</div>
+</div>
 
 {% endblock %}

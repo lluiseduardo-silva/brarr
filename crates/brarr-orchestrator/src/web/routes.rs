@@ -2894,9 +2894,39 @@ fn urlencoding(s: &str) -> String {
 
 const MIN_POLL_INTERVAL_SECS: u64 = 60;
 
-async fn settings_index(State(state): State<AppState>) -> Result<Response, AppError> {
+/// Which side-menu group `/settings` shows. Unknown or absent falls
+/// back to the first one rather than an empty page.
+#[derive(Debug, Default, Deserialize)]
+struct SettingsQuery {
+    #[serde(default)]
+    s: Option<String>,
+}
+
+/// The groups the settings side menu offers, in order.
+const SETTINGS_SECTIONS: &[&str] = &[
+    "acesso",
+    "automacao",
+    "metadados",
+    "dados",
+    "integracao",
+    "diagnostico",
+];
+
+fn settings_section(raw: Option<&str>) -> String {
+    let wanted = raw.unwrap_or("").trim();
+    SETTINGS_SECTIONS
+        .iter()
+        .find(|s| **s == wanted)
+        .map_or_else(|| SETTINGS_SECTIONS[0].to_string(), |s| (*s).to_string())
+}
+
+async fn settings_index(
+    State(state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<SettingsQuery>,
+) -> Result<Response, AppError> {
     let values = load_settings_values(&state).await?;
     let tmpl = SettingsTemplate {
+        section: settings_section(q.s.as_deref()),
         values,
         flash: None,
     };
@@ -2976,6 +3006,10 @@ fn settings_flash_render(
         // whatever the save actually persisted.
         values.auth_enabled = state.auth().is_enabled();
         let tmpl = SettingsTemplate {
+            // A flash always comes from a save, and every save posts
+            // from a section — but the redirect target is not known
+            // here, so land on the first group with the banner visible.
+            section: settings_section(None),
             values,
             flash: Some(flash),
         };

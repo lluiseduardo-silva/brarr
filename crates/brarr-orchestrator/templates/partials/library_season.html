@@ -20,7 +20,7 @@
             hx-post="/library/{{ item_id }}/episode/{{ e.id }}/monitor"
             hx-target="#ep-{{ e.id }}"
             hx-swap="outerHTML"
-            class="shrink-0 px-2.5 h-7 rounded-md text-xs font-medium {% if e.monitored %}bg-bg-canvas border border-border-strong text-fg-secondary{% else %}bg-accent-soft text-accent-soft-fg{% endif %}">
+            class="shrink-0 btn btn-sm {% if e.monitored %}btn-secondary{% else %}btn-toggle-on{% endif %}">
         {% if e.monitored %}pausar{% else %}monitorar{% endif %}
     </button>
 </div>

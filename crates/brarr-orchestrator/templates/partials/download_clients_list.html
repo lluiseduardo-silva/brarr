@@ -96,28 +96,28 @@
                                     hx-swap="outerHTML"
                                     hx-indicator="#dl-ping-{{ c.id }}"
                                     title="Autentica e lê a versão do cliente"
-                                    class="px-2.5 h-7 rounded-md bg-bg-muted text-xs font-medium text-fg-primary hover:bg-bg-surface-raised">
+                                    class="btn btn-sm btn-secondary">
                                 testar
                             </button>
                             <button hx-get="/download-clients/{{ c.id }}/edit"
                                     hx-target="#modal-target"
                                     hx-swap="innerHTML"
                                     title="Editar nome/URL/credenciais/prioridade"
-                                    class="px-2.5 h-7 rounded-md bg-bg-muted text-xs font-medium text-fg-primary hover:bg-bg-surface-raised">
+                                    class="btn btn-sm btn-secondary">
                                 editar
                             </button>
                             <button hx-post="/download-clients/{{ c.id }}/toggle"
                                     hx-target="#download-clients-list"
                                     hx-swap="outerHTML"
                                     title="Tira de rotação sem perder a config (drain mode)"
-                                    class="px-2.5 h-7 rounded-md text-xs font-medium {% if c.enabled %}bg-accent-soft text-accent-soft-fg{% else %}bg-bg-muted text-fg-primary{% endif %}">
+                                    class="btn btn-sm {% if c.enabled %}btn-toggle-on{% else %}btn-secondary{% endif %}">
                                 {% if c.enabled %}desativar{% else %}ativar{% endif %}
                             </button>
                             <button hx-delete="/download-clients/{{ c.id }}"
                                     hx-target="#download-clients-list"
                                     hx-swap="outerHTML"
                                     hx-confirm="Remover este cliente? Os grabs que passaram por ele continuam no histórico."
-                                    class="px-2.5 h-7 rounded-md text-xs font-medium text-danger-soft-fg hover:bg-danger-soft">
+                                    class="btn btn-sm btn-danger">
                                 remover
                             </button>
                         </div>

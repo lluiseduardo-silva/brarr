@@ -68,26 +68,54 @@
                     <span class="font-semibold text-xl -tracking-[0.03em]">brarr</span>
                 </a>
 
-                <ul class="flex items-center gap-1 overflow-x-auto">
-                    <li><a class="nav-link" data-section="dashboard"     href="/">Dashboard</a></li>
-                    <li><a class="nav-link" data-section="library"      href="/library">Biblioteca</a></li>
-                    <li><a class="nav-link" data-section="searches"     href="/searches">Searches</a></li>
-                    <li><a class="nav-link" data-section="providers"    href="/providers">Providers</a></li>
-                    <li><a class="nav-link" data-section="queue"           href="/queue">Fila</a></li>
-                    <li><a class="nav-link" data-section="download-clients" href="/download-clients">Clientes</a></li>
-                    <li><a class="nav-link" data-section="arr-instances" href="/arr-instances">*arr</a></li>
-                    <li><a class="nav-link" data-section="profiles"     href="/profiles">Profiles</a></li>
-                    <li><a class="nav-link" data-section="releases"     href="/releases">Releases</a></li>
-                    <li><a class="nav-link" data-section="pushes"       href="/pushes">Pushes</a></li>
-                    <li><a class="nav-link" data-section="webhooks"     href="/webhooks">Webhooks</a></li>
-                    <li><a class="nav-link" data-section="health"       href="/health">Saúde</a></li>
-                    <li><a class="nav-link" data-section="settings"     href="/settings">Settings</a></li>
+                {# Seis itens em vez de treze. A barra tinha passado a
+                   precisar de scroll próprio; o que é operação do dia a
+                   dia fica no topo, o resto vai para dois menus.
+                   `<details>` porque funciona sem JS — o nav.js só
+                   fecha ao clicar fora. #}
+                <ul class="flex items-center gap-1">
+                    <li><a class="nav-link" data-section="dashboard" href="/">Dashboard</a></li>
+                    <li><a class="nav-link" data-section="library"   href="/library">Biblioteca</a></li>
+                    <li><a class="nav-link" data-section="queue"     href="/queue">Fila</a></li>
+
+                    <li>
+                        <details class="nav-menu" data-group="buscas">
+                            <summary class="nav-link" data-section="buscas">
+                                Buscas
+                                <svg class="nav-caret" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+                            </summary>
+                            <div class="nav-dropdown">
+                                <a data-section="searches" href="/searches">Histórico de buscas</a>
+                                <a data-section="releases" href="/releases">Releases</a>
+                                <a data-section="pushes"   href="/pushes">Pushes</a>
+                            </div>
+                        </details>
+                    </li>
+
+                    <li>
+                        <details class="nav-menu" data-group="config">
+                            <summary class="nav-link" data-section="config">
+                                Configuração
+                                <svg class="nav-caret" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+                            </summary>
+                            <div class="nav-dropdown">
+                                <a data-section="providers"        href="/providers">Providers</a>
+                                <a data-section="download-clients" href="/download-clients">Clientes de download</a>
+                                <a data-section="profiles"         href="/profiles">Quality Profiles</a>
+                                <a data-section="arr-instances"    href="/arr-instances">*arr (depreciado)</a>
+                                <a data-section="webhooks"         href="/webhooks">Webhooks</a>
+                                <a data-section="settings"         href="/settings">Configurações</a>
+                            </div>
+                        </details>
+                    </li>
+
+                    <li><a class="nav-link" data-section="health" href="/health">Saúde</a></li>
                 </ul>
             </div>
 
             <div class="flex items-center gap-2">
                 <button type="button"
-                        class="theme-toggle p-2 rounded-md bg-bg-muted text-fg-secondary hover:bg-bg-surface-raised hover:text-fg-primary"
+                        class="theme-toggle btn btn-md btn-icon btn-secondary"
                         aria-label="Alternar tema claro/escuro"
                         onclick="window.brarrTheme && window.brarrTheme.toggle()">
                     <svg class="block dark:hidden" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -101,7 +129,7 @@
 
                 <form action="/logout" method="post" class="contents">
                     <button type="submit"
-                            class="flex items-center gap-1.5 px-3 py-2 rounded-md text-fg-secondary hover:text-fg-primary hover:bg-bg-muted text-sm font-medium">
+                            class="btn btn-md btn-ghost">
                         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                             <path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4M16 17l5-5-5-5M21 12H9"/>
                         </svg>

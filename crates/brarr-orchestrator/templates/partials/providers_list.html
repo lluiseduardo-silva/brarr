@@ -82,35 +82,35 @@
                                     hx-target="#ping-{{ p.id }}"
                                     hx-swap="outerHTML"
                                     hx-indicator="#ping-{{ p.id }}"
-                                    class="px-2.5 h-7 rounded-md bg-bg-muted text-xs font-medium text-fg-primary hover:bg-bg-surface-raised">
+                                    class="btn btn-sm btn-secondary">
                                 testar
                             </button>
                             <button hx-get="/providers/{{ p.id }}/edit"
                                     hx-target="#modal-target"
                                     hx-swap="innerHTML"
                                     title="Editar nome/URL/token/kind"
-                                    class="px-2.5 h-7 rounded-md bg-bg-muted text-xs font-medium text-fg-primary hover:bg-bg-surface-raised">
+                                    class="btn btn-sm btn-secondary">
                                 editar
                             </button>
                             <button hx-post="/providers/{{ p.id }}/toggle"
                                     hx-target="#providers-list"
                                     hx-swap="outerHTML"
                                     title="Liga/desliga sem perder config (drain mode)"
-                                    class="px-2.5 h-7 rounded-md text-xs font-medium {% if p.enabled %}bg-accent-soft text-accent-soft-fg{% else %}bg-bg-muted text-fg-primary{% endif %}">
+                                    class="btn btn-sm {% if p.enabled %}btn-toggle-on{% else %}btn-secondary{% endif %}">
                                 {% if p.enabled %}desativar{% else %}ativar{% endif %}
                             </button>
                             <a href="/providers/{{ p.id }}/probe?imdb=tt0133093"
                                target="_blank"
                                rel="noopener"
                                title="Roda uma busca real e devolve JSON cru + Release parsed (Matrix tt0133093 por default)"
-                               class="px-2.5 h-7 inline-flex items-center rounded-md bg-secondary-soft text-xs font-medium text-secondary-soft-fg">
+                               class="btn btn-sm btn-secondary">
                                 inspecionar
                             </a>
                             <button hx-delete="/providers/{{ p.id }}"
                                     hx-target="#provider-{{ p.id }}"
                                     hx-swap="outerHTML"
                                     hx-confirm="Remover este provider?"
-                                    class="px-2.5 h-7 rounded-md text-xs font-medium text-danger-soft-fg hover:bg-danger-soft">
+                                    class="btn btn-sm btn-danger">
                                 remover
                             </button>
                         </div>

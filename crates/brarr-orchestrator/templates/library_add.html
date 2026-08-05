@@ -9,7 +9,7 @@
             Busque no TMDB e escolha o que o brarr deve monitorar.
         </p>
     </div>
-    <a href="/library" class="px-4 h-10 inline-flex items-center rounded-md text-sm font-medium bg-bg-muted text-fg-secondary hover:text-fg-primary">
+    <a href="/library" class="btn btn-md btn-secondary">
         ← Biblioteca
     </a>
 </div>
@@ -20,7 +20,7 @@
     <p class="text-sm text-fg-muted mb-4">
         Informe o token de leitura (v4) ou a API key (v3) em configurações. O brarr aceita os dois.
     </p>
-    <a href="/settings" class="inline-flex items-center gap-2 px-5 h-10 rounded-lg border border-accent-solid border-dashed text-sm font-medium text-accent-soft-fg">
+    <a href="/settings" class="btn btn-md btn-ghost border border-dashed border-accent-solid text-accent-soft-fg">
         Ir para configurações →
     </a>
 </div>
@@ -38,7 +38,7 @@
             <option value="tv" {% if kind == "tv" %}selected{% endif %}>Só séries</option>
         </select>
         <button type="submit"
-                class="brand-gradient px-6 h-11 rounded-md text-white text-sm font-semibold whitespace-nowrap">
+                class="btn btn-lg btn-brand">
             Buscar
         </button>
     </div>
@@ -90,7 +90,7 @@
             <input type="hidden" name="tmdb_id" value="{{ r.tmdb_id }}">
             <input type="hidden" name="media_type" value="{{ r.media_type }}">
             <button type="submit"
-                    class="inline-flex items-center gap-1.5 px-4 h-8 rounded-md bg-accent-soft text-accent-soft-fg text-sm font-medium whitespace-nowrap">
+                    class="btn btn-md btn-toggle-on">
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
                 Adicionar
             </button>

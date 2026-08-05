@@ -8,11 +8,11 @@
    a single query. #}
 <button hx-post="/library/{{ it.id }}/monitor"
         title="{% if it.monitored %}pausar monitoramento{% else %}voltar a monitorar{% endif %}"
-        class="px-2.5 h-7 rounded-md text-xs font-medium {% if it.monitored %}bg-bg-muted text-fg-secondary{% else %}bg-accent-soft text-accent-soft-fg{% endif %}">
+        class="btn btn-sm {% if it.monitored %}btn-secondary{% else %}btn-toggle-on{% endif %}">
     {% if it.monitored %}pausar{% else %}monitorar{% endif %}
 </button>
 <button hx-delete="/library/{{ it.id }}"
         hx-confirm="Remover “{{ it.title }}” da biblioteca? O histórico de grabs vai junto."
-        class="px-2.5 h-7 rounded-md text-xs font-medium text-danger-soft-fg hover:bg-danger-soft">
+        class="btn btn-sm btn-danger">
     remover
 </button>

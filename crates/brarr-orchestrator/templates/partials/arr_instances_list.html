@@ -80,7 +80,7 @@
                                    class="w-20 h-8 px-2 rounded-md bg-bg-canvas border border-border-strong text-sm font-mono font-semibold text-fg-primary focus:outline-none focus:border-accent-solid">
                             <button type="submit"
                                     title="Salvar novo threshold"
-                                    class="w-8 h-8 inline-flex items-center justify-center rounded-md bg-accent-soft text-accent-soft-fg hover:bg-accent-solid hover:text-accent-fg">
+                                    class="btn btn-sm btn-icon btn-toggle-on">
                                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
                                     <path d="M5 12l5 5L20 7"/>
                                 </svg>
@@ -99,7 +99,7 @@
                                     hx-target="#arr-ping-{{ a.id }}"
                                     hx-swap="outerHTML"
                                     hx-indicator="#arr-ping-{{ a.id }}"
-                                    class="px-2.5 h-7 rounded-md bg-bg-muted text-xs font-medium text-fg-primary hover:bg-bg-surface-raised">
+                                    class="btn btn-sm btn-secondary">
                                 testar
                             </button>
                             <button hx-post="/arr-instances/{{ a.id }}/poll-now"
@@ -108,35 +108,35 @@
                                     hx-indicator="#arr-ping-{{ a.id }}"
                                     hx-confirm="Rodar um ciclo de poll agora? Pode levar minutos."
                                     title="Varre wanted items + dispara push automático"
-                                    class="px-2.5 h-7 rounded-md bg-secondary-soft text-xs font-medium text-secondary-soft-fg">
+                                    class="btn btn-sm btn-secondary">
                                 rodar agora
                             </button>
                             <button hx-get="/arr-instances/{{ a.id }}/edit"
                                     hx-target="#modal-target"
                                     hx-swap="innerHTML"
                                     title="Editar nome/URL/api key/profile"
-                                    class="px-2.5 h-7 rounded-md bg-bg-muted text-xs font-medium text-fg-primary hover:bg-bg-surface-raised">
+                                    class="btn btn-sm btn-secondary">
                                 editar
                             </button>
                             <button hx-post="/arr-instances/{{ a.id }}/webhook-driven"
                                     hx-target="#arr-instances-list"
                                     hx-swap="outerHTML"
                                     title="Quando ligado, o poller agendado pula esta instância (confia no webhook em tempo real). 'Rodar agora' continua funcionando."
-                                    class="px-2.5 h-7 rounded-md text-xs font-medium {% if a.webhook_driven %}bg-info-soft text-info-soft-fg{% else %}bg-bg-muted text-fg-primary{% endif %}">
+                                    class="btn btn-sm {% if a.webhook_driven %}btn-toggle-on{% else %}btn-secondary{% endif %}">
                                 {% if a.webhook_driven %}poll: webhook{% else %}poll: auto{% endif %}
                             </button>
                             <button hx-post="/arr-instances/{{ a.id }}/toggle"
                                     hx-target="#arr-instances-list"
                                     hx-swap="outerHTML"
                                     title="Liga/desliga sem perder config"
-                                    class="px-2.5 h-7 rounded-md text-xs font-medium {% if a.enabled %}bg-accent-soft text-accent-soft-fg{% else %}bg-bg-muted text-fg-primary{% endif %}">
+                                    class="btn btn-sm {% if a.enabled %}btn-toggle-on{% else %}btn-secondary{% endif %}">
                                 {% if a.enabled %}desativar{% else %}ativar{% endif %}
                             </button>
                             <button hx-delete="/arr-instances/{{ a.id }}"
                                     hx-target="#arr-instances-list"
                                     hx-swap="outerHTML"
                                     hx-confirm="Remover este *arr?"
-                                    class="px-2.5 h-7 rounded-md text-xs font-medium text-danger-soft-fg hover:bg-danger-soft">
+                                    class="btn btn-sm btn-danger">
                                 remover
                             </button>
                         </div>
@@ -151,7 +151,7 @@
                                 <input id="wh-{{ a.id }}" readonly value="{{ a.webhook_url }}"
                                        class="flex-1 px-2 h-8 rounded-md bg-bg-canvas border border-border-default text-[11px] font-mono text-fg-secondary focus:outline-none">
                                 <button type="button" data-copy-target="#wh-{{ a.id }}"
-                                        class="px-2.5 h-8 rounded-md bg-bg-muted text-xs font-medium text-fg-primary hover:bg-bg-surface-raised whitespace-nowrap">Copiar</button>
+                                        class="btn btn-sm btn-secondary">Copiar</button>
                             </div>
                             <p class="mt-1.5 text-[11px] text-fg-muted">
                                 No {{ a.kind }}: <span class="font-mono">Settings → Connect → + → Webhook</span>, método <span class="font-mono">POST</span>, marque os triggers desejados.

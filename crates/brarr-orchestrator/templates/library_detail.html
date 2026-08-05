@@ -70,7 +70,7 @@
                no save button to forget. #}
             <div class="flex items-center gap-2.5 flex-wrap mt-4">
                 <button hx-post="/library/{{ item.id }}/monitor"
-                        class="px-4 h-9 rounded-md text-sm font-medium {% if item.monitored %}bg-bg-muted text-fg-secondary{% else %}bg-accent-soft text-accent-soft-fg{% endif %}">
+                        class="btn btn-md {% if item.monitored %}btn-secondary{% else %}btn-toggle-on{% endif %}">
                     {% if item.monitored %}pausar monitoramento{% else %}voltar a monitorar{% endif %}
                 </button>
 
@@ -104,7 +104,7 @@
                         hx-swap="outerHTML"
                         hx-indicator="#scan-{{ item.id }}"
                         title="Busca em todos os providers, aplica o perfil e entrega ao cliente de download"
-                        class="px-4 h-9 rounded-md text-sm font-medium bg-accent-soft text-accent-soft-fg">
+                        class="btn btn-md btn-toggle-on">
                     buscar agora
                 </button>
                 <span id="scan-{{ item.id }}" class="text-xs italic text-fg-muted"></span>
@@ -112,7 +112,7 @@
                 <div class="flex-1"></div>
 
                 <form method="post" action="/library/{{ item.id }}/refresh" class="contents">
-                    <button type="submit" class="px-4 h-9 rounded-md text-sm font-medium bg-bg-muted text-fg-secondary hover:text-fg-primary">
+                    <button type="submit" class="btn btn-md btn-secondary">
                         atualizar metadados
                     </button>
                 </form>
@@ -175,7 +175,7 @@
             {% endif %}
             <button type="button"
                     hx-post="/library/{{ item.id }}/season/{{ s.id }}/monitor"
-                    class="px-2.5 h-7 rounded-md text-xs font-medium {% if s.monitored %}bg-bg-canvas border border-border-strong text-fg-secondary{% else %}bg-accent-soft text-accent-soft-fg{% endif %}">
+                    class="btn btn-sm {% if s.monitored %}btn-secondary{% else %}btn-toggle-on{% endif %}">
                 {% if s.monitored %}pausar{% else %}monitorar{% endif %}
             </button>
         </summary>

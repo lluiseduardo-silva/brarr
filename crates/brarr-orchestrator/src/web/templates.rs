@@ -760,6 +760,10 @@ pub struct SearchesFilterView {
 #[derive(Debug, Template)]
 #[template(path = "settings.html")]
 pub struct SettingsTemplate {
+    /// Which group the side menu has selected. Every section stays in
+    /// the DOM — hidden ones are only `display: none`, so the single
+    /// general form still submits every field it owns.
+    pub section: String,
     /// Pre-filled fields + status flags driving the form rendering.
     pub values: SettingsValues,
     /// Optional flash banner (success / error) shown above the form.

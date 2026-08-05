@@ -13,8 +13,7 @@
             hx-get="/profiles/new"
             hx-target="#modal-target"
             hx-swap="innerHTML"
-            class="brand-gradient flex items-center gap-2 px-5 h-11 rounded-lg text-white text-base font-semibold whitespace-nowrap cursor-pointer"
-            style="box-shadow: 0 8px 20px var(--color-glow);">
+            class="btn btn-lg btn-brand">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round">
             <path d="M12 5v14M5 12h14"/>
         </svg>
@@ -73,14 +72,14 @@
 
     <div class="flex items-center justify-end gap-1.5">
         <a href="/profiles/{{ p.id }}/edit"
-           class="px-2.5 h-7 inline-flex items-center rounded-md text-xs font-medium bg-bg-canvas border border-border-strong text-fg-primary hover:bg-bg-muted">
+           class="btn btn-sm btn-secondary">
             editar
         </a>
         <button hx-delete="/profiles/{{ p.id }}"
                 hx-target="#profile-{{ p.id }}"
                 hx-swap="outerHTML"
                 hx-confirm="Remover este profile? *arr instances atribuídas voltam ao threshold integer próprio."
-                class="px-2.5 h-7 rounded-md text-xs font-medium text-danger-soft-fg hover:bg-danger-soft">
+                class="btn btn-sm btn-danger">
             remover
         </button>
     </div>

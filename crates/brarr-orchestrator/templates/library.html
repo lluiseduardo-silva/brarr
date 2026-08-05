@@ -19,12 +19,11 @@
             hx-swap="outerHTML"
             hx-indicator="#verify-result"
             title="Confere se os arquivos importados ainda estão onde o brarr os colocou"
-            class="px-4 h-11 rounded-lg bg-bg-muted text-fg-secondary text-sm font-medium hover:text-fg-primary whitespace-nowrap">
+            class="btn btn-lg btn-secondary">
         verificar arquivos
     </button>
     <a href="/library/add"
-       class="brand-gradient flex items-center gap-2 px-5 h-11 rounded-lg text-white text-base font-semibold whitespace-nowrap"
-       style="box-shadow: 0 8px 20px var(--color-glow);">
+       class="btn btn-lg btn-brand">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round">
             <path d="M12 5v14M5 12h14"/>
         </svg>
@@ -79,7 +78,7 @@
     <p class="text-sm text-fg-muted mb-4">
         A biblioteca usa o TMDB como fonte de metadados. Sem credencial não há como buscar títulos.
     </p>
-    <a href="/settings" class="inline-flex items-center gap-2 px-5 h-10 rounded-lg border border-accent-solid border-dashed text-sm font-medium text-accent-soft-fg">
+    <a href="/settings" class="btn btn-md btn-ghost border border-dashed border-accent-solid text-accent-soft-fg">
         Ir para configurações →
     </a>
     {% else if !filter.is_empty() %}
@@ -92,7 +91,7 @@
     <p class="text-sm text-fg-muted mb-4">
         Adicione um filme ou uma série e o brarr passa a monitorar, buscar e baixar sozinho.
     </p>
-    <a href="/library/add" class="inline-flex items-center gap-2 px-5 h-10 rounded-lg border border-accent-solid border-dashed text-sm font-medium text-accent-soft-fg">
+    <a href="/library/add" class="btn btn-md btn-ghost border border-dashed border-accent-solid text-accent-soft-fg">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
         Adicionar seu primeiro título
     </a>

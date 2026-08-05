@@ -54,9 +54,9 @@
     <div class="md:col-span-12 flex items-center justify-between gap-2">
         <span class="text-xs text-fg-muted">{{ total_count }} tentativa{% if total_count != 1 %}s{% endif %} encontrada{% if total_count != 1 %}s{% endif %}</span>
         <div class="flex items-center gap-2">
-            <a href="/pushes" class="px-4 h-10 inline-flex items-center rounded-md bg-bg-muted text-fg-primary text-sm font-medium hover:bg-bg-surface-raised">Limpar</a>
+            <a href="/pushes" class="btn btn-md btn-secondary">Limpar</a>
             <button type="submit"
-                    class="px-4 h-10 rounded-md bg-accent-solid text-on-accent-solid text-sm font-semibold hover:bg-accent-solid-hover">
+                    class="btn btn-md btn-primary">
                 Filtrar
             </button>
         </div>
@@ -77,8 +77,8 @@
         </p>
     </div>
     <div class="flex items-center gap-2">
-        <a href="/releases" class="px-5 h-11 inline-flex items-center gap-2 rounded-lg bg-bg-canvas border border-border-strong text-fg-primary text-sm font-medium">Ver releases</a>
-        <a href="/arr-instances" class="brand-gradient inline-flex items-center gap-2 px-5 h-11 rounded-lg text-white text-sm font-semibold" style="box-shadow: 0 8px 20px var(--color-glow);">Configurar *arr</a>
+        <a href="/releases" class="btn btn-lg btn-secondary">Ver releases</a>
+        <a href="/arr-instances" class="brand-gradient inline-flex items-center gap-2 px-5 h-11 rounded-lg text-white text-sm font-semibold">Configurar *arr</a>
     </div>
 </div>
 {% else %}

@@ -388,6 +388,208 @@ body, body * {
   pointer-events: none;
 }
 
+/* --------------------------------------------------------------------
+   Buttons.
+
+   Until this existed every button was a bag of utilities, and the reset
+   above deliberately withholds `cursor: pointer` — so with almost
+   nothing opting in, no button in the app reacted to the mouse at all:
+   no cursor, no hover, no pressed state, no disabled state. There was
+   no way to tell a button from a label.
+
+   `.btn` carries the behaviour; a variant carries the colour; a size
+   carries the metrics. Every interactive state lives here so it cannot
+   be forgotten one button at a time.
+   -------------------------------------------------------------------- */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  font-family: inherit;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  text-decoration: none;
+  cursor: pointer;
+  user-select: none;
+  transition: background-color 120ms ease-out, border-color 120ms ease-out,
+    color 120ms ease-out, box-shadow 120ms ease-out, transform 80ms ease-out,
+    opacity 120ms ease-out;
+}
+
+/* A press should be felt, not just assumed. */
+.btn:active:not(:disabled):not([aria-disabled="true"]) {
+  transform: translateY(1px);
+}
+
+.btn:disabled,
+.btn[aria-disabled="true"] {
+  cursor: not-allowed;
+  opacity: 0.45;
+  transform: none;
+  box-shadow: none;
+}
+
+/* HTMX stamps `htmx-request` on the element that issued the request, so
+   this is the answer to "is it doing anything?" for every button in the
+   app at once — no per-button spinner markup required. */
+.btn.htmx-request {
+  cursor: progress;
+  opacity: 0.6;
+  pointer-events: none;
+}
+
+/* --- sizes --- */
+.btn-sm { height: 1.75rem; padding-inline: 0.625rem; font-size: 0.75rem; }
+.btn-md { height: 2.25rem; padding-inline: 0.875rem; font-size: 0.875rem; }
+.btn-lg {
+  height: 2.75rem;
+  padding-inline: 1.25rem;
+  font-size: 1rem;
+  font-weight: 600;
+  border-radius: var(--radius-lg);
+}
+
+/* --- variants --- */
+
+/* The primary action of a screen. */
+.btn-primary {
+  background-color: var(--color-accent-solid);
+  color: var(--color-accent-fg);
+}
+.btn-primary:hover:not(:disabled) { background-color: var(--color-accent-solid-hover); }
+
+/* The one call to action per page — carries the brand gradient. */
+.btn-brand {
+  background-image: linear-gradient(90deg, var(--color-grad-start), var(--color-grad-end));
+  color: #ffffff;
+  font-weight: 600;
+  box-shadow: 0 8px 20px var(--color-glow);
+}
+.btn-brand:hover:not(:disabled) { box-shadow: var(--shadow-glow-strong); }
+.btn-brand:active:not(:disabled) { box-shadow: 0 4px 12px var(--color-glow); }
+
+/* Everything ordinary: row actions, form buttons. */
+.btn-secondary {
+  background-color: var(--color-bg-muted);
+  color: var(--color-fg-primary);
+}
+.btn-secondary:hover:not(:disabled) {
+  background-color: var(--color-bg-surface-raised);
+  border-color: var(--color-border-strong);
+}
+
+/* Sits on a surface without a filled background until touched. */
+.btn-ghost {
+  background-color: transparent;
+  color: var(--color-fg-secondary);
+}
+.btn-ghost:hover:not(:disabled) {
+  background-color: var(--color-bg-muted);
+  color: var(--color-fg-primary);
+}
+
+/* Destructive. Quiet until hovered, so it does not shout from a table. */
+.btn-danger {
+  background-color: transparent;
+  color: var(--color-danger-soft-fg);
+}
+.btn-danger:hover:not(:disabled) { background-color: var(--color-danger-soft); }
+
+/* A toggle that is currently ON. */
+.btn-toggle-on {
+  background-color: var(--color-accent-soft);
+  color: var(--color-accent-soft-fg);
+}
+.btn-toggle-on:hover:not(:disabled) {
+  background-color: var(--color-accent-solid);
+  color: var(--color-accent-fg);
+}
+
+/* Icon-only: square, no text metrics to balance. */
+.btn-icon { padding-inline: 0; width: 2.25rem; }
+.btn-icon.btn-sm { width: 1.75rem; }
+
+/* --------------------------------------------------------------------
+   Nav dropdown. Built on <details> so it works before nav.js loads and
+   without JS at all; nav.js only adds close-on-outside-click.
+   -------------------------------------------------------------------- */
+
+.nav-menu { position: relative; }
+.nav-menu > summary {
+  list-style: none;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+}
+.nav-menu > summary::-webkit-details-marker { display: none; }
+.nav-menu > summary::marker { content: ""; }
+.nav-menu[open] > summary { color: var(--color-fg-primary); }
+.nav-menu[open] > summary .nav-caret { transform: rotate(180deg); }
+.nav-caret { transition: transform 120ms ease-out; }
+
+.nav-dropdown {
+  position: absolute;
+  top: calc(100% - 8px);
+  left: 0;
+  z-index: 40;
+  min-width: 220px;
+  padding: 0.375rem;
+  background-color: var(--color-bg-surface);
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+}
+.nav-dropdown a {
+  display: block;
+  padding: 0.5rem 0.625rem;
+  border-radius: var(--radius-sm);
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--color-fg-secondary);
+}
+.nav-dropdown a:hover {
+  background-color: var(--color-bg-muted);
+  color: var(--color-fg-primary);
+}
+.nav-dropdown a[data-active="true"] {
+  background-color: var(--color-accent-soft);
+  color: var(--color-accent-soft-fg);
+}
+
+/* --------------------------------------------------------------------
+   Settings side navigation.
+   -------------------------------------------------------------------- */
+
+/* Marker class on each settings card. Carries no style of its own —
+   `hidden` does the hiding — but names the group boundary in the markup
+   and gives the guard something to check. */
+.settings-section { display: block; }
+
+.settings-nav-link {
+  display: block;
+  padding: 0.5rem 0.75rem;
+  border-radius: var(--radius-md);
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: var(--color-fg-secondary);
+  transition: background-color 120ms ease-out, color 120ms ease-out;
+}
+.settings-nav-link:hover {
+  background-color: var(--color-bg-muted);
+  color: var(--color-fg-primary);
+}
+.settings-nav-link[data-active="true"] {
+  background-color: var(--color-accent-soft);
+  color: var(--color-accent-soft-fg);
+  font-weight: 600;
+}
+
 /* Status pill for the HTMX fragments generated in routes.rs. It always
    ships combined with the colour utilities (`bg-success-soft
    text-success-soft-fg`, …), so only the shape is defined here — same
@@ -829,6 +1031,8 @@ body, body * {
 /* --- responsive (one real breakpoint: md; lg only in the profile editor) --- */
 @media (width >= 48rem) {
   .md\:w-auto { width: auto; }
+  .md\:sticky { position: sticky; top: 1rem; }
+  .md\:grid-cols-\[200px_1fr\] { grid-template-columns: 200px 1fr; }
   .md\:self-end { align-self: flex-end; }
   .md\:grid-cols-2  { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .md\:grid-cols-3  { grid-template-columns: repeat(3, minmax(0, 1fr)); }
