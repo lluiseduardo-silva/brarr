@@ -64,3 +64,5 @@ id_rsa*
 id_ed25519*
 *.pem
 *.key
+plano-adocao.md
+biblioteca-real.md
