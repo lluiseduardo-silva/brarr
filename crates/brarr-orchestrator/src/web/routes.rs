@@ -41,7 +41,8 @@ use crate::auth::{BypassConfig, TrustedPeers};
 use crate::db::quality_profiles;
 use crate::db::settings;
 use crate::db::{
-    arr_instances, decisions, download_clients, grabs, library, providers, push_history, searches,
+    arr_instances, decisions, download_clients, grabs, library, providers, push_history,
+    root_folders, searches,
 };
 #[allow(
     unused_imports,
@@ -59,8 +60,9 @@ use crate::web::templates::{
     NewSearchModalPartial, ProfileEditorTemplate, ProfileView, ProfilesTemplate,
     ProviderHealthView, ProviderView, ProvidersListPartial, ProvidersTemplate, PushGroupView,
     PushHistoryView, PushesFilterView, PushesTemplate, RecentSearchView, ReleasesTemplate,
-    SearchDetailTemplate, SearchesFilterView, SearchesIndexTemplate, SeasonView, SettingsFlash,
-    SettingsTemplate, SettingsValues, TmdbHitView, WebhookEventView, WebhooksTemplate,
+    RootFolderView, RootFoldersListPartial, SearchDetailTemplate, SearchesFilterView,
+    SearchesIndexTemplate, SeasonView, SettingsFlash, SettingsTemplate, SettingsValues,
+    TmdbHitView, WebhookEventView, WebhooksTemplate,
 };
 use crate::{AppError, AppState};
 use brarr_core::TmdbId;
@@ -194,6 +196,8 @@ fn download_client_routes() -> Router<AppState> {
             "/download-clients/{id}/toggle",
             post(download_clients_toggle),
         )
+        .route("/root-folders", post(root_folders_create))
+        .route("/root-folders/{id}", delete(root_folders_delete))
 }
 
 /// 404 handler — wired as the router's `.fallback`. Returns the
@@ -3448,6 +3452,7 @@ async fn download_clients_index(State(state): State<AppState>) -> Result<Respons
     let (has_torrent, has_usenet) = protocol_coverage(&clients);
     html(&DownloadClientsTemplate {
         clients,
+        root_folders: root_folder_views(&state).await?,
         has_torrent,
         has_usenet,
     })
@@ -3681,6 +3686,83 @@ fn download_client_view(row: crate::db::download_clients::DownloadClientRow) -> 
         enabled: row.enabled,
         created_at: format_ts(row.created_at),
     }
+}
+
+// ---------------------------------------------------------------------
+// Root folders — where the import will put files. Nothing here touches
+// the filesystem beyond checking that a path is usable.
+// ---------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct RootFolderForm {
+    path: String,
+    /// `movie` / `tv`, or empty for a folder that serves both.
+    #[serde(default)]
+    media_type: Option<String>,
+}
+
+async fn root_folders_create(
+    State(state): State<AppState>,
+    Form(form): Form<RootFolderForm>,
+) -> Result<Response, AppError> {
+    let media_type = match form.media_type.as_deref().map_or("", str::trim) {
+        "" => None,
+        other => Some(crate::db::library::MediaType::from_label(other)?),
+    };
+    root_folders::insert(state.pool(), &form.path, media_type).await?;
+    render_root_folders_partial(&state).await
+}
+
+async fn root_folders_delete(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, AppError> {
+    let uuid = Uuid::parse_str(&id)
+        .map_err(|e| AppError::InvalidInput(format!("invalid root folder id: {e}")))?;
+    if !root_folders::delete_by_id(state.pool(), uuid).await? {
+        return Err(AppError::NotFound(format!("root_folder {uuid}")));
+    }
+    render_root_folders_partial(&state).await
+}
+
+async fn render_root_folders_partial(state: &AppState) -> Result<Response, AppError> {
+    html(&RootFoldersListPartial {
+        root_folders: root_folder_views(state).await?,
+    })
+}
+
+async fn root_folder_views(state: &AppState) -> Result<Vec<RootFolderView>, AppError> {
+    Ok(root_folders::list_all(state.pool())
+        .await?
+        .into_iter()
+        .map(|folder| {
+            // Reading free space hits the filesystem once per row. The
+            // list is a handful of entries and the alternative — caching
+            // a figure that changes with every download — would be worse.
+            let usage = folder.usage();
+            RootFolderView {
+                id: folder.id.to_string(),
+                path: folder.path.to_string_lossy().into_owned(),
+                content: match folder.media_type {
+                    Some(crate::db::library::MediaType::Movie) => "Filmes".to_string(),
+                    Some(crate::db::library::MediaType::Tv) => "Séries".to_string(),
+                    None => "Filmes e séries".to_string(),
+                },
+                free: usage.map_or_else(
+                    || "caminho inacessível".to_string(),
+                    |u| {
+                        format!(
+                            "{} livres de {}",
+                            humanize_bytes(u.available),
+                            humanize_bytes(u.total)
+                        )
+                    },
+                ),
+                used_percent: usage.map_or(0, crate::db::root_folders::DiskUsage::used_percent),
+                reachable: usage.is_some(),
+            }
+        })
+        .collect())
 }
 
 /// Build the `ArrInstancesListPartial` shared by the toggle + update

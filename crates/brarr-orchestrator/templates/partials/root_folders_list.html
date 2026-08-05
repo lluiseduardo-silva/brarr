@@ -1,0 +1,69 @@
+{# Root-folder table — the bottom half of Figma 18. Swapped whole on
+   every write, same as the clients table above it. #}
+<section id="root-folders-list" class="card-hairline bg-bg-surface border border-border-default rounded-xl overflow-hidden">
+    {% if root_folders.is_empty() %}
+    <div class="px-6 py-10 flex flex-col items-center text-center gap-3">
+        <div class="w-14 h-14 rounded-full bg-accent-soft flex items-center justify-center text-accent-soft-fg">
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"/>
+            </svg>
+        </div>
+        <div>
+            <h3 class="text-base font-semibold text-fg-primary mb-1">Nenhuma pasta raiz</h3>
+            <p class="text-sm text-fg-secondary max-w-md">
+                É para onde o import vai levar os arquivos depois que o download terminar.
+                O caminho é conferido na hora de salvar — dentro do contêiner, se o brarr roda em Docker.
+            </p>
+        </div>
+    </div>
+    {% else %}
+    <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+            <thead class="bg-bg-muted">
+                <tr class="text-left">
+                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Caminho</th>
+                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Conteúdo</th>
+                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Espaço livre</th>
+                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted text-right">Ações</th>
+                </tr>
+            </thead>
+            <tbody>
+            {% for f in root_folders %}
+                <tr class="border-t border-border-default {% if !f.reachable %}opacity-55{% endif %}" id="root-folder-{{ f.id }}">
+                    <td class="px-4 py-3 font-mono text-sm text-fg-secondary">{{ f.path }}</td>
+
+                    <td class="px-4 py-3">
+                        <span class="badge bg-accent-soft text-accent-soft-fg">{{ f.content }}</span>
+                    </td>
+
+                    <td class="px-4 py-3 min-w-[240px]">
+                        <div class="flex items-center gap-3">
+                            <span class="text-sm text-fg-primary whitespace-nowrap">{{ f.free }}</span>
+                            {% if f.reachable %}
+                            <div class="h-1.5 w-28 rounded-full bg-bg-muted overflow-hidden">
+                                {# Largura é dado por linha; uma classe por
+                                   porcentagem seriam 101 regras no app.css. #}
+                                <div class="h-1.5 rounded-full bg-accent-solid" style="width: {{ f.used_percent }}%"></div>
+                            </div>
+                            {% endif %}
+                        </div>
+                    </td>
+
+                    <td class="px-4 py-3">
+                        <div class="flex items-center justify-end gap-1.5">
+                            <button hx-delete="/root-folders/{{ f.id }}"
+                                    hx-target="#root-folders-list"
+                                    hx-swap="outerHTML"
+                                    hx-confirm="Remover esta pasta raiz? Nada é apagado do disco — o brarr só esquece o destino."
+                                    class="px-2.5 h-7 rounded-md text-xs font-medium text-danger-soft-fg hover:bg-danger-soft">
+                                remover
+                            </button>
+                        </div>
+                    </td>
+                </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+</section>

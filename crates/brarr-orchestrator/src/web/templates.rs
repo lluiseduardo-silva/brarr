@@ -223,6 +223,8 @@ pub struct ArrInstancesListPartial {
 pub struct DownloadClientsTemplate {
     /// Every configured client, enabled first.
     pub clients: Vec<DownloadClientView>,
+    /// Configured destinations — the bottom half of the same screen.
+    pub root_folders: Vec<RootFolderView>,
     /// `false` ⇒ no enabled qBittorrent, so a torrent grab has nowhere
     /// to go. Surfaced as a warning strip rather than discovered when a
     /// release is finally found.
@@ -273,6 +275,33 @@ pub struct DownloadClientView {
     pub enabled: bool,
     /// Creation timestamp (ISO-8601).
     pub created_at: String,
+}
+
+/// HTMX partial for the root-folder table.
+#[derive(Debug, Template)]
+#[template(path = "partials/root_folders_list.html")]
+pub struct RootFoldersListPartial {
+    /// Configured destinations.
+    pub root_folders: Vec<RootFolderView>,
+}
+
+/// One row in the root-folder table.
+#[derive(Debug)]
+pub struct RootFolderView {
+    /// Stringified UUID.
+    pub id: String,
+    /// Absolute path, rendered mono.
+    pub path: String,
+    /// `Filmes` / `Séries` / `Filmes e séries`.
+    pub content: String,
+    /// `2.10 TiB livres de 8.00 TiB`, or a dash when the filesystem
+    /// could not be read (an unmounted volume, say).
+    pub free: String,
+    /// `0..=100` for the usage bar.
+    pub used_percent: u8,
+    /// `false` when the path could not be read at all — the row renders
+    /// muted instead of pretending the disk is empty.
+    pub reachable: bool,
 }
 
 /// Edit-client modal, returned by `GET /download-clients/{id}/edit`.

@@ -17,6 +17,7 @@ pub mod metrics;
 pub mod providers;
 pub mod push_history;
 pub mod quality_profiles;
+pub mod root_folders;
 pub mod searches;
 pub mod settings;
 pub mod webhook_events;

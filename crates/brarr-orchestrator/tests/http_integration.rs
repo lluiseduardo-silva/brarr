@@ -394,6 +394,61 @@ async fn create_then_delete_download_client_roundtrip() {
 }
 
 #[tokio::test]
+async fn add_then_remove_a_root_folder() {
+    let (addr, _state) = spawn().await;
+    let client = reqwest::Client::new();
+    let dir = std::env::temp_dir().join(format!("brarr-http-root-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let resp = client
+        .post(format!("http://{addr}/root-folders"))
+        .form(&[("path", dir.to_str().unwrap()), ("media_type", "movie")])
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+    assert!(body.contains(dir.to_str().unwrap()));
+    assert!(body.contains("Filmes"));
+    // Free space is read from the real filesystem, so the row says
+    // something concrete rather than "caminho inacessível".
+    assert!(body.contains("livres de"), "body = {body}");
+
+    let id = first_row_id(&body, "root-folder-");
+    let resp = client
+        .delete(format!("http://{addr}/root-folders/{id}"))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 200);
+    assert!(resp.text().await.unwrap().contains("Nenhuma pasta raiz"));
+    assert!(
+        dir.exists(),
+        "removing a root folder forgets a destination; it does not delete a library"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn a_root_folder_that_does_not_exist_is_refused_by_the_form() {
+    let (addr, _state) = spawn().await;
+    let resp = reqwest::Client::new()
+        .post(format!("http://{addr}/root-folders"))
+        .form(&[
+            ("path", "/caminho/que/nao/existe/brarr"),
+            ("media_type", "tv"),
+        ])
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(
+        resp.status(),
+        400,
+        "a typo has to fail here, not hours later with a finished download"
+    );
+}
+
+#[tokio::test]
 async fn download_client_create_rejects_an_unknown_kind() {
     let (addr, _state) = spawn().await;
     let resp = reqwest::Client::new()
