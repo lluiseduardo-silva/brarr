@@ -1216,6 +1216,15 @@ struct LibraryProfileForm {
     /// Stringified profile UUID, or empty to detach.
     #[serde(default)]
     profile_id: String,
+    /// Registered root-folder path this item is pinned to. Empty falls
+    /// back to the per-media-type rule; absent (an older page) leaves
+    /// whatever the item already had.
+    ///
+    /// This is what makes more than one root folder per media type
+    /// usable: the rule can only pick one `tv` folder, so a library
+    /// split into "Séries" and "Animes" needs the per-item choice.
+    #[serde(default)]
+    root_folder: Option<String>,
 }
 
 /// `GET /library/{id}` — one catalogue entry in full.
@@ -1283,6 +1292,9 @@ async fn library_detail(
         .map(|p| (p.id.to_string(), p.name))
         .collect();
 
+    let root_folder_options = root_folder_options(&state, item.media_type).await?;
+    let current_root = item.root_folder.clone().unwrap_or_default();
+
     // Only meaningful for movies, and only while the date is ahead of us.
     let now = OffsetDateTime::now_utc();
     let in_theatrical_window = item.digital_release_at.is_some_and(|d| d > now);
@@ -1321,7 +1333,38 @@ async fn library_detail(
         seasons,
         grabs,
         profiles,
+        root_folders: root_folder_options,
+        root_folder: current_root,
     })
+}
+
+/// Root folders an item of `media_type` could be pinned to, as
+/// `(path, label)`.
+///
+/// Only the ones that serve that kind: pinning a series to a
+/// movies-only folder is not a choice worth offering. This picker is
+/// what makes a *second* folder of the same kind reachable at all — the
+/// per-media-type rule can only ever pick one, so a library split into
+/// "Séries" and "Animes" has no other way to say which is which.
+async fn root_folder_options(
+    state: &AppState,
+    media_type: crate::db::library::MediaType,
+) -> Result<Vec<(String, String)>, AppError> {
+    use crate::db::library::MediaType;
+    Ok(root_folders::list_all(state.pool())
+        .await?
+        .into_iter()
+        .filter(|f| f.media_type.is_none() || f.media_type == Some(media_type))
+        .map(|f| {
+            let path = f.path.to_string_lossy().into_owned();
+            let label = match f.media_type {
+                Some(MediaType::Movie) => format!("{path} (filmes)"),
+                Some(MediaType::Tv) => format!("{path} (séries)"),
+                None => format!("{path} (qualquer)"),
+            };
+            (path, label)
+        })
+        .collect())
 }
 
 /// Map episode rows into the shared partial. Used both by the season
@@ -1436,7 +1479,34 @@ async fn library_set_profile(
                 .map_err(|e| AppError::InvalidInput(format!("invalid profile id: {e}")))?,
         )
     };
-    library::set_placement(state.pool(), uuid, profile, item.root_folder.as_deref()).await?;
+    // A blank selection means "use the rule for this media type"; the
+    // form only offers registered folders, and the importer refuses
+    // anything that is not one of them anyway.
+    let root_folder = match form.root_folder.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some(path) => {
+            let known = root_folders::list_all(state.pool())
+                .await?
+                .into_iter()
+                .any(|f| f.path == std::path::Path::new(path));
+            if !known {
+                return Err(AppError::InvalidInput(format!(
+                    "{path} não é uma pasta raiz cadastrada"
+                )));
+            }
+            Some(path.to_owned())
+        }
+    };
+    // The item keeps whatever it had if the form did not carry the field
+    // at all — an older cached page must not silently clear a placement.
+    let root_folder = root_folder.or_else(|| {
+        if form.root_folder.is_none() {
+            item.root_folder.clone()
+        } else {
+            None
+        }
+    });
+    library::set_placement(state.pool(), uuid, profile, root_folder.as_deref()).await?;
     Ok(Redirect::to(&format!("/library/{id}")).into_response())
 }
 

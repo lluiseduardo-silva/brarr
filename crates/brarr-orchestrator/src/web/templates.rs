@@ -1008,6 +1008,13 @@ pub struct LibraryDetailTemplate {
     pub grabs: Vec<GrabView>,
     /// Every quality profile, for the picker.
     pub profiles: Vec<(String, String)>,
+    /// Registered root folders this item could live in, as
+    /// `(path, label)`. Only the ones that serve the item's media type
+    /// — pinning a series to a movies-only folder is not a choice worth
+    /// offering.
+    pub root_folders: Vec<(String, String)>,
+    /// Path the item is currently pinned to, or empty for "use the rule".
+    pub root_folder: String,
 }
 
 /// Hero data for the detail page.

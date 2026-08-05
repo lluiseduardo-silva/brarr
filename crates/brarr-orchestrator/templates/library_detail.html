@@ -74,6 +74,8 @@
                     {% if item.monitored %}pausar monitoramento{% else %}voltar a monitorar{% endif %}
                 </button>
 
+                {# Um form só: os dois selects são "onde e como" deste
+                   item, e o handler grava os dois de uma vez. #}
                 <form method="post" action="/library/{{ item.id }}/profile" class="contents">
                     <select name="profile_id" onchange="this.form.submit()"
                             class="h-9 px-3 rounded-md bg-bg-surface border border-accent-solid text-sm text-fg-primary focus:outline-none">
@@ -82,6 +84,16 @@
                         <option value="{{ p.0 }}" {% if item.profile_id == p.0 %}selected{% endif %}>{{ p.1 }}</option>
                         {% endfor %}
                     </select>
+                    {% if !root_folders.is_empty() %}
+                    <select name="root_folder" onchange="this.form.submit()"
+                            title="Onde o import vai colocar os arquivos deste título"
+                            class="h-9 px-3 rounded-md bg-bg-surface border border-border-strong text-sm text-fg-primary focus:outline-none">
+                        <option value="" {% if root_folder.is_empty() %}selected{% endif %}>Pasta padrão do tipo</option>
+                        {% for f in root_folders %}
+                        <option value="{{ f.0 }}" {% if root_folder == f.0 %}selected{% endif %}>{{ f.1 }}</option>
+                        {% endfor %}
+                    </select>
+                    {% endif %}
                 </form>
 
                 {# Same sweep the scheduler runs, minus the per-cycle cap
@@ -126,6 +138,24 @@
    can carry a hundred-plus episodes, and rendering every row up front
    costs a query and a lot of DOM for rows nobody looked at. #}
 <h2 class="text-lg font-semibold text-fg-primary mb-2">Temporadas</h2>
+{% if !item.monitored %}
+{# Pausar a série já para o varredor por completo — ele nem chega a
+   olhar os episódios. Os flags por episódio ficam intactos de
+   propósito: apagá-los perderia a seleção que você fez, e não teria
+   como restaurá-la ao retomar. Sem este aviso a tela parece dizer o
+   contrário, com todo episódio ainda marcado. #}
+<div class="flex items-start gap-3 px-4 py-3 mb-3 rounded-lg bg-warning-soft border border-warning-solid">
+    <div class="shrink-0 w-5 h-5 rounded-full bg-warning-solid flex items-center justify-center mt-0.5">
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="3" stroke-linecap="round">
+            <path d="M10 5v14M14 5v14"/>
+        </svg>
+    </div>
+    <p class="text-sm text-warning-soft-fg">
+        Série pausada — <strong>nenhum episódio é buscado</strong>, mesmo os que aparecem marcados abaixo.
+        As marcações por episódio ficam guardadas exatamente como estão para quando você voltar a monitorar.
+    </p>
+</div>
+{% endif %}
 <div class="card-hairline bg-bg-surface border border-border-default rounded-xl overflow-hidden mb-4">
     {% for s in seasons %}
     <details class="border-t border-border-default">
