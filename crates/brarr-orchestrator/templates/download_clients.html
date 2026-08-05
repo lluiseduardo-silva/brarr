@@ -1,0 +1,106 @@
+{% extends "base.html" %}
+{% block title %}Clientes de download — brarr{% endblock %}
+{% block content %}
+
+<div class="flex items-center justify-between gap-4 mb-6">
+    <div>
+        <h1 class="font-semibold text-[28px] leading-9 text-fg-primary">Clientes de download</h1>
+        {# No count here on purpose: the header sits outside the HTMX
+           swap target, so a number rendered at page load would still
+           read "0" after the first client was added. The live count
+           lives in the list partial. #}
+        <p class="text-base text-fg-secondary mt-1">
+            O brarr entrega os grabs direto aqui — Radarr e Sonarr não participam mais do fluxo.
+        </p>
+    </div>
+    <a href="#new-download-client"
+       class="brand-gradient flex items-center gap-2 px-5 h-11 rounded-lg text-white text-base font-semibold whitespace-nowrap"
+       style="box-shadow: 0 8px 20px var(--color-glow);">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round">
+            <path d="M12 5v14M5 12h14"/>
+        </svg>
+        Adicionar cliente
+    </a>
+</div>
+
+{% include "partials/download_clients_list.html" %}
+
+<section id="new-download-client" class="card-hairline bg-bg-surface border border-border-default rounded-xl mt-6">
+    <header class="px-5 py-4">
+        <h2 class="text-lg font-semibold text-fg-primary">Adicionar cliente</h2>
+    </header>
+    <div class="h-px bg-border-default"></div>
+    <form hx-post="/download-clients"
+          hx-target="#download-clients-list"
+          hx-swap="outerHTML"
+          hx-on::after-request="this.reset()"
+          class="grid grid-cols-1 md:grid-cols-6 gap-3 px-5 py-4">
+
+        <label class="block md:col-span-3">
+            <span class="block mb-1.5 text-xs font-medium uppercase tracking-[0.06em] text-fg-muted">Nome</span>
+            <input name="name" required placeholder="qbittorrent-main"
+                   class="w-full px-3 h-10 rounded-md bg-bg-canvas border border-border-strong text-sm text-fg-primary placeholder:text-fg-muted focus:outline-none focus:border-accent-solid">
+        </label>
+
+        <label class="block md:col-span-3">
+            <span class="block mb-1.5 text-xs font-medium uppercase tracking-[0.06em] text-fg-muted">Tipo</span>
+            <select name="kind" required
+                    class="w-full px-3 h-10 rounded-md bg-bg-canvas border border-border-strong text-sm text-fg-primary focus:outline-none focus:border-accent-solid">
+                <option value="qbittorrent">qBittorrent (torrent)</option>
+                <option value="sabnzbd">SABnzbd (usenet)</option>
+            </select>
+        </label>
+
+        <label class="block md:col-span-6">
+            <span class="block mb-1.5 text-xs font-medium uppercase tracking-[0.06em] text-fg-muted">Base URL</span>
+            <input name="base_url" required type="url" placeholder="http://10.0.1.246:8080/"
+                   class="w-full px-3 h-10 rounded-md bg-bg-canvas border border-border-strong text-sm text-fg-primary placeholder:text-fg-muted focus:outline-none focus:border-accent-solid">
+        </label>
+
+        <label class="block md:col-span-2">
+            <span class="block mb-1.5 text-xs font-medium uppercase tracking-[0.06em] text-fg-muted">Usuário (qBittorrent)</span>
+            <input name="username" placeholder="admin" autocomplete="off"
+                   class="w-full px-3 h-10 rounded-md bg-bg-canvas border border-border-strong text-sm text-fg-primary placeholder:text-fg-muted focus:outline-none focus:border-accent-solid">
+        </label>
+
+        <label class="block md:col-span-2">
+            <span class="block mb-1.5 text-xs font-medium uppercase tracking-[0.06em] text-fg-muted">Senha (qBittorrent)</span>
+            <input name="password" type="password" autocomplete="new-password"
+                   class="w-full px-3 h-10 rounded-md bg-bg-canvas border border-border-strong text-sm text-fg-primary focus:outline-none focus:border-accent-solid">
+        </label>
+
+        <label class="block md:col-span-2">
+            <span class="block mb-1.5 text-xs font-medium uppercase tracking-[0.06em] text-fg-muted">API key (SABnzbd)</span>
+            <input name="api_key" type="password" autocomplete="new-password"
+                   class="w-full px-3 h-10 rounded-md bg-bg-canvas border border-border-strong text-sm text-fg-primary focus:outline-none focus:border-accent-solid">
+        </label>
+
+        <label class="block md:col-span-3">
+            <span class="block mb-1.5 text-xs font-medium uppercase tracking-[0.06em] text-fg-muted">Categoria</span>
+            <input name="category" placeholder="brarr"
+                   class="w-full px-3 h-10 rounded-md bg-bg-canvas border border-border-strong text-sm text-fg-primary placeholder:text-fg-muted focus:outline-none focus:border-accent-solid">
+        </label>
+
+        <label class="block md:col-span-3">
+            <span class="block mb-1.5 text-xs font-medium uppercase tracking-[0.06em] text-fg-muted">Prioridade</span>
+            <input name="priority" type="number" min="1" max="100" value="1"
+                   class="w-full px-3 h-10 rounded-md bg-bg-canvas border border-border-strong text-sm text-fg-primary font-mono focus:outline-none focus:border-accent-solid">
+        </label>
+
+        <div class="md:col-span-6 flex justify-end">
+            <button type="submit"
+                    class="brand-gradient h-10 px-4 rounded-md text-white text-sm font-semibold whitespace-nowrap w-full md:w-auto">
+                Adicionar
+            </button>
+        </div>
+    </form>
+    <div class="px-5 pb-4 text-xs text-fg-muted leading-relaxed">
+        Cada tipo lê credenciais diferentes: <strong class="text-fg-secondary">qBittorrent</strong> faz login com
+        usuário e senha (deixe em branco se a WebUI dispensa autenticação para a sua rede),
+        <strong class="text-fg-secondary">SABnzbd</strong> exige a API key de Config → General.
+        <strong class="text-fg-secondary">Prioridade</strong> desempata quando há mais de um cliente do mesmo
+        protocolo — menor vence.
+    </div>
+</section>
+
+{% endblock %}

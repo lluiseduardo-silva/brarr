@@ -22,6 +22,7 @@ axum = { version = "0.8.9", default-features = false, features = ["macros", "htt
 brarr-arr = { version = "0.1.0", path = "../brarr-arr" }
 brarr-core = { version = "0.1.0", path = "../brarr-core" }
 brarr-decision-service = { version = "0.1.0", path = "../brarr-decision-service" }
+brarr-download-client = { version = "0.1.0", path = "../brarr-download-client" }
 brarr-plugin-host = { version = "0.1.0", path = "../brarr-plugin-host" }
 brarr-tracker-newznab = { version = "0.1.0", path = "../brarr-tracker-newznab" }
 brarr-tmdb = { version = "0.1.0", path = "../brarr-tmdb" }

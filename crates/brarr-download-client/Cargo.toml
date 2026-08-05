@@ -1,0 +1,26 @@
+[package]
+name = "brarr-download-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+# `form` is what carries the qBittorrent login POST — in reqwest 0.13
+# `RequestBuilder::form` sits behind its own feature, unlike `json`.
+reqwest = { version = "0.13.3", default-features = false, features = ["json", "form", "default-tls", "http2", "charset", "query", "gzip"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+thiserror = "2.0.18"
+tokio = { version = "1.52.3", default-features = false, features = ["sync"] }
+tracing = "0.1.44"
+url = "2.5.8"
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tokio = { version = "1.52.3", features = ["macros", "rt", "rt-multi-thread"] }
+wiremock = "0.6.5"

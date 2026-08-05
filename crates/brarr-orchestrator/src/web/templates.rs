@@ -216,6 +216,96 @@ pub struct ArrInstancesListPartial {
     pub instances: Vec<ArrInstanceView>,
 }
 
+/// `/download-clients` view — admin CRUD for the qBittorrent / SABnzbd
+/// instances brarr hands releases to.
+#[derive(Debug, Template)]
+#[template(path = "download_clients.html")]
+pub struct DownloadClientsTemplate {
+    /// Every configured client, enabled first.
+    pub clients: Vec<DownloadClientView>,
+    /// `false` ⇒ no enabled qBittorrent, so a torrent grab has nowhere
+    /// to go. Surfaced as a warning strip rather than discovered when a
+    /// release is finally found.
+    pub has_torrent: bool,
+    /// `false` ⇒ no enabled SABnzbd; same story for usenet.
+    pub has_usenet: bool,
+}
+
+/// HTMX partial returned after every write on `/download-clients`, so
+/// the table refreshes without a full page load.
+///
+/// Carries the same summary flags as the full page: they live *inside*
+/// the swapped region on purpose. A count rendered in the page header
+/// would still read "0 configurados" after the first client was added,
+/// because HTMX only replaces the list.
+#[derive(Debug, Template)]
+#[template(path = "partials/download_clients_list.html")]
+pub struct DownloadClientsListPartial {
+    /// Every configured client, enabled first.
+    pub clients: Vec<DownloadClientView>,
+    /// See [`DownloadClientsTemplate::has_torrent`].
+    pub has_torrent: bool,
+    /// See [`DownloadClientsTemplate::has_usenet`].
+    pub has_usenet: bool,
+}
+
+/// One row in the download-clients table.
+#[derive(Debug)]
+pub struct DownloadClientView {
+    /// Stringified UUID.
+    pub id: String,
+    /// Operator-chosen display name.
+    pub name: String,
+    /// Persisted kind label (`"qbittorrent"` / `"sabnzbd"`) — the
+    /// template branches on this.
+    pub kind: String,
+    /// Kind spelled the way the vendor spells it (`"qBittorrent"`).
+    pub kind_label: String,
+    /// `"torrent"` / `"usenet"`, derived from the kind.
+    pub protocol: String,
+    /// Base URL of the client's web interface.
+    pub base_url: String,
+    /// Category / label downloads are filed under, when set.
+    pub category: Option<String>,
+    /// Selection tie-break among clients of the same protocol.
+    pub priority: u32,
+    /// `false` ⇒ drained: keeps its config but receives no grabs.
+    pub enabled: bool,
+    /// Creation timestamp (ISO-8601).
+    pub created_at: String,
+}
+
+/// Edit-client modal, returned by `GET /download-clients/{id}/edit`.
+///
+/// Credentials are never echoed back — the fields render empty and a
+/// blank submission keeps whatever is stored. [`Self::has_password`] /
+/// [`Self::has_api_key`] only say *whether* one exists, so the operator
+/// can tell "no password set" from "password hidden".
+#[derive(Debug, Template)]
+#[template(path = "partials/edit_download_client_modal.html")]
+pub struct EditDownloadClientModalPartial {
+    /// Stringified UUID.
+    pub id: String,
+    /// Current display name.
+    pub name: String,
+    /// Persisted kind label — drives which credential fields show.
+    pub kind: String,
+    /// Kind spelled the vendor's way, for the modal subtitle.
+    pub kind_label: String,
+    /// Current base URL.
+    pub base_url: String,
+    /// Current username (not a secret, so it is echoed).
+    pub username: String,
+    /// Current category.
+    pub category: String,
+    /// Current selection tie-break.
+    pub priority: u32,
+    /// Whether a password is on file.
+    pub has_password: bool,
+    /// Whether an apikey is on file.
+    pub has_api_key: bool,
+}
+
 /// `/webhooks` view — recent inbound *arr webhook events (audit log).
 #[derive(Debug, Template)]
 #[template(path = "webhooks.html")]

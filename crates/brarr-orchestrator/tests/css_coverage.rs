@@ -165,18 +165,22 @@ fn normalise(token: &str) -> String {
     token.trim_start_matches('!').to_owned()
 }
 
-fn collect_templates(dir: &Path, out: &mut Vec<PathBuf>) {
+fn collect_files(dir: &Path, extension: &str, out: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            collect_templates(&path, out);
-        } else if path.extension().is_some_and(|e| e == "html") {
+            collect_files(&path, extension, out);
+        } else if path.extension().is_some_and(|e| e == extension) {
             out.push(path);
         }
     }
+}
+
+fn collect_templates(dir: &Path, out: &mut Vec<PathBuf>) {
+    collect_files(dir, "html", out);
 }
 
 #[test]
@@ -216,6 +220,63 @@ fn every_class_used_by_a_template_has_a_rule() {
         missing.len(),
         missing.join("\n  ")
     );
+}
+
+/// The templates are not the only source of markup. `web/routes.rs`
+/// builds HTMX fragments as strings — the connectivity badges, the
+/// profile-preview cards — and those classes went unchecked until now.
+///
+/// That gap was not hypothetical: every badge those handlers emitted
+/// carried `bg-emerald-100 text-emerald-800`, a Tailwind palette scale
+/// the hand-authored stylesheet never defined, so the pill rendered with
+/// no colour at all from the migration onward.
+#[test]
+fn every_class_emitted_from_rust_has_a_rule() {
+    let defined = defined_classes();
+
+    let mut sources = Vec::new();
+    collect_files(&crate_dir().join("src"), "rs", &mut sources);
+    assert!(!sources.is_empty(), "no Rust sources found");
+
+    let mut missing: Vec<String> = Vec::new();
+    let mut seen = 0usize;
+    for path in &sources {
+        let source = std::fs::read_to_string(path).unwrap();
+        for token in used_classes(&source) {
+            seen += 1;
+            let class = normalise(&token);
+            if !defined.contains(&class) && !defined.contains(&token) {
+                missing.push(format!(
+                    "{}: {token}",
+                    path.file_name().unwrap_or_default().to_string_lossy()
+                ));
+            }
+        }
+    }
+    missing.sort();
+    missing.dedup();
+
+    // Without this the test passes by finding nothing at all, which is
+    // exactly the failure mode it exists to prevent.
+    assert!(
+        seen > 20,
+        "only {seen} classes extracted from Rust sources — the scanner is broken, not the code"
+    );
+    assert!(
+        missing.is_empty(),
+        "Rust-generated fragments use {} class(es) with no rule in static/app.css:\n  {}",
+        missing.len(),
+        missing.join("\n  ")
+    );
+}
+
+#[test]
+fn a_format_placeholder_is_not_mistaken_for_a_class() {
+    // The exact shape of the badge fragments in `web/routes.rs`.
+    let source = r##"format!(r#"<span class="badge {bg} {fg}" title="x">{label}</span>"#)"##;
+    let found = used_classes(source);
+    assert!(found.contains("badge"));
+    assert_eq!(found.len(), 1, "got {found:?}");
 }
 
 #[test]

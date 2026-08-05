@@ -139,6 +139,264 @@ async fn create_then_delete_provider_roundtrip() {
     assert!(body.contains("Nenhum provider configurado"));
 }
 
+/// Pull the uuid out of the first `id="<prefix><uuid>"` in a rendered
+/// list, the way the provider round-trip test does inline.
+fn first_row_id(body: &str, prefix: &str) -> String {
+    let marker = format!("id=\"{prefix}");
+    let pos = body.find(&marker).expect("row marker");
+    let rest = &body[pos + marker.len()..];
+    let end = rest.find('"').expect("closing quote");
+    rest[..end].to_owned()
+}
+
+#[tokio::test]
+async fn download_clients_index_renders_empty_state() {
+    let (addr, _state) = spawn().await;
+    let resp = reqwest::get(format!("http://{addr}/download-clients"))
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("Nenhum cliente de download configurado"));
+    assert!(body.contains("Clientes de download"));
+}
+
+#[tokio::test]
+async fn create_then_delete_download_client_roundtrip() {
+    let (addr, _state) = spawn().await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("http://{addr}/download-clients"))
+        .form(&[
+            ("name", "qbittorrent-main"),
+            ("kind", "qbittorrent"),
+            ("base_url", "http://10.0.1.246:8080/"),
+            ("username", "admin"),
+            ("password", "hunter2"),
+            ("category", "brarr"),
+            ("priority", "1"),
+        ])
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("qbittorrent-main"));
+    assert!(body.contains("http://10.0.1.246:8080/"));
+    // Protocol is derived from the kind, never submitted by the form.
+    assert!(body.contains("torrent"));
+    // The count rides inside the swapped partial — a header-rendered one
+    // would still read zero right here.
+    assert!(body.contains("1 cliente(s) configurado(s)"));
+    // …and usenet has no home yet, which the operator should be told.
+    assert!(body.contains("sem usenet"));
+    assert!(!body.contains("sem torrent"));
+
+    let body = reqwest::get(format!("http://{addr}/download-clients"))
+        .await
+        .expect("send")
+        .text()
+        .await
+        .unwrap();
+    let id = first_row_id(&body, "download-client-");
+
+    let resp = client
+        .delete(format!("http://{addr}/download-clients/{id}"))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 200);
+    assert!(
+        resp.text()
+            .await
+            .unwrap()
+            .contains("Nenhum cliente de download configurado")
+    );
+}
+
+#[tokio::test]
+async fn download_client_create_rejects_an_unknown_kind() {
+    let (addr, _state) = spawn().await;
+    let resp = reqwest::Client::new()
+        .post(format!("http://{addr}/download-clients"))
+        .form(&[
+            ("name", "transmission"),
+            ("kind", "transmission"),
+            ("base_url", "http://10.0.1.246:9091/"),
+        ])
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 400);
+}
+
+#[tokio::test]
+async fn download_client_create_rejects_a_sabnzbd_without_an_api_key() {
+    let (addr, _state) = spawn().await;
+    let resp = reqwest::Client::new()
+        .post(format!("http://{addr}/download-clients"))
+        .form(&[
+            ("name", "sabnzbd-main"),
+            ("kind", "sabnzbd"),
+            ("base_url", "http://10.0.1.246:8085/"),
+        ])
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(
+        resp.status(),
+        400,
+        "a SABnzbd row with no apikey can never work — catch it at config time"
+    );
+}
+
+#[tokio::test]
+async fn the_edit_modal_never_echoes_a_stored_secret() {
+    let (addr, _state) = spawn().await;
+    let client = reqwest::Client::new();
+    client
+        .post(format!("http://{addr}/download-clients"))
+        .form(&[
+            ("name", "sabnzbd-main"),
+            ("kind", "sabnzbd"),
+            ("base_url", "http://10.0.1.246:8085/"),
+            ("api_key", "super-secret-key"),
+        ])
+        .send()
+        .await
+        .expect("send");
+
+    let body = reqwest::get(format!("http://{addr}/download-clients"))
+        .await
+        .expect("send")
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        !body.contains("super-secret-key"),
+        "the list must not leak the credential either"
+    );
+    let id = first_row_id(&body, "download-client-");
+
+    let modal = client
+        .get(format!("http://{addr}/download-clients/{id}/edit"))
+        .send()
+        .await
+        .expect("send")
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        !modal.contains("super-secret-key"),
+        "the edit form renders credentials blank; a blank submit keeps them"
+    );
+    assert!(modal.contains("Há uma key salva"));
+
+    // …and editing without re-typing the key keeps it. Renaming is the
+    // realistic case, and it must not wipe the credential.
+    let resp = client
+        .put(format!("http://{addr}/download-clients/{id}"))
+        .form(&[
+            ("name", "sabnzbd-renomeado"),
+            ("base_url", "http://10.0.1.246:8085/"),
+            ("api_key", ""),
+            ("priority", "2"),
+        ])
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 200);
+    assert!(resp.text().await.unwrap().contains("sabnzbd-renomeado"));
+
+    let modal = client
+        .get(format!("http://{addr}/download-clients/{id}/edit"))
+        .send()
+        .await
+        .expect("send")
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        modal.contains("Há uma key salva"),
+        "the stored apikey survived an edit that left the field blank"
+    );
+}
+
+#[tokio::test]
+async fn toggling_a_download_client_flips_the_action_label() {
+    let (addr, _state) = spawn().await;
+    let client = reqwest::Client::new();
+    client
+        .post(format!("http://{addr}/download-clients"))
+        .form(&[
+            ("name", "qb"),
+            ("kind", "qbittorrent"),
+            ("base_url", "http://10.0.1.246:8080/"),
+        ])
+        .send()
+        .await
+        .expect("send");
+    let body = reqwest::get(format!("http://{addr}/download-clients"))
+        .await
+        .expect("send")
+        .text()
+        .await
+        .unwrap();
+    assert!(body.contains("desativar"));
+    let id = first_row_id(&body, "download-client-");
+
+    let body = client
+        .post(format!("http://{addr}/download-clients/{id}/toggle"))
+        .send()
+        .await
+        .expect("send")
+        .text()
+        .await
+        .unwrap();
+    assert!(body.contains(">ativar<") || body.contains("ativar"));
+    assert!(body.contains("opacity-55"), "a drained row renders muted");
+}
+
+#[tokio::test]
+async fn testing_a_dead_download_client_answers_a_failure_badge() {
+    let (addr, _state) = spawn().await;
+    let client = reqwest::Client::new();
+    client
+        .post(format!("http://{addr}/download-clients"))
+        .form(&[
+            ("name", "qb-desligado"),
+            ("kind", "qbittorrent"),
+            // Port 1 is unbindable by an unprivileged process.
+            ("base_url", "http://127.0.0.1:1/"),
+            ("username", "admin"),
+            ("password", "x"),
+        ])
+        .send()
+        .await
+        .expect("send");
+    let body = reqwest::get(format!("http://{addr}/download-clients"))
+        .await
+        .expect("send")
+        .text()
+        .await
+        .unwrap();
+    let id = first_row_id(&body, "download-client-");
+
+    let resp = client
+        .post(format!("http://{addr}/download-clients/{id}/test"))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 200);
+    let badge = resp.text().await.unwrap();
+    assert!(badge.contains("erro"), "badge = {badge}");
+    assert!(
+        badge.contains("bg-danger-soft") && badge.contains("text-danger-soft-fg"),
+        "the badge has to carry colours the stylesheet actually defines, badge = {badge}"
+    );
+}
+
 #[tokio::test]
 async fn invalid_provider_id_returns_400() {
     let (addr, _state) = spawn().await;

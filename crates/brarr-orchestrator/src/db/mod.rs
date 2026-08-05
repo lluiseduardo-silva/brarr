@@ -9,6 +9,7 @@
 
 pub mod arr_instances;
 pub mod decisions;
+pub mod download_clients;
 pub mod grabs;
 pub mod library;
 pub mod maintenance;

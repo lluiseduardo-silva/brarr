@@ -417,6 +417,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "brarr-download-client"
+version = "0.1.6"
+dependencies = [
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "url",
+ "wiremock",
+]
+
+[[package]]
 name = "brarr-mediainfo"
 version = "0.1.6"
 dependencies = [
@@ -435,6 +449,7 @@ dependencies = [
  "brarr-arr",
  "brarr-core",
  "brarr-decision-service",
+ "brarr-download-client",
  "brarr-plugin-host",
  "brarr-tmdb",
  "brarr-tracker-newznab",

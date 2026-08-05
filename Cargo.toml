@@ -11,6 +11,7 @@ members = [
     "crates/brarr-decision-service",
     "crates/brarr-plugin-host",
     "crates/brarr-arr",
+    "crates/brarr-download-client",
 ]
 
 [workspace.package]

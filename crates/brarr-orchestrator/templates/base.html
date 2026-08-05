@@ -53,8 +53,12 @@
     <nav class="bg-bg-surface border-b border-border-default">
         <div class="max-w-7xl mx-auto px-8 h-16 flex items-center justify-between gap-8">
             {# Logo lockup + primary links. #}
-            <div class="flex items-center gap-10">
-                <a href="/" class="flex items-center gap-2.5 text-fg-primary">
+            {# `min-w-0` + the scrollable list below keep a long nav from
+               widening the page itself: without them the whole body
+               scrolls horizontally once the links stop fitting, which
+               they already nearly did before "Clientes" was added. #}
+            <div class="flex items-center gap-10 min-w-0">
+                <a href="/" class="flex items-center gap-2.5 text-fg-primary shrink-0">
                     {# Funnel mark — Figma direction A. #}
                     <svg width="24" height="24" viewBox="0 0 80 80" fill="none" xmlns="http://www.w3.org/2000/svg" class="text-accent-solid">
                         <path d="M10 18 L40 40 L10 62" stroke="currentColor" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
@@ -64,11 +68,12 @@
                     <span class="font-semibold text-xl -tracking-[0.03em]">brarr</span>
                 </a>
 
-                <ul class="flex items-center gap-1">
+                <ul class="flex items-center gap-1 overflow-x-auto">
                     <li><a class="nav-link" data-section="dashboard"     href="/">Dashboard</a></li>
                     <li><a class="nav-link" data-section="library"      href="/library">Biblioteca</a></li>
                     <li><a class="nav-link" data-section="searches"     href="/searches">Searches</a></li>
                     <li><a class="nav-link" data-section="providers"    href="/providers">Providers</a></li>
+                    <li><a class="nav-link" data-section="download-clients" href="/download-clients">Clientes</a></li>
                     <li><a class="nav-link" data-section="arr-instances" href="/arr-instances">*arr</a></li>
                     <li><a class="nav-link" data-section="profiles"     href="/profiles">Profiles</a></li>
                     <li><a class="nav-link" data-section="releases"     href="/releases">Releases</a></li>

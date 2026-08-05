@@ -11,15 +11,21 @@
 (function () {
     'use strict';
 
+    // Longest-prefix-first is not required — the list is scanned in
+    // order and '/' is the catch-all, so it stays last.
     var SECTION_BY_PREFIX = [
-        { prefix: '/providers',     section: 'providers' },
-        { prefix: '/arr-instances', section: 'arr-instances' },
-        { prefix: '/profiles',      section: 'profiles' },
-        { prefix: '/releases',      section: 'releases' },
-        { prefix: '/searches',      section: 'releases' },
-        { prefix: '/pushes',        section: 'pushes' },
-        { prefix: '/webhooks',      section: 'webhooks' },
-        { prefix: '/',              section: 'dashboard' }
+        { prefix: '/providers',        section: 'providers' },
+        { prefix: '/download-clients', section: 'download-clients' },
+        { prefix: '/arr-instances',    section: 'arr-instances' },
+        { prefix: '/library',          section: 'library' },
+        { prefix: '/profiles',         section: 'profiles' },
+        { prefix: '/releases',         section: 'releases' },
+        { prefix: '/searches',         section: 'releases' },
+        { prefix: '/pushes',           section: 'pushes' },
+        { prefix: '/webhooks',         section: 'webhooks' },
+        { prefix: '/health',           section: 'health' },
+        { prefix: '/settings',         section: 'settings' },
+        { prefix: '/',                 section: 'dashboard' }
     ];
 
     function detectSection(pathname) {

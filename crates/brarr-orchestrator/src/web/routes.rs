@@ -40,7 +40,9 @@ use crate::auth::{AuthConfig, SESSION_COOKIE};
 use crate::auth::{BypassConfig, TrustedPeers};
 use crate::db::quality_profiles;
 use crate::db::settings;
-use crate::db::{arr_instances, decisions, grabs, library, providers, push_history, searches};
+use crate::db::{
+    arr_instances, decisions, download_clients, grabs, library, providers, push_history, searches,
+};
 #[allow(
     unused_imports,
     reason = "re-exported for downstream tests that still call it"
@@ -49,15 +51,16 @@ use crate::search::run_tmdb_search;
 use crate::web::render::html;
 use crate::web::templates::{
     ArrInstanceView, ArrInstancesListPartial, ArrInstancesTemplate, DashboardTemplate,
-    DecisionView, EditArrInstanceModalPartial, EditProviderModalPartial, EndpointHealthView,
-    EndpointRequestView, EpisodeView, ErrorTemplate, GrabView, HealthTemplate, LibraryAddTemplate,
-    LibraryDetailTemplate, LibraryDetailView, LibraryItemView, LibrarySeasonPartial,
-    LibraryTemplate, LoginTemplate, NewProfileModalPartial, NewSearchModalPartial,
-    ProfileEditorTemplate, ProfileView, ProfilesTemplate, ProviderHealthView, ProviderView,
-    ProvidersListPartial, ProvidersTemplate, PushGroupView, PushHistoryView, PushesFilterView,
-    PushesTemplate, RecentSearchView, ReleasesTemplate, SearchDetailTemplate, SearchesFilterView,
-    SearchesIndexTemplate, SeasonView, SettingsFlash, SettingsTemplate, SettingsValues,
-    TmdbHitView, WebhookEventView, WebhooksTemplate,
+    DecisionView, DownloadClientView, DownloadClientsListPartial, DownloadClientsTemplate,
+    EditArrInstanceModalPartial, EditDownloadClientModalPartial, EditProviderModalPartial,
+    EndpointHealthView, EndpointRequestView, EpisodeView, ErrorTemplate, GrabView, HealthTemplate,
+    LibraryAddTemplate, LibraryDetailTemplate, LibraryDetailView, LibraryItemView,
+    LibrarySeasonPartial, LibraryTemplate, LoginTemplate, NewProfileModalPartial,
+    NewSearchModalPartial, ProfileEditorTemplate, ProfileView, ProfilesTemplate,
+    ProviderHealthView, ProviderView, ProvidersListPartial, ProvidersTemplate, PushGroupView,
+    PushHistoryView, PushesFilterView, PushesTemplate, RecentSearchView, ReleasesTemplate,
+    SearchDetailTemplate, SearchesFilterView, SearchesIndexTemplate, SeasonView, SettingsFlash,
+    SettingsTemplate, SettingsValues, TmdbHitView, WebhookEventView, WebhooksTemplate,
 };
 use crate::{AppError, AppState};
 use brarr_core::TmdbId;
@@ -98,6 +101,7 @@ pub fn router(state: AppState, static_dir: &std::path::Path) -> Router {
             "/arr-instances/{id}/threshold",
             post(arr_instances_update_threshold),
         )
+        .merge(download_client_routes())
         .route("/decisions/{id}/push/{arr_id}", post(decisions_push))
         .route("/pushes", get(pushes_index))
         .route("/profiles", get(profiles_index).post(profiles_create))
@@ -167,6 +171,27 @@ pub fn router(state: AppState, static_dir: &std::path::Path) -> Router {
         .fallback(not_found)
         .layer(TraceLayer::new_for_http())
         .with_state(state)
+}
+
+/// Download-client admin routes, merged into the protected router (and
+/// so covered by the same auth layer). Split out to keep [`router`]
+/// itself readable as one screen.
+fn download_client_routes() -> Router<AppState> {
+    Router::new()
+        .route(
+            "/download-clients",
+            get(download_clients_index).post(download_clients_create),
+        )
+        .route(
+            "/download-clients/{id}",
+            delete(download_clients_delete).put(download_clients_update),
+        )
+        .route("/download-clients/{id}/edit", get(download_clients_edit))
+        .route("/download-clients/{id}/test", post(download_clients_test))
+        .route(
+            "/download-clients/{id}/toggle",
+            post(download_clients_toggle),
+        )
 }
 
 /// 404 handler — wired as the router's `.fallback`. Returns the
@@ -741,15 +766,7 @@ async fn arr_instances_poll_now(
 }
 
 fn render_arr_ping_badge(arr_id: &str, b: &PingBadge) -> String {
-    let (bg, fg) = if b.ok {
-        ("bg-emerald-100", "text-emerald-800")
-    } else {
-        ("bg-red-100", "text-red-800")
-    };
-    let detail = crate::web::templates::escape(&b.detail);
-    let label = crate::web::templates::escape(&b.label);
-    let aid = crate::web::templates::escape(arr_id);
-    format!(r#"<span id="arr-ping-{aid}" class="badge {bg} {fg}" title="{detail}">{label}</span>"#)
+    render_status_badge(&format!("arr-ping-{arr_id}"), b)
 }
 
 /// `POST /decisions/{id}/push/{arr_id}` — fire-and-record a manual
@@ -782,11 +799,18 @@ fn render_push_badge(
     arr_id: &str,
     row: &crate::db::push_history::PushHistoryRow,
 ) -> String {
+    // Design tokens, not a Tailwind palette scale — see
+    // [`render_status_badge`] for what the old `bg-emerald-100` spelling
+    // cost.
     let (bg, fg, label) = match row.status {
-        crate::db::push_history::PushStatus::Ok => ("bg-emerald-100", "text-emerald-800", "ok"),
-        crate::db::push_history::PushStatus::HttpError => ("bg-red-100", "text-red-800", "http"),
+        crate::db::push_history::PushStatus::Ok => {
+            ("bg-success-soft", "text-success-soft-fg", "ok")
+        }
+        crate::db::push_history::PushStatus::HttpError => {
+            ("bg-danger-soft", "text-danger-soft-fg", "http")
+        }
         crate::db::push_history::PushStatus::TransportError => {
-            ("bg-amber-100", "text-amber-800", "net")
+            ("bg-warning-soft", "text-warning-soft-fg", "net")
         }
     };
     let detail = row.response_body.as_deref().unwrap_or("pushed");
@@ -1717,20 +1741,33 @@ async fn run_provider_ping(
 }
 
 fn render_ping_badge(provider_id: &str, b: &PingBadge) -> String {
+    render_status_badge(&format!("ping-{provider_id}"), b)
+}
+
+/// Render one connectivity verdict as a `<span class="badge …">`.
+///
+/// Inline HTML — small enough that pulling it through Askama would add
+/// more ceremony than value. `dom_id` has to match the id of the cell
+/// the fragment replaces, so HTMX's `hx-target` still resolves on every
+/// click after the first swap. Detail is escaped: it carries raw
+/// upstream error text.
+///
+/// The colours are design tokens, not a palette scale. They used to be
+/// `bg-emerald-100 text-emerald-800`, which Tailwind generated on
+/// demand and the hand-authored stylesheet never defined — so from the
+/// migration onward every one of these badges rendered uncoloured. The
+/// `css_coverage` test only scanned templates, so nothing caught it;
+/// it scans this file now too.
+fn render_status_badge(dom_id: &str, b: &PingBadge) -> String {
     let (bg, fg) = if b.ok {
-        ("bg-emerald-100", "text-emerald-800")
+        ("bg-success-soft", "text-success-soft-fg")
     } else {
-        ("bg-red-100", "text-red-800")
+        ("bg-danger-soft", "text-danger-soft-fg")
     };
-    // Inline HTML — small enough that pulling it through Askama would
-    // add more ceremony than value. Detail is escaped to keep raw error
-    // text from breaking the markup. Keeping the same `id` as the
-    // initial cell so HTMX's `hx-target` resolves on every subsequent
-    // click after the first swap.
     let detail = crate::web::templates::escape(&b.detail);
     let label = crate::web::templates::escape(&b.label);
-    let pid = crate::web::templates::escape(provider_id);
-    format!(r#"<span id="ping-{pid}" class="badge {bg} {fg}" title="{detail}">{label}</span>"#)
+    let dom_id = crate::web::templates::escape(dom_id);
+    format!(r#"<span id="{dom_id}" class="badge {bg} {fg}" title="{detail}">{label}</span>"#)
 }
 
 async fn releases_index(State(state): State<AppState>) -> Result<Response, AppError> {
@@ -3170,6 +3207,254 @@ async fn arr_instances_update(
     )
     .await?;
     render_arr_instances_partial(&state).await
+}
+
+// ---------------------------------------------------------------------
+// Download clients — qBittorrent / SABnzbd CRUD.
+//
+// Every mutation answers with the whole list partial rather than a
+// single row: the table is ordered by `enabled DESC, priority, name`, so
+// one edit can move a *different* row.
+// ---------------------------------------------------------------------
+
+async fn download_clients_index(State(state): State<AppState>) -> Result<Response, AppError> {
+    let clients = download_client_views(&state).await?;
+    let (has_torrent, has_usenet) = protocol_coverage(&clients);
+    html(&DownloadClientsTemplate {
+        clients,
+        has_torrent,
+        has_usenet,
+    })
+}
+
+/// Which transports currently have somewhere to deliver to. Only
+/// enabled rows count — a drained client is exactly as useful to a grab
+/// as no client at all.
+fn protocol_coverage(clients: &[DownloadClientView]) -> (bool, bool) {
+    let serves = |protocol: &str| clients.iter().any(|c| c.enabled && c.protocol == protocol);
+    (serves("torrent"), serves("usenet"))
+}
+
+#[derive(Debug, Deserialize)]
+struct DownloadClientForm {
+    name: String,
+    /// Only read on create — the edit modal has no kind field, because
+    /// switching kind would change the protocol every linked grab was
+    /// routed under.
+    #[serde(default)]
+    kind: Option<String>,
+    base_url: String,
+    #[serde(default)]
+    username: Option<String>,
+    #[serde(default)]
+    password: Option<String>,
+    #[serde(default)]
+    api_key: Option<String>,
+    #[serde(default)]
+    category: Option<String>,
+    #[serde(default)]
+    priority: Option<String>,
+}
+
+impl DownloadClientForm {
+    /// Trimmed field, with empty read as absent — the same convention
+    /// [`crate::db::download_clients`] applies before it writes.
+    fn optional(field: Option<&str>) -> Option<&str> {
+        field.map(str::trim).filter(|v| !v.is_empty())
+    }
+
+    fn parsed_url(&self) -> Result<url::Url, AppError> {
+        url::Url::parse(self.base_url.trim())
+            .map_err(|e| AppError::InvalidInput(format!("invalid base_url: {e}")))
+    }
+
+    fn parsed_priority(&self) -> Result<Option<u32>, AppError> {
+        Self::optional(self.priority.as_deref())
+            .map(str::parse::<u32>)
+            .transpose()
+            .map_err(|e| AppError::InvalidInput(format!("prioridade deve ser um inteiro: {e}")))
+    }
+}
+
+async fn download_clients_create(
+    State(state): State<AppState>,
+    Form(form): Form<DownloadClientForm>,
+) -> Result<Response, AppError> {
+    let kind_raw = form.kind.as_deref().unwrap_or_default().trim().to_string();
+    let kind =
+        brarr_download_client::DownloadClientKind::from_label(&kind_raw).ok_or_else(|| {
+            AppError::InvalidInput(format!(
+                "kind deve ser qbittorrent ou sabnzbd, veio {kind_raw:?}"
+            ))
+        })?;
+    let url = form.parsed_url()?;
+    download_clients::insert(
+        state.pool(),
+        download_clients::NewDownloadClient {
+            name: form.name.trim(),
+            kind,
+            base_url: &url,
+            username: DownloadClientForm::optional(form.username.as_deref()),
+            password: DownloadClientForm::optional(form.password.as_deref()),
+            api_key: DownloadClientForm::optional(form.api_key.as_deref()),
+            category: DownloadClientForm::optional(form.category.as_deref()),
+            priority: form.parsed_priority()?,
+            enabled: Some(true),
+        },
+    )
+    .await?;
+    render_download_clients_partial(&state).await
+}
+
+/// `PUT /download-clients/{id}` — apply edits.
+///
+/// A blank password / apikey is passed through as `None`, which the db
+/// layer reads as "keep the stored one". The modal never echoes a
+/// secret, so treating blank as "erase" would wipe the credential of
+/// anyone who edited a name.
+async fn download_clients_update(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Form(form): Form<DownloadClientForm>,
+) -> Result<Response, AppError> {
+    let uuid = parse_download_client_id(&id)?;
+    let url = form.parsed_url()?;
+    download_clients::update(
+        state.pool(),
+        uuid,
+        download_clients::DownloadClientUpdate {
+            name: form.name.trim(),
+            base_url: &url,
+            username: DownloadClientForm::optional(form.username.as_deref()),
+            password: DownloadClientForm::optional(form.password.as_deref()),
+            api_key: DownloadClientForm::optional(form.api_key.as_deref()),
+            category: DownloadClientForm::optional(form.category.as_deref()),
+            priority: form.parsed_priority()?.unwrap_or(1),
+        },
+    )
+    .await?;
+    render_download_clients_partial(&state).await
+}
+
+async fn download_clients_delete(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, AppError> {
+    let uuid = parse_download_client_id(&id)?;
+    if !download_clients::delete_by_id(state.pool(), uuid).await? {
+        return Err(AppError::NotFound(format!("download_client {uuid}")));
+    }
+    render_download_clients_partial(&state).await
+}
+
+/// `POST /download-clients/{id}/toggle` — drain mode on/off.
+async fn download_clients_toggle(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, AppError> {
+    let uuid = parse_download_client_id(&id)?;
+    let current = download_clients::get_by_id(state.pool(), uuid).await?;
+    download_clients::set_enabled(state.pool(), uuid, !current.enabled).await?;
+    render_download_clients_partial(&state).await
+}
+
+/// `GET /download-clients/{id}/edit` — pre-filled modal, minus secrets.
+async fn download_clients_edit(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, AppError> {
+    let uuid = parse_download_client_id(&id)?;
+    let row = download_clients::get_by_id(state.pool(), uuid).await?;
+    html(&EditDownloadClientModalPartial {
+        id: row.id.to_string(),
+        name: row.name,
+        kind: row.kind.label().to_string(),
+        kind_label: row.kind.display_name().to_string(),
+        base_url: row.base_url.to_string(),
+        username: row.username.unwrap_or_default(),
+        category: row.category.unwrap_or_default(),
+        priority: row.priority,
+        has_password: row.password.is_some(),
+        has_api_key: row.api_key.is_some(),
+    })
+}
+
+/// `POST /download-clients/{id}/test` — authenticate against the client
+/// and report its version.
+///
+/// Both clients can refuse credentials inside a `200 OK`, which is why
+/// this goes through the real client rather than a bare HTTP probe.
+async fn download_clients_test(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, AppError> {
+    let uuid = parse_download_client_id(&id)?;
+    let row = download_clients::get_by_id(state.pool(), uuid).await?;
+    let badge = match brarr_download_client::build(row.to_config()) {
+        Ok(client) => match client.test_connection().await {
+            Ok(status) => {
+                let version = if status.version.is_empty() {
+                    "versão não informada".to_string()
+                } else {
+                    status.version.clone()
+                };
+                PingBadge {
+                    ok: true,
+                    label: format!("conectado · {version}"),
+                    detail: format!("{} respondeu", row.kind.display_name()),
+                }
+            }
+            Err(e) => PingBadge {
+                ok: false,
+                label: "erro".to_string(),
+                detail: format!("{e}"),
+            },
+        },
+        Err(e) => PingBadge {
+            ok: false,
+            label: "config".to_string(),
+            detail: format!("{e}"),
+        },
+    };
+    Ok(html_string(render_status_badge(
+        &format!("dl-ping-{}", row.id),
+        &badge,
+    )))
+}
+
+fn parse_download_client_id(id: &str) -> Result<Uuid, AppError> {
+    Uuid::parse_str(id)
+        .map_err(|e| AppError::InvalidInput(format!("invalid download client id: {e}")))
+}
+
+async fn download_client_views(state: &AppState) -> Result<Vec<DownloadClientView>, AppError> {
+    let rows = download_clients::list_all(state.pool()).await?;
+    Ok(rows.into_iter().map(download_client_view).collect())
+}
+
+async fn render_download_clients_partial(state: &AppState) -> Result<Response, AppError> {
+    let clients = download_client_views(state).await?;
+    let (has_torrent, has_usenet) = protocol_coverage(&clients);
+    html(&DownloadClientsListPartial {
+        clients,
+        has_torrent,
+        has_usenet,
+    })
+}
+
+fn download_client_view(row: crate::db::download_clients::DownloadClientRow) -> DownloadClientView {
+    DownloadClientView {
+        id: row.id.to_string(),
+        name: row.name,
+        kind: row.kind.label().to_string(),
+        kind_label: row.kind.display_name().to_string(),
+        protocol: row.kind.protocol().label().to_string(),
+        base_url: row.base_url.to_string(),
+        category: row.category,
+        priority: row.priority,
+        enabled: row.enabled,
+        created_at: format_ts(row.created_at),
+    }
 }
 
 /// Build the `ArrInstancesListPartial` shared by the toggle + update
