@@ -120,6 +120,7 @@ pub fn router(state: AppState, static_dir: &std::path::Path) -> Router {
         .route("/searches/{id}", get(search_detail))
         .route("/library", get(library_index))
         .route("/library/add", get(library_add).post(library_add_submit))
+        .route("/library/verify", post(library_verify))
         .route("/library/{id}/monitor", post(library_toggle_monitor))
         .route("/library/{id}/profile", post(library_set_profile))
         .route("/library/{id}/refresh", post(library_refresh))
@@ -1263,7 +1264,16 @@ async fn library_detail(
                 _ => "neutral".to_owned(),
             },
             grabbed_at: short_date(g.grabbed_at),
-            error: g.error,
+            // A file that vanished after the import outranks the status
+            // as the thing the operator needs to see on this row.
+            error: match (&g.error, g.file_missing_at.is_some()) {
+                (_, true) => Some(format!(
+                    "arquivo não está mais em {}",
+                    g.imported_path.as_deref().unwrap_or("disco")
+                )),
+                (other, false) => other.clone(),
+            },
+            file_missing: g.file_missing_at.is_some(),
         })
         .collect();
 
@@ -1527,6 +1537,39 @@ async fn library_scan_now(
         &format!("scan-{uuid}"),
         &badge,
     )))
+}
+
+/// `POST /library/verify` — reconcile the catalogue with the disk now.
+///
+/// The pass also runs on its own every six hours; this is the "I just
+/// deleted something, notice" button. It is `stat` per imported file, so
+/// it answers inline rather than needing the spawn-and-wait dance the
+/// search button does.
+async fn library_verify(State(state): State<AppState>) -> Result<Response, AppError> {
+    let summary = crate::verify::run_once(&state).await?;
+    let badge = if summary.checked == 0 {
+        PingBadge {
+            ok: true,
+            label: "nada importado ainda".to_string(),
+            detail: "não há arquivos para conferir".to_string(),
+        }
+    } else if summary.missing == 0 {
+        PingBadge {
+            ok: true,
+            label: format!("{} ok", summary.checked),
+            detail: "todos os arquivos importados continuam no lugar".to_string(),
+        }
+    } else {
+        PingBadge {
+            ok: false,
+            label: format!("{} sumiram", summary.missing),
+            detail: format!(
+                "{} de {} arquivos não estão mais no disco; esses itens voltaram a ser procurados",
+                summary.missing, summary.checked
+            ),
+        }
+    };
+    Ok(html_string(render_status_badge("verify-result", &badge)))
 }
 
 /// Empty 200 carrying `HX-Refresh`, which makes HTMX reload the page.

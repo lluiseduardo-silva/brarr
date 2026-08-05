@@ -162,7 +162,7 @@
 {% if grabs.is_empty() %}
 <div class="card-hairline bg-bg-surface border border-border-default rounded-xl px-5 py-8 text-center">
     <p class="text-sm text-fg-muted italic">Nenhuma aquisição ainda.</p>
-    <p class="text-xs text-fg-muted mt-1">O varredor automático e a entrega ao cliente de download chegam na próxima fase.</p>
+    <p class="text-xs text-fg-muted mt-1">O varredor busca sozinho no intervalo configurado, ou use “buscar agora” acima.</p>
 </div>
 {% else %}
 <div class="card-hairline bg-bg-surface border border-border-default rounded-xl overflow-hidden">
@@ -186,7 +186,13 @@
             <span class="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium {% if g.protocol == "usenet" %}bg-secondary-soft text-secondary-soft-fg{% else %}bg-accent-soft text-accent-soft-fg{% endif %}">{{ g.protocol }}</span>
         </div>
         <div class="px-4 w-28">
+            {# O status continua `imported` porque ele foi — o que mudou
+               é que o arquivo não está mais lá. #}
+            {% if g.file_missing %}
+            <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium bg-warning-soft text-warning-soft-fg">sumiu</span>
+            {% else %}
             <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium {% if g.tone == "ok" %}bg-success-soft text-success-soft-fg border border-success-solid{% else if g.tone == "err" %}bg-danger-soft text-danger-soft-fg{% else if g.tone == "warn" %}bg-warning-soft text-warning-soft-fg{% else %}bg-bg-muted text-fg-muted{% endif %}">{{ g.status }}</span>
+            {% endif %}
         </div>
         <div class="px-4 w-28 text-[11px] font-mono text-fg-secondary">{{ g.grabbed_at }}</div>
     </div>

@@ -132,13 +132,14 @@ impl GrabStatus {
     ///
     /// This is brarr's answer to "do I already have the file?" — the
     /// operator chose to infer it from the acquisition record rather
-    /// than by scanning the disk, which is the phase-2 import's job.
-    /// Everything except the two terminal failures counts: `failed` and
-    /// `rejected` are exactly the states where trying again is right.
+    /// than by walking the library on every sweep. Everything except the
+    /// two terminal failures counts: `failed` and `rejected` are exactly
+    /// the states where trying again is right.
     ///
-    /// Known limitation, accepted deliberately: a file deleted outside
-    /// brarr leaves an `imported` grab behind, and the item stays out of
-    /// the queue until that row is removed.
+    /// **Status alone is not the whole answer.** A grab whose imported
+    /// file has since vanished carries `file_missing_at` and stops
+    /// covering its item, which is why the queries filter on that column
+    /// rather than calling this. See [`crate::verify`].
     #[must_use]
     pub fn blocks_search(self) -> bool {
         !matches!(self, Self::Failed | Self::Rejected)
@@ -187,6 +188,11 @@ pub struct Grab {
     /// [`GrabStatus::Imported`] — and the only record of which path in
     /// the library belongs to this acquisition.
     pub imported_path: Option<String>,
+    /// When the verification pass found [`Self::imported_path`] gone.
+    /// A grab in this state stops covering its item *and* releases its
+    /// barrier key, so the same release can be acquired again — usually
+    /// exactly what an operator who deleted a file by accident wants.
+    pub file_missing_at: Option<OffsetDateTime>,
     /// When the reservation was taken.
     pub grabbed_at: OffsetDateTime,
     /// Last status change.
@@ -221,7 +227,8 @@ pub struct NewGrab<'a> {
 
 const GRAB_COLUMNS: &str = "id, item_id, episode_id, season_number, decision_id, provider_id, \
      provider_name, release_id_remote, release_name, download_url, protocol, \
-     client_id, client_item_id, status, error, imported_path, grabbed_at, updated_at";
+     client_id, client_item_id, status, error, imported_path, file_missing_at, \
+     grabbed_at, updated_at";
 
 fn opt_uuid_at(row: &SqliteRow, col: &str) -> Result<Option<Uuid>, AppError> {
     let raw: Option<String> = row.try_get(col)?;
@@ -263,6 +270,9 @@ fn row_to_grab(row: &SqliteRow) -> Result<Grab, AppError> {
         status: GrabStatus::from_label(&status_raw)?,
         error: row.try_get("error")?,
         imported_path: row.try_get("imported_path")?,
+        file_missing_at: row
+            .try_get::<Option<i64>, _>("file_missing_at")?
+            .and_then(|ts| OffsetDateTime::from_unix_timestamp(ts).ok()),
         grabbed_at: OffsetDateTime::from_unix_timestamp(grabbed)
             .map_err(|e| AppError::InvalidInput(format!("invalid grabs.grabbed_at: {e}")))?,
         updated_at: OffsetDateTime::from_unix_timestamp(updated)
@@ -422,6 +432,7 @@ pub async fn blocking_for(
     let rows = sqlx::query(&format!(
         "SELECT {GRAB_COLUMNS} FROM grabs \
          WHERE item_id = ? AND status NOT IN ('failed', 'rejected') \
+           AND file_missing_at IS NULL \
            AND (episode_id IS NULL OR episode_id IS ?) \
          ORDER BY grabbed_at DESC"
     ))
@@ -497,6 +508,48 @@ pub async fn mark_imported(pool: &Pool, id: Uuid, path: &str) -> Result<(), AppE
     .bind(id.to_string())
     .execute(pool)
     .await?;
+    if res.rows_affected() == 0 {
+        return Err(AppError::NotFound(format!("grab {id}")));
+    }
+    Ok(())
+}
+
+/// Imported grabs whose file is still believed to be on disk — the set
+/// the verification pass checks.
+///
+/// # Errors
+///
+/// Returns [`AppError::Database`] on SQL failure.
+pub async fn imported_present(pool: &Pool) -> Result<Vec<Grab>, AppError> {
+    let rows = sqlx::query(&format!(
+        "SELECT {GRAB_COLUMNS} FROM grabs \
+         WHERE status = 'imported' AND file_missing_at IS NULL \
+           AND imported_path IS NOT NULL \
+         ORDER BY updated_at ASC"
+    ))
+    .fetch_all(pool)
+    .await?;
+    rows.iter().map(row_to_grab).collect()
+}
+
+/// Record that an imported file is no longer where brarr put it.
+///
+/// The status stays `imported` — it *was* imported, and rewriting that
+/// would erase what happened. The timestamp is what stops the grab
+/// covering its item, and what frees its barrier key.
+///
+/// # Errors
+///
+/// - [`AppError::NotFound`] when the id is absent.
+/// - [`AppError::Database`] on SQL failure.
+pub async fn mark_file_missing(pool: &Pool, id: Uuid) -> Result<(), AppError> {
+    let now = OffsetDateTime::now_utc().unix_timestamp();
+    let res = sqlx::query("UPDATE grabs SET file_missing_at = ?, updated_at = ? WHERE id = ?")
+        .bind(now)
+        .bind(now)
+        .bind(id.to_string())
+        .execute(pool)
+        .await?;
     if res.rows_affected() == 0 {
         return Err(AppError::NotFound(format!("grab {id}")));
     }
@@ -995,6 +1048,82 @@ mod tests {
                 .is_empty(),
             "the next episode is still wanted"
         );
+    }
+
+    #[tokio::test]
+    async fn a_missing_file_stops_covering_its_item_and_frees_the_key() {
+        let pool = open_memory().await.unwrap();
+        let (item_id, provider_id) = fixture(&pool).await;
+        let grab = reserve(&pool, &new_grab(item_id, provider_id, "abc"))
+            .await
+            .unwrap()
+            .unwrap();
+        mark_imported(
+            &pool,
+            grab.id,
+            "/data/filmes/Matrix (1999)/Matrix (1999).mkv",
+        )
+        .await
+        .unwrap();
+        assert!(
+            !blocking_for(&pool, item_id, None).await.unwrap().is_empty(),
+            "an imported grab covers its item"
+        );
+
+        mark_file_missing(&pool, grab.id).await.unwrap();
+
+        assert!(
+            blocking_for(&pool, item_id, None).await.unwrap().is_empty(),
+            "…until the file is gone, and then the item is wanted again"
+        );
+        // And the barrier lets the *same* release through, which is
+        // usually the one the operator wants back.
+        assert!(
+            reserve(&pool, &new_grab(item_id, provider_id, "abc"))
+                .await
+                .unwrap()
+                .is_some(),
+            "the partial index has to skip the missing row"
+        );
+
+        // The history survives: both rows are still there.
+        assert_eq!(for_item(&pool, item_id).await.unwrap().len(), 2);
+        let old = get_by_id(&pool, grab.id).await.unwrap();
+        assert_eq!(old.status, GrabStatus::Imported, "it *was* imported");
+        assert!(old.file_missing_at.is_some());
+        assert!(old.imported_path.is_some());
+    }
+
+    #[tokio::test]
+    async fn the_verification_set_is_only_imported_rows_with_a_path() {
+        let pool = open_memory().await.unwrap();
+        let (item_id, provider_id) = fixture(&pool).await;
+
+        let imported = reserve(&pool, &new_grab(item_id, provider_id, "a"))
+            .await
+            .unwrap()
+            .unwrap();
+        mark_imported(&pool, imported.id, "/data/a.mkv")
+            .await
+            .unwrap();
+
+        // Downloaded but not imported: those files belong to the
+        // download client, not to brarr.
+        let completed = reserve(&pool, &new_grab(item_id, provider_id, "b"))
+            .await
+            .unwrap()
+            .unwrap();
+        set_status(&pool, completed.id, GrabStatus::Completed, None)
+            .await
+            .unwrap();
+
+        let set = imported_present(&pool).await.unwrap();
+        assert_eq!(set.len(), 1);
+        assert_eq!(set[0].id, imported.id);
+
+        // Already known missing ⇒ not checked again.
+        mark_file_missing(&pool, imported.id).await.unwrap();
+        assert!(imported_present(&pool).await.unwrap().is_empty());
     }
 
     #[tokio::test]

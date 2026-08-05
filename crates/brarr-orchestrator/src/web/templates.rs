@@ -1109,8 +1109,13 @@ pub struct GrabView {
     pub tone: String,
     /// `dd/mm/aaaa`.
     pub grabbed_at: String,
-    /// Failure reason, when there is one.
+    /// Failure reason, when there is one — or, for a grab whose imported
+    /// file has since vanished, where it used to be.
     pub error: Option<String>,
+    /// `true` when the verification pass found the imported file gone.
+    /// The status still reads `imported`, because it was; this is what
+    /// says the library no longer has it.
+    pub file_missing: bool,
 }
 
 /// HTML-escapes a fragment for safe interpolation. Askama auto-escapes

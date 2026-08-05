@@ -66,6 +66,7 @@ pub mod search;
 pub mod state;
 pub mod tmdb_sync;
 pub mod ttl_cache;
+pub mod verify;
 pub mod web;
 
 pub use auth::{AuthConfig, BypassConfig, TrustedPeers};
