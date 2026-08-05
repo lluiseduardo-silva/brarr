@@ -61,6 +61,7 @@ pub mod poll;
 pub mod provider_cache;
 pub mod push;
 pub mod queue;
+pub mod remote_path;
 pub mod scan;
 pub mod search;
 pub mod state;

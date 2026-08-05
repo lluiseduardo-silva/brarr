@@ -14,6 +14,7 @@ pub mod grabs;
 pub mod library;
 pub mod maintenance;
 pub mod metrics;
+pub mod path_mappings;
 pub mod providers;
 pub mod push_history;
 pub mod quality_profiles;
