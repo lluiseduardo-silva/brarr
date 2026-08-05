@@ -41,8 +41,8 @@ use crate::auth::{BypassConfig, TrustedPeers};
 use crate::db::quality_profiles;
 use crate::db::settings;
 use crate::db::{
-    arr_instances, decisions, download_clients, grabs, library, providers, push_history,
-    root_folders, searches,
+    arr_instances, decisions, download_clients, grabs, library, path_mappings, providers,
+    push_history, root_folders, searches,
 };
 #[allow(
     unused_imports,
@@ -51,18 +51,21 @@ use crate::db::{
 use crate::search::run_tmdb_search;
 use crate::web::render::html;
 use crate::web::templates::{
-    ArrInstanceView, ArrInstancesListPartial, ArrInstancesTemplate, DashboardTemplate,
-    DecisionView, DownloadClientView, DownloadClientsListPartial, DownloadClientsTemplate,
-    EditArrInstanceModalPartial, EditDownloadClientModalPartial, EditProviderModalPartial,
-    EndpointHealthView, EndpointRequestView, EpisodeView, ErrorTemplate, GrabView, HealthTemplate,
-    InteractiveReleaseView, InteractiveResultsPartial, LibraryAddTemplate, LibraryDetailTemplate,
-    LibraryDetailView, LibraryItemView, LibrarySeasonPartial, LibraryTemplate, LoginTemplate,
-    NewProfileModalPartial, NewSearchModalPartial, ProfileEditorTemplate, ProfileView,
-    ProfilesTemplate, ProviderHealthView, ProviderView, ProvidersListPartial, ProvidersTemplate,
-    PushGroupView, PushHistoryView, PushesFilterView, PushesTemplate, RecentSearchView,
-    ReleasesTemplate, RootFolderView, RootFoldersListPartial, SearchDetailTemplate,
-    SearchesFilterView, SearchesIndexTemplate, SeasonView, SettingsFlash, SettingsTemplate,
-    SettingsValues, TmdbHitView, WebhookEventView, WebhooksTemplate,
+    AddOptionFolder, AddOptionProfile, ArrInstanceView, ArrInstancesListPartial,
+    ArrInstancesTemplate, DashboardTemplate, DecisionView, DownloadClientView,
+    DownloadClientsListPartial, DownloadClientsTemplate, EditArrInstanceModalPartial,
+    EditDownloadClientModalPartial, EditProviderModalPartial, EndpointHealthView,
+    EndpointRequestView, EpisodeView, ErrorTemplate, GrabView, HealthTemplate,
+    InteractiveReleaseView, InteractiveResultsPartial, LibraryAddOptionsModalPartial,
+    LibraryAddTemplate, LibraryDetailTemplate, LibraryDetailView, LibraryItemView,
+    LibrarySeasonPartial, LibraryTemplate, LoginTemplate, NewProfileModalPartial,
+    NewSearchModalPartial, PathMappingClientOption, PathMappingView, PathMappingsPartial,
+    ProfileEditorTemplate, ProfileView, ProfilesTemplate, ProviderHealthView, ProviderView,
+    ProvidersListPartial, ProvidersTemplate, PushGroupView, PushHistoryView, PushesFilterView,
+    PushesTemplate, RecentSearchView, ReleasesTemplate, RootFolderView, RootFoldersListPartial,
+    SearchDetailTemplate, SearchesFilterView, SearchesIndexTemplate, SeasonView, SettingsFlash,
+    SettingsTemplate, SettingsValues, StuckImportView, TmdbHitView, WebhookEventView,
+    WebhooksTemplate,
 };
 use crate::{AppError, AppState};
 use brarr_core::TmdbId;
@@ -120,6 +123,7 @@ pub fn router(state: AppState, static_dir: &std::path::Path) -> Router {
         .route("/searches/{id}", get(search_detail))
         .route("/library", get(library_index))
         .route("/library/add", get(library_add).post(library_add_submit))
+        .route("/library/add/options", get(library_add_options))
         .route("/library/verify", post(library_verify))
         .route("/library/{id}/monitor", post(library_toggle_monitor))
         .route("/library/{id}/profile", post(library_set_profile))
@@ -201,6 +205,9 @@ fn download_client_routes() -> Router<AppState> {
         )
         .route("/root-folders", post(root_folders_create))
         .route("/root-folders/{id}", delete(root_folders_delete))
+        .route("/path-mappings", post(path_mappings_create))
+        .route("/path-mappings/{id}", delete(path_mappings_delete))
+        .route("/grabs/{id}/requeue-import", post(grab_requeue_import))
 }
 
 /// 404 handler — wired as the router's `.fallback`. Returns the
@@ -964,6 +971,35 @@ struct LibraryAddForm {
     tmdb_id: i64,
     /// `movie` or `tv`.
     media_type: String,
+    /// Chosen root folder. Empty means "leave whatever is there".
+    #[serde(default)]
+    root_folder: Option<String>,
+    /// Chosen quality profile. Empty means "no profile", which is a
+    /// real choice, not an absent one — see the handler.
+    #[serde(default)]
+    profile_id: Option<String>,
+    /// [`crate::db::library::MonitorScope`] label.
+    #[serde(default)]
+    monitor_scope: Option<String>,
+    /// Movies have a checkbox instead of a scope select. An unchecked
+    /// checkbox posts nothing at all, which is why this is an `Option`
+    /// and not a `bool`.
+    #[serde(default)]
+    monitored_movie: Option<String>,
+    /// Whether to sweep for this title immediately.
+    #[serde(default)]
+    search_now: Option<String>,
+}
+
+/// Query string of `GET /library/add/options`.
+#[derive(Debug, Deserialize)]
+struct LibraryAddOptionsQuery {
+    tmdb_id: i64,
+    media_type: String,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    year: Option<i32>,
 }
 
 /// Poster size used on the index and the add screen. Small enough that a
@@ -1164,28 +1200,162 @@ async fn library_add(
     })
 }
 
-/// `POST /library/add` — pull the full record from TMDB and catalogue it.
+/// `GET /library/add/options` — the dialog that lets the operator choose
+/// destination, profile and monitoring *before* committing.
+async fn library_add_options(
+    State(state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<LibraryAddOptionsQuery>,
+) -> Result<Response, AppError> {
+    let media_type = crate::db::library::MediaType::from_label(&q.media_type)?;
+    let existing = library::get_by_tmdb(state.pool(), media_type, q.tmdb_id)
+        .await
+        .ok();
+    html(
+        &add_options_modal(
+            &state,
+            &AddOptionsContext {
+                tmdb_id: q.tmdb_id,
+                media_type,
+                title: q.title.unwrap_or_else(|| "Sem título".to_owned()),
+                year: q.year,
+                existing: existing.as_ref(),
+                error: None,
+            },
+        )
+        .await?,
+    )
+}
+
+/// Everything the dialog needs that is not derived from the database.
+struct AddOptionsContext<'a> {
+    tmdb_id: i64,
+    media_type: crate::db::library::MediaType,
+    title: String,
+    year: Option<i32>,
+    existing: Option<&'a library::LibraryItem>,
+    error: Option<String>,
+}
+
+async fn add_options_modal(
+    state: &AppState,
+    ctx: &AddOptionsContext<'_>,
+) -> Result<LibraryAddOptionsModalPartial, AppError> {
+    use crate::db::library::MediaType;
+
+    let chosen_folder = ctx.existing.and_then(|i| i.root_folder.clone());
+    let root_folders: Vec<AddOptionFolder> = root_folders::list_all(state.pool())
+        .await?
+        .into_iter()
+        .filter(|f| f.media_type.is_none() || f.media_type == Some(ctx.media_type))
+        .map(|f| {
+            let path = f.path.to_string_lossy().into_owned();
+            AddOptionFolder {
+                selected: chosen_folder.as_deref() == Some(path.as_str()),
+                label: match f.media_type {
+                    Some(MediaType::Movie) => "filmes".to_owned(),
+                    Some(MediaType::Tv) => "séries".to_owned(),
+                    None => String::new(),
+                },
+                path,
+            }
+        })
+        .collect();
+
+    let chosen_profile = ctx.existing.and_then(|i| i.profile_id);
+    let profiles: Vec<AddOptionProfile> = quality_profiles::list_all(state.pool())
+        .await?
+        .into_iter()
+        .map(|p| AddOptionProfile {
+            selected: chosen_profile == Some(p.id),
+            id: p.id.to_string(),
+            name: p.name,
+            threshold: p.push_threshold,
+        })
+        .collect();
+
+    Ok(LibraryAddOptionsModalPartial {
+        tmdb_id: ctx.tmdb_id,
+        title: ctx.title.clone(),
+        year: ctx.year,
+        is_series: ctx.media_type == MediaType::Tv,
+        already_in_library: ctx.existing.is_some(),
+        no_profile_selected: chosen_profile.is_none(),
+        default_threshold: crate::scan::DEFAULT_PUSH_THRESHOLD,
+        scope: ctx
+            .existing
+            .map_or(crate::db::library::MonitorScope::All, |i| i.monitor_scope)
+            .label()
+            .to_owned(),
+        root_folders,
+        profiles,
+        error: ctx.error.clone(),
+    })
+}
+
+/// `POST /library/add` — pull the full record from TMDB and catalogue it
+/// with the operator's choices.
 async fn library_add_submit(
     State(state): State<AppState>,
     Form(form): Form<LibraryAddForm>,
 ) -> Result<Response, AppError> {
+    let media_type = crate::db::library::MediaType::from_label(&form.media_type)?;
+
+    // A path arriving from the page is not trusted just because the page
+    // offered it — same rule the detail screen's picker follows.
+    let root_folder = match form.root_folder.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some(path) => Some(validated_root_folder(&state, path).await?),
+    };
+    let profile_id = match form.profile_id.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some(raw) => Some(
+            Uuid::parse_str(raw)
+                .map_err(|e| AppError::InvalidInput(format!("perfil inválido: {e}")))?,
+        ),
+    };
+
+    // A movie has a checkbox, a series has a select. Both land here as
+    // one scope.
+    let scope = if media_type == crate::db::library::MediaType::Movie {
+        Some(if form.monitored_movie.is_some() {
+            crate::db::library::MonitorScope::All
+        } else {
+            crate::db::library::MonitorScope::Nothing
+        })
+    } else {
+        match form.monitor_scope.as_deref().map(str::trim) {
+            None | Some("") => None,
+            Some(raw) => Some(crate::db::library::MonitorScope::from_label(raw)?),
+        }
+    };
+
     let tmdb = crate::tmdb_sync::client(state.pool()).await?;
-    match form.media_type.as_str() {
-        "movie" => {
-            crate::tmdb_sync::add_movie(state.pool(), &tmdb, form.tmdb_id).await?;
-        }
-        "tv" => {
-            // Also walks every season, so the episode tree lands with the
-            // item rather than on a later refresh.
-            crate::tmdb_sync::add_series(state.pool(), &tmdb, form.tmdb_id).await?;
-        }
-        other => {
-            return Err(AppError::InvalidInput(format!(
-                "media_type inválido: {other}"
-            )));
-        }
+    let item = crate::tmdb_sync::add_with_options(
+        state.pool(),
+        &tmdb,
+        media_type,
+        form.tmdb_id,
+        &crate::tmdb_sync::AddOptions {
+            profile_id,
+            root_folder,
+            monitor_scope: scope,
+        },
+    )
+    .await?;
+
+    if form.search_now.is_some() && item.monitored {
+        // Same shape as the "buscar agora" button: spawn it and answer,
+        // rather than holding the request open while a series with forty
+        // episodes is swept.
+        let state = state.clone();
+        let target = item.clone();
+        tokio::spawn(async move { crate::scan::run_once_for_item(&state, &target).await });
     }
-    Ok(Redirect::to("/library").into_response())
+
+    // HX-Refresh rather than a redirect: the POST comes from a dialog
+    // inside #modal-target, so a 3xx would swap the whole /library page
+    // into the modal slot.
+    Ok(hx_refresh())
 }
 
 /// `POST /library/{id}/monitor` — flip the monitoring flag.
@@ -1369,6 +1539,24 @@ async fn root_folder_options(
         .collect())
 }
 
+/// Accept a root-folder path only if it is one brarr actually knows.
+///
+/// A path arriving from a page is not trusted just because the page
+/// offered it: the form is the operator's, but the request is anybody's,
+/// and this value ends up as a directory brarr writes files into.
+async fn validated_root_folder(state: &AppState, path: &str) -> Result<String, AppError> {
+    let known = root_folders::list_all(state.pool())
+        .await?
+        .into_iter()
+        .any(|f| f.path == std::path::Path::new(path));
+    if !known {
+        return Err(AppError::InvalidInput(format!(
+            "{path} não é uma pasta raiz cadastrada"
+        )));
+    }
+    Ok(path.to_owned())
+}
+
 /// Map episode rows into the shared partial. Used both by the season
 /// expand and by the single-row swap after an episode toggle.
 fn episode_views(episodes: &[library::Episode]) -> Vec<EpisodeView> {
@@ -1486,18 +1674,7 @@ async fn library_set_profile(
     // anything that is not one of them anyway.
     let root_folder = match form.root_folder.as_deref().map(str::trim) {
         None | Some("") => None,
-        Some(path) => {
-            let known = root_folders::list_all(state.pool())
-                .await?
-                .into_iter()
-                .any(|f| f.path == std::path::Path::new(path));
-            if !known {
-                return Err(AppError::InvalidInput(format!(
-                    "{path} não é uma pasta raiz cadastrada"
-                )));
-            }
-            Some(path.to_owned())
-        }
+        Some(path) => Some(validated_root_folder(&state, path).await?),
     };
     // The item keeps whatever it had if the form did not carry the field
     // at all — an older cached page must not silently clear a placement.
@@ -3844,9 +4021,13 @@ async fn arr_instances_update(
 async fn download_clients_index(State(state): State<AppState>) -> Result<Response, AppError> {
     let clients = download_client_views(&state).await?;
     let (has_torrent, has_usenet) = protocol_coverage(&clients);
+    let block = path_mapping_block(&state).await?;
     html(&DownloadClientsTemplate {
         clients,
         root_folders: root_folder_views(&state).await?,
+        mappings: block.mappings,
+        mapping_clients: block.mapping_clients,
+        stuck: block.stuck,
         has_torrent,
         has_usenet,
     })
@@ -4117,6 +4298,121 @@ async fn root_folders_delete(
         return Err(AppError::NotFound(format!("root_folder {uuid}")));
     }
     render_root_folders_partial(&state).await
+}
+
+#[derive(Debug, Deserialize)]
+struct PathMappingForm {
+    client_id: String,
+    remote_prefix: String,
+    local_prefix: String,
+}
+
+async fn path_mappings_create(
+    State(state): State<AppState>,
+    Form(form): Form<PathMappingForm>,
+) -> Result<Response, AppError> {
+    let client_id = Uuid::parse_str(form.client_id.trim())
+        .map_err(|e| AppError::InvalidInput(format!("cliente inválido: {e}")))?;
+    path_mappings::insert(
+        state.pool(),
+        crate::db::path_mappings::NewPathMapping {
+            client_id,
+            remote_prefix: &form.remote_prefix,
+            local_prefix: &form.local_prefix,
+        },
+    )
+    .await?;
+    render_path_mappings_partial(&state).await
+}
+
+async fn path_mappings_delete(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, AppError> {
+    let uuid = Uuid::parse_str(&id)
+        .map_err(|e| AppError::InvalidInput(format!("invalid path mapping id: {e}")))?;
+    if !path_mappings::delete_by_id(state.pool(), uuid).await? {
+        return Err(AppError::NotFound(format!("path_mapping {uuid}")));
+    }
+    render_path_mappings_partial(&state).await
+}
+
+/// Put a failed import back in the queue. Nothing is downloaded again —
+/// the file is still where the client left it.
+async fn grab_requeue_import(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, AppError> {
+    let uuid = Uuid::parse_str(&id)
+        .map_err(|e| AppError::InvalidInput(format!("invalid grab id: {e}")))?;
+    // A `false` here is not an error: the operator double-clicked, or
+    // another tab already requeued it. The refreshed block tells the
+    // truth either way.
+    grabs::requeue_import(state.pool(), uuid).await?;
+    render_path_mappings_partial(&state).await
+}
+
+async fn render_path_mappings_partial(state: &AppState) -> Result<Response, AppError> {
+    let block = path_mapping_block(state).await?;
+    html(&block)
+}
+
+async fn path_mapping_block(state: &AppState) -> Result<PathMappingsPartial, AppError> {
+    let clients = download_clients::list_all(state.pool()).await?;
+    let names: std::collections::HashMap<Uuid, String> =
+        clients.iter().map(|c| (c.id, c.name.clone())).collect();
+
+    let mappings = path_mappings::list_all(state.pool())
+        .await?
+        .into_iter()
+        .map(|m| PathMappingView {
+            id: m.id.to_string(),
+            client_name: names
+                .get(&m.client_id)
+                .cloned()
+                .unwrap_or_else(|| "—".to_owned()),
+            specificity: crate::remote_path::specificity(&m.remote_prefix),
+            remote_prefix: m.remote_prefix,
+            // One `metadata` per row, same trade as the root-folder
+            // table: the list is tiny and a cached answer would go stale
+            // the moment a bind mount changed.
+            reachable: std::fs::metadata(&m.local_prefix).is_ok_and(|meta| meta.is_dir()),
+            local_prefix: m.local_prefix.to_string_lossy().into_owned(),
+        })
+        .collect();
+
+    let titles = library::titles_by_id(state.pool()).await?;
+    let stuck = grabs::retryable_imports(state.pool())
+        .await?
+        .into_iter()
+        .map(|g| StuckImportView {
+            id: g.id.to_string(),
+            release_name: g.release_name,
+            item_title: titles
+                .get(&g.item_id)
+                .cloned()
+                .unwrap_or_else(|| "item removido".to_owned()),
+            error: g
+                .error
+                .unwrap_or_else(|| "sem motivo registrado".to_owned()),
+            client_name: g
+                .client_id
+                .and_then(|id| names.get(&id).cloned())
+                .unwrap_or_else(|| "—".to_owned()),
+        })
+        .collect();
+
+    Ok(PathMappingsPartial {
+        mappings,
+        mapping_clients: clients
+            .into_iter()
+            .map(|c| PathMappingClientOption {
+                id: c.id.to_string(),
+                name: c.name,
+            })
+            .collect(),
+        stuck,
+    })
 }
 
 async fn render_root_folders_partial(state: &AppState) -> Result<Response, AppError> {

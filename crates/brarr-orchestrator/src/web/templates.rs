@@ -225,6 +225,14 @@ pub struct DownloadClientsTemplate {
     pub clients: Vec<DownloadClientView>,
     /// Configured destinations — the bottom half of the same screen.
     pub root_folders: Vec<RootFolderView>,
+    /// Path-rewrite rules. Askama renders an `{% include %}` against the
+    /// *parent* context, so the partial's fields have to live here too —
+    /// same arrangement as [`DownloadClientsListPartial`].
+    pub mappings: Vec<PathMappingView>,
+    /// Clients available in the "add mapping" select.
+    pub mapping_clients: Vec<PathMappingClientOption>,
+    /// Failed imports the operator can send back to the queue.
+    pub stuck: Vec<StuckImportView>,
     /// `false` ⇒ no enabled qBittorrent, so a torrent grab has nowhere
     /// to go. Surfaced as a warning strip rather than discovered when a
     /// release is finally found.
@@ -283,6 +291,131 @@ pub struct DownloadClientView {
 pub struct RootFoldersListPartial {
     /// Configured destinations.
     pub root_folders: Vec<RootFolderView>,
+}
+
+/// The add-with-options dialog, returned by
+/// `GET /library/add/options` and re-rendered on a validation failure so
+/// the operator's picks survive.
+#[derive(Debug, Template)]
+#[template(path = "partials/library_add_options_modal.html")]
+pub struct LibraryAddOptionsModalPartial {
+    /// TMDB id being added.
+    pub tmdb_id: i64,
+    /// Localised title, for the header.
+    pub title: String,
+    /// Release / first-air year.
+    pub year: Option<i32>,
+    /// Drives which controls render: a movie has no season tree.
+    pub is_series: bool,
+    /// `true` when the title is already catalogued, so the dialog can
+    /// say that submitting will overwrite the current configuration.
+    pub already_in_library: bool,
+    /// Root folders that serve this media type.
+    pub root_folders: Vec<AddOptionFolder>,
+    /// Configured quality profiles.
+    pub profiles: Vec<AddOptionProfile>,
+    /// `true` when "Sem perfil" is the current choice.
+    pub no_profile_selected: bool,
+    /// Threshold applied when no profile is chosen, shown so the
+    /// fallback is not itself an invisible default.
+    pub default_threshold: u32,
+    /// Currently selected [`crate::db::library::MonitorScope`] label.
+    pub scope: String,
+    /// Validation message from a rejected submission.
+    pub error: Option<String>,
+}
+
+/// One root-folder option in the add dialog.
+#[derive(Debug)]
+pub struct AddOptionFolder {
+    /// Absolute path, which is also the posted value.
+    pub path: String,
+    /// `Filmes` / `Séries` / empty when it serves both.
+    pub label: String,
+    /// Pre-selected entry.
+    pub selected: bool,
+}
+
+/// One quality-profile option in the add dialog.
+#[derive(Debug)]
+pub struct AddOptionProfile {
+    /// Stringified UUID.
+    pub id: String,
+    /// Display name.
+    pub name: String,
+    /// `push_threshold`, shown so the operator can see what the choice
+    /// actually changes.
+    pub threshold: u32,
+    /// Pre-selected entry.
+    pub selected: bool,
+}
+
+/// HTMX partial for the path-mapping block: the rules, the clients that
+/// can take one, and the failed imports an operator may want to retry
+/// after adding one.
+///
+/// All three live in one swap target because they move together — adding
+/// the rule that fixes an import is exactly when the retry button
+/// becomes useful.
+#[derive(Debug, Template)]
+#[template(path = "partials/path_mappings.html")]
+pub struct PathMappingsPartial {
+    /// Configured rules, grouped by client in render order.
+    pub mappings: Vec<PathMappingView>,
+    /// Clients available in the "add" select. Named `mapping_clients`
+    /// rather than `clients` because Askama renders an `{% include %}`
+    /// against the parent's context, and `download_clients.html` already
+    /// binds `clients` to a different type — the collision is a build
+    /// error at best and the wrong list at worst.
+    pub mapping_clients: Vec<PathMappingClientOption>,
+    /// Failed imports whose download a client may still hold.
+    pub stuck: Vec<StuckImportView>,
+}
+
+/// One row in the path-mapping table.
+#[derive(Debug)]
+pub struct PathMappingView {
+    /// Stringified UUID.
+    pub id: String,
+    /// Which client reports paths in this namespace.
+    pub client_name: String,
+    /// Canonical remote prefix, as the client writes it.
+    pub remote_prefix: String,
+    /// Local prefix, in brarr's namespace.
+    pub local_prefix: String,
+    /// `false` when brarr cannot read the local side right now — an
+    /// unmounted bind, say. The row renders muted rather than silently
+    /// pointing somewhere useless.
+    pub reachable: bool,
+    /// How many components the remote side pins. Shown because the
+    /// longest match wins, and two overlapping rules otherwise look
+    /// interchangeable.
+    pub specificity: usize,
+}
+
+/// One option in the client select of the "add mapping" form.
+#[derive(Debug)]
+pub struct PathMappingClientOption {
+    /// Stringified UUID.
+    pub id: String,
+    /// Display name.
+    pub name: String,
+}
+
+/// A failed import the operator can send back to the queue.
+#[derive(Debug)]
+pub struct StuckImportView {
+    /// Stringified grab UUID.
+    pub id: String,
+    /// Release title snapshot.
+    pub release_name: String,
+    /// Catalogue title, when the item is still there.
+    pub item_title: String,
+    /// Why it failed, verbatim — the operator decides whether a mapping
+    /// would have fixed it. brarr deliberately does not guess.
+    pub error: String,
+    /// Which client still holds the download.
+    pub client_name: String,
 }
 
 /// One row in the root-folder table.

@@ -7,6 +7,8 @@
 //! touch `monitored`, `profile_id`, `root_folder` or `added_at` — those
 //! belong to the operator, not to the upstream API.
 
+use std::collections::HashMap;
+
 use sqlx::{Row, sqlite::SqliteRow};
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -45,6 +47,92 @@ impl MediaType {
             other => Err(AppError::InvalidInput(format!(
                 "unknown library_items.media_type: {other}"
             ))),
+        }
+    }
+}
+
+/// How much of a title the operator wants chased.
+///
+/// Persisted in `library_items.monitor_scope`, and this column's job is
+/// **deliberately narrow**: it decides the default for a season or
+/// episode row [`sync_seasons`] has never seen before. It is not, and
+/// must never be read as, a summary of what is monitored right now — the
+/// tree is the truth for that, and the operator can edit it by hand at
+/// any time.
+///
+/// Without the column the default is always "monitored", so "only the
+/// first season" silently becomes "all seasons" the day TMDB publishes
+/// the second — the same invisible default this work exists to remove,
+/// one refresh later.
+///
+/// There is no "latest season only" variant: it would need a never-seen
+/// row to be monitored (the new season) *and* the previous one to stop
+/// being monitored, and a single stored value cannot express both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MonitorScope {
+    /// Everything, specials included. The column default, and therefore
+    /// behaviour identical to before this migration.
+    #[default]
+    All,
+    /// Only episodes that have not aired yet. An episode with no date
+    /// counts as future: TMDB leaves the field blank until it schedules
+    /// one, and marking it unmonitored would strand it forever — the
+    /// tree preserves flags by number, so it would never come back on
+    /// its own.
+    FutureEpisodes,
+    /// Only the lowest-numbered real season.
+    FirstSeason,
+    /// Catalogued and never chased.
+    Nothing,
+}
+
+impl MonitorScope {
+    /// Persisted label, and what the dialog posts.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::FutureEpisodes => "future",
+            Self::FirstSeason => "first-season",
+            Self::Nothing => "none",
+        }
+    }
+
+    /// Parse from the persisted label.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::InvalidInput`] for anything the CHECK
+    /// constraint would have rejected.
+    pub fn from_label(s: &str) -> Result<Self, AppError> {
+        match s {
+            "all" => Ok(Self::All),
+            "future" => Ok(Self::FutureEpisodes),
+            "first-season" => Ok(Self::FirstSeason),
+            "none" => Ok(Self::Nothing),
+            other => Err(AppError::InvalidInput(format!(
+                "monitoramento inválido: {other}"
+            ))),
+        }
+    }
+
+    /// Whether `library_items.monitored` — the one flag [`monitored`]
+    /// reads — stays on.
+    #[must_use]
+    pub fn monitors_item(self) -> bool {
+        self != Self::Nothing
+    }
+
+    /// Whether a season/episode row this scope has never seen starts
+    /// monitored. `aired` is `false` for an episode with no air date or
+    /// one still in the future.
+    #[must_use]
+    pub fn wants_new_row(self, season_number: i32, first_season: i32, aired: bool) -> bool {
+        match self {
+            Self::All => true,
+            Self::Nothing => false,
+            Self::FirstSeason => season_number == first_season,
+            Self::FutureEpisodes => !aired,
         }
     }
 }
@@ -90,6 +178,10 @@ pub struct LibraryItem {
     pub profile_id: Option<Uuid>,
     /// Destination directory handed to the download client.
     pub root_folder: Option<String>,
+    /// How much of the title to chase. Governs the default for season
+    /// and episode rows [`sync_seasons`] has never seen — **not** a
+    /// summary of what is monitored now. See the migration.
+    pub monitor_scope: MonitorScope,
     /// When the operator added it.
     pub added_at: OffsetDateTime,
     /// When the TMDB metadata was last refreshed. Drives the TTL sweep.
@@ -241,6 +333,7 @@ fn opt_ts_at(row: &SqliteRow, col: &str) -> Result<Option<OffsetDateTime>, AppEr
 fn row_to_item(row: &SqliteRow) -> Result<LibraryItem, AppError> {
     let media_type_raw: String = row.try_get("media_type")?;
     let monitored: i64 = row.try_get("monitored")?;
+    let scope_raw: String = row.try_get("monitor_scope")?;
     Ok(LibraryItem {
         id: uuid_at(row, "id")?,
         media_type: MediaType::from_label(&media_type_raw)?,
@@ -265,6 +358,7 @@ fn row_to_item(row: &SqliteRow) -> Result<LibraryItem, AppError> {
         monitored: monitored != 0,
         profile_id: opt_uuid_at(row, "profile_id")?,
         root_folder: row.try_get("root_folder")?,
+        monitor_scope: MonitorScope::from_label(&scope_raw)?,
         added_at: ts_at(row, "added_at")?,
         metadata_refreshed_at: ts_at(row, "metadata_refreshed_at")?,
     })
@@ -273,7 +367,7 @@ fn row_to_item(row: &SqliteRow) -> Result<LibraryItem, AppError> {
 const ITEM_COLUMNS: &str = "id, media_type, tmdb_id, imdb_id, tvdb_id, title, original_title, \
      year, overview, poster_path, backdrop_path, tmdb_status, runtime_minutes, \
      next_air_date, digital_release_at, physical_release_at, monitored, \
-     profile_id, root_folder, added_at, metadata_refreshed_at";
+     profile_id, root_folder, monitor_scope, added_at, metadata_refreshed_at";
 
 /// Insert a catalogue entry, or refresh the metadata of the existing one
 /// with the same `(media_type, tmdb_id)`.
@@ -433,6 +527,50 @@ pub async fn set_monitored(pool: &Pool, id: Uuid, monitored: bool) -> Result<(),
     Ok(())
 }
 
+/// Set how much of a title to chase.
+///
+/// Also flips `monitored`, because [`MonitorScope::Nothing`] and an
+/// unmonitored item are the same statement made twice — letting them
+/// disagree would give the scanner and the screen two different answers.
+///
+/// # Errors
+///
+/// Returns [`AppError::NotFound`] when the id is absent,
+/// [`AppError::Database`] on SQL failure.
+pub async fn set_monitor_scope(pool: &Pool, id: Uuid, scope: MonitorScope) -> Result<(), AppError> {
+    let res = sqlx::query("UPDATE library_items SET monitor_scope = ?, monitored = ? WHERE id = ?")
+        .bind(scope.label())
+        .bind(i64::from(scope.monitors_item()))
+        .bind(id.to_string())
+        .execute(pool)
+        .await?;
+    if res.rows_affected() == 0 {
+        return Err(AppError::NotFound(format!("library_item {id}")));
+    }
+    Ok(())
+}
+
+/// Every item's title, by id. For screens that list grabs and need a
+/// catalogue title per row without loading the whole library.
+///
+/// # Errors
+///
+/// Returns [`AppError::Database`] on SQL failure.
+pub async fn titles_by_id(pool: &Pool) -> Result<HashMap<Uuid, String>, AppError> {
+    let rows = sqlx::query("SELECT id, title FROM library_items")
+        .fetch_all(pool)
+        .await?;
+    let mut out = HashMap::with_capacity(rows.len());
+    for row in &rows {
+        let id: String = row.try_get("id")?;
+        let title: String = row.try_get("title")?;
+        let id = Uuid::parse_str(&id)
+            .map_err(|e| AppError::InvalidInput(format!("invalid library_items.id: {e}")))?;
+        out.insert(id, title);
+    }
+    Ok(out)
+}
+
 /// Attach (or clear, with `None`) the quality profile and root folder.
 ///
 /// # Errors
@@ -499,21 +637,16 @@ pub async fn counts(pool: &Pool) -> Result<LibraryCounts, AppError> {
     })
 }
 
-/// Replace the season/episode tree of a series from a TMDB fetch.
+/// The per-season and per-episode monitoring flags currently stored, so
+/// [`sync_seasons`] can rebuild the tree without losing them.
+type MonitoringFlags = (Vec<(i32, bool)>, Vec<(i32, i32, bool)>);
+
+/// Read the flags the operator has already chosen.
 ///
-/// Monitoring flags of seasons and episodes that survive the sync are
-/// preserved — the same reasoning as [`upsert`]: TMDB owns the shape,
-/// the operator owns what gets chased. Seasons TMDB no longer reports
-/// are dropped (and their episodes cascade).
-///
-/// # Errors
-///
-/// Returns [`AppError::Database`] on SQL failure.
-pub async fn sync_seasons(
-    pool: &Pool,
-    item_id: Uuid,
-    seasons: &[NewSeason],
-) -> Result<(), AppError> {
+/// Split out of [`sync_seasons`] to keep that function under the line
+/// limit, and because "what has the operator already chosen" is a
+/// question worth being able to ask on its own.
+async fn existing_monitoring(pool: &Pool, item_id: Uuid) -> Result<MonitoringFlags, AppError> {
     let existing =
         sqlx::query("SELECT season_number, monitored FROM library_seasons WHERE item_id = ?")
             .bind(item_id.to_string())
@@ -543,6 +676,57 @@ pub async fn sync_seasons(
             flag != 0,
         ));
     }
+    Ok((season_flags, episode_flags))
+}
+
+/// The item's [`MonitorScope`]. A missing row falls back to
+/// [`MonitorScope::All`] — the pre-migration behaviour, and the only
+/// safe answer when there is nothing to read.
+async fn item_scope(pool: &Pool, item_id: Uuid) -> Result<MonitorScope, AppError> {
+    let row = sqlx::query("SELECT monitor_scope FROM library_items WHERE id = ?")
+        .bind(item_id.to_string())
+        .fetch_optional(pool)
+        .await?;
+    match row {
+        Some(row) => MonitorScope::from_label(&row.try_get::<String, _>("monitor_scope")?),
+        None => Ok(MonitorScope::All),
+    }
+}
+
+/// Replace the season/episode tree of a series from a TMDB fetch.
+///
+/// Monitoring flags of seasons and episodes that survive the sync are
+/// preserved — the same reasoning as [`upsert`]: TMDB owns the shape,
+/// the operator owns what gets chased. Seasons TMDB no longer reports
+/// are dropped (and their episodes cascade).
+///
+/// A row this has never seen takes its default from the item's
+/// [`MonitorScope`], which is why "only the first season" survives a
+/// refresh that publishes a second one.
+///
+/// # Errors
+///
+/// Returns [`AppError::Database`] on SQL failure.
+pub async fn sync_seasons(
+    pool: &Pool,
+    item_id: Uuid,
+    seasons: &[NewSeason],
+) -> Result<(), AppError> {
+    let (season_flags, episode_flags) = existing_monitoring(pool, item_id).await?;
+
+    // A row this function has never seen takes its default from the
+    // item's scope. Rows it *has* seen keep whatever the operator set —
+    // the scope decides defaults, it does not overwrite choices.
+    let scope = item_scope(pool, item_id).await?;
+    // Season 0 is TMDB's specials bucket and never counts as "the first
+    // season" — The Boys carries 76 specials against 40 real episodes.
+    let first_season = seasons
+        .iter()
+        .map(|s| s.season_number)
+        .filter(|n| *n > 0)
+        .min()
+        .unwrap_or(1);
+    let now = OffsetDateTime::now_utc();
 
     // Rebuild from scratch: cheaper and far less error-prone than
     // diffing, and the tree is small (tens of rows per series).
@@ -553,10 +737,14 @@ pub async fn sync_seasons(
 
     for season in seasons {
         let season_id = Uuid::new_v4();
+        let season_aired = season.air_date.is_some_and(|d| d <= now);
         let monitored = season_flags
             .iter()
             .find(|(n, _)| *n == season.season_number)
-            .is_none_or(|(_, flag)| *flag);
+            .map_or_else(
+                || scope.wants_new_row(season.season_number, first_season, season_aired),
+                |(_, flag)| *flag,
+            );
         sqlx::query(
             "INSERT INTO library_seasons \
                 (id, item_id, season_number, episode_count, air_date, monitored) \
@@ -572,10 +760,19 @@ pub async fn sync_seasons(
         .await?;
 
         for episode in &season.episodes {
+            // No air date counts as "not aired": TMDB leaves it blank
+            // until it schedules one, and calling that aired would mark
+            // the episode unmonitored under `future`, where it would
+            // stay forever — the tree preserves flags by number, so it
+            // could never come back on its own.
+            let aired = episode.air_date.is_some_and(|d| d <= now);
             let ep_monitored = episode_flags
                 .iter()
                 .find(|(s, e, _)| *s == season.season_number && *e == episode.episode_number)
-                .is_none_or(|(_, _, flag)| *flag);
+                .map_or_else(
+                    || scope.wants_new_row(season.season_number, first_season, aired),
+                    |(_, _, flag)| *flag,
+                );
             sqlx::query(
                 "INSERT INTO library_episodes \
                     (id, item_id, season_id, season_number, episode_number, title, air_date, monitored) \
@@ -936,5 +1133,121 @@ mod tests {
         .await
         .unwrap_err();
         assert!(matches!(err, AppError::InvalidInput(_)));
+    }
+
+    /// Build a two-season tree, the second season fresh from TMDB.
+    fn two_seasons() -> Vec<NewSeason> {
+        vec![
+            NewSeason {
+                season_number: 1,
+                episode_count: 2,
+                air_date: None,
+                episodes: vec![
+                    NewEpisode {
+                        episode_number: 1,
+                        title: None,
+                        air_date: None,
+                    },
+                    NewEpisode {
+                        episode_number: 2,
+                        title: None,
+                        air_date: None,
+                    },
+                ],
+            },
+            NewSeason {
+                season_number: 2,
+                episode_count: 1,
+                air_date: None,
+                episodes: vec![NewEpisode {
+                    episode_number: 1,
+                    title: None,
+                    air_date: None,
+                }],
+            },
+        ]
+    }
+
+    async fn series(pool: &Pool) -> LibraryItem {
+        upsert(
+            pool,
+            &NewLibraryItem {
+                media_type: Some(MediaType::Tv),
+                tmdb_id: 76_479,
+                title: "The Boys".to_owned(),
+                ..NewLibraryItem::default()
+            },
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn first_season_scope_survives_a_metadata_refresh() {
+        // The reason monitor_scope is a column and not just per-season
+        // flags: sync_seasons marks every row it has never seen as
+        // monitored, so "only the first season" would silently become
+        // "all seasons" the day TMDB publishes season 2.
+        let pool = crate::db::open_memory().await.unwrap();
+        let item = series(&pool).await;
+        set_monitor_scope(&pool, item.id, MonitorScope::FirstSeason)
+            .await
+            .unwrap();
+
+        sync_seasons(&pool, item.id, &two_seasons()).await.unwrap();
+
+        let rows = seasons(&pool, item.id).await.unwrap();
+        let s1 = rows.iter().find(|s| s.season_number == 1).unwrap();
+        let s2 = rows.iter().find(|s| s.season_number == 2).unwrap();
+        assert!(s1.monitored, "the first season is the whole point");
+        assert!(
+            !s2.monitored,
+            "a season the operator never saw must not arrive monitored under this scope"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refresh_never_overwrites_a_flag_the_operator_set() {
+        let pool = crate::db::open_memory().await.unwrap();
+        let item = series(&pool).await;
+        set_monitor_scope(&pool, item.id, MonitorScope::FirstSeason)
+            .await
+            .unwrap();
+        sync_seasons(&pool, item.id, &two_seasons()).await.unwrap();
+
+        // The operator turns season 2 on by hand.
+        let s2 = seasons(&pool, item.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|s| s.season_number == 2)
+            .unwrap();
+        set_season_monitored(&pool, s2.id, true).await.unwrap();
+
+        // A later metadata refresh must not undo that.
+        sync_seasons(&pool, item.id, &two_seasons()).await.unwrap();
+
+        let after = seasons(&pool, item.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|s| s.season_number == 2)
+            .unwrap();
+        assert!(
+            after.monitored,
+            "the scope decides defaults for unseen rows, it does not overwrite choices"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_nothing_scope_unmonitors_the_item_itself() {
+        let pool = crate::db::open_memory().await.unwrap();
+        let item = series(&pool).await;
+        set_monitor_scope(&pool, item.id, MonitorScope::Nothing)
+            .await
+            .unwrap();
+        let after = get_by_id(&pool, item.id).await.unwrap();
+        assert!(!after.monitored, "scanner reads library_items.monitored");
+        assert_eq!(after.monitor_scope, MonitorScope::Nothing);
     }
 }
