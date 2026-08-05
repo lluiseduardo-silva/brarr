@@ -24,7 +24,7 @@ use url::Url;
 use crate::error::truncate_body;
 use crate::{
     AddedRelease, ClientFuture, ClientStatus, DownloadClient, DownloadClientConfig,
-    DownloadClientError, DownloadClientKind, ReleaseFile, endpoint,
+    DownloadClientError, DownloadClientKind, DownloadState, DownloadStatus, ReleaseFile, endpoint,
 };
 
 /// The kind every error in this module carries.
@@ -58,15 +58,67 @@ struct SabEnvelope {
     /// Payload of `mode=addfile` — one entry per accepted nzb.
     #[serde(default)]
     nzo_ids: Option<Vec<String>>,
+    /// Payload of `mode=history`.
+    #[serde(default)]
+    history: Option<SabHistory>,
 }
 
-/// The slice of the queue payload this crate reads. SABnzbd returns
-/// ~40 fields; the rest are for the queue view, which is a later step.
+/// The slice of the queue payload this crate reads.
 #[derive(Debug, Deserialize)]
 struct SabQueue {
     /// Present on current builds, absent on older ones.
     #[serde(default)]
     version: Option<String>,
+    /// One entry per job still downloading.
+    #[serde(default)]
+    slots: Vec<SabQueueSlot>,
+}
+
+/// A job still in the queue.
+///
+/// Every numeric field is typed `String`: SABnzbd quotes its numbers
+/// (`"percentage": "42"`, `"mb": "4096.5"`) and has changed which ones
+/// over the years, so parsing them here beats a deserialise that fails
+/// the whole payload over one field's type.
+#[derive(Debug, Deserialize)]
+struct SabQueueSlot {
+    #[serde(default)]
+    nzo_id: String,
+    /// `Downloading` | `Queued` | `Paused` | `Propagating` | `Fetching`.
+    #[serde(default)]
+    status: String,
+    /// Whole percent, `"0"`..`"100"`.
+    #[serde(default)]
+    percentage: String,
+    /// Total size in megabytes.
+    #[serde(default)]
+    mb: String,
+    /// `h:mm:ss` remaining.
+    #[serde(default)]
+    timeleft: String,
+}
+
+/// Payload of `mode=history`.
+#[derive(Debug, Deserialize)]
+struct SabHistory {
+    #[serde(default)]
+    slots: Vec<SabHistorySlot>,
+}
+
+/// A job that left the queue — finished, failed, or post-processing.
+#[derive(Debug, Deserialize)]
+struct SabHistorySlot {
+    #[serde(default)]
+    nzo_id: String,
+    /// `Completed` | `Failed` | `Extracting` | `Repairing` | …
+    #[serde(default)]
+    status: String,
+    /// Final directory. What the import phase will want.
+    #[serde(default)]
+    storage: String,
+    /// Populated when `status == "Failed"`.
+    #[serde(default)]
+    fail_message: String,
 }
 
 impl SabnzbdClient {
@@ -261,6 +313,107 @@ impl DownloadClient for SabnzbdClient {
             Ok(AddedRelease { client_item_id })
         })
     }
+
+    fn status<'a>(
+        &'a self,
+        client_item_id: &'a str,
+    ) -> ClientFuture<'a, Result<Option<DownloadStatus>, DownloadClientError>> {
+        Box::pin(async move {
+            // A job lives in the queue until it finishes, then moves to
+            // the history. Two places, so two lookups — queue first,
+            // because that is where anything still running is.
+            let queue = self.call(&[("mode", "queue")]).await?;
+            if let Some(slot) = queue
+                .queue
+                .into_iter()
+                .flat_map(|q| q.slots)
+                .find(|s| s.nzo_id == client_item_id)
+            {
+                return Ok(Some(slot.into_status()));
+            }
+            let history = self
+                .call(&[("mode", "history"), ("nzo_ids", client_item_id)])
+                .await?;
+            Ok(history
+                .history
+                .into_iter()
+                .flat_map(|h| h.slots)
+                // The `nzo_ids` filter does the work, but old builds
+                // ignore unknown parameters and return everything.
+                .find(|s| s.nzo_id == client_item_id)
+                .map(SabHistorySlot::into_status))
+        })
+    }
+}
+
+impl SabQueueSlot {
+    fn into_status(self) -> DownloadStatus {
+        let percent = self.percentage.trim().parse::<f32>().unwrap_or(0.0);
+        let size_bytes = megabytes_to_bytes(&self.mb);
+        DownloadStatus {
+            state: match self.status.as_str() {
+                "Paused" | "Queued" | "Propagating" => DownloadState::Queued,
+                // Downloading, Fetching, and anything newer.
+                _ => DownloadState::Downloading,
+            },
+            progress: (percent / 100.0).clamp(0.0, 1.0),
+            size_bytes,
+            // SABnzbd reports speed for the queue as a whole, never per
+            // job. Attributing the total to one row would be a lie.
+            speed_bytes: None,
+            eta_seconds: parse_timeleft(&self.timeleft),
+            save_path: None,
+            detail: None,
+        }
+    }
+}
+
+impl SabHistorySlot {
+    fn into_status(self) -> DownloadStatus {
+        // Everything in the history has finished downloading; the
+        // non-terminal statuses are post-processing (repair, extract,
+        // move), which is still work in progress as far as brarr cares.
+        let state = match self.status.as_str() {
+            "Failed" => DownloadState::Failed,
+            "Completed" => DownloadState::Completed,
+            _ => DownloadState::Downloading,
+        };
+        DownloadStatus {
+            state,
+            progress: 1.0,
+            size_bytes: None,
+            speed_bytes: None,
+            eta_seconds: None,
+            save_path: Some(self.storage).filter(|p| !p.is_empty()),
+            detail: Some(self.fail_message).filter(|m| !m.is_empty()),
+        }
+    }
+}
+
+/// SABnzbd reports sizes in megabytes as a quoted decimal (`"4096.5"`).
+///
+/// Only the whole megabytes are kept: this is a figure the UI renders as
+/// "4.0 GB", and integer arithmetic avoids a float round-trip whose
+/// failure modes (NaN, saturation) would have to be handled anyway.
+fn megabytes_to_bytes(raw: &str) -> Option<u64> {
+    let whole = raw.trim().split('.').next()?.trim();
+    if whole.is_empty() {
+        return None;
+    }
+    whole.parse::<u64>().ok()?.checked_mul(1024 * 1024)
+}
+
+/// Parse SABnzbd's `h:mm:ss` (or `mm:ss`) remaining time into seconds.
+fn parse_timeleft(raw: &str) -> Option<u64> {
+    let raw = raw.trim();
+    if raw.is_empty() || raw == "0:00:00" {
+        return None;
+    }
+    let mut seconds: u64 = 0;
+    for part in raw.split(':') {
+        seconds = seconds.checked_mul(60)?.checked_add(part.parse().ok()?)?;
+    }
+    Some(seconds)
 }
 
 /// Map SABnzbd's error string onto an error variant.

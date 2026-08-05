@@ -132,6 +132,7 @@ pub fn router(state: AppState, static_dir: &std::path::Path) -> Router {
             post(library_episode_monitor),
         )
         .route("/library/{id}", get(library_detail).delete(library_delete))
+        .route("/queue", get(queue_index))
         .route("/webhooks", get(webhooks_index))
         .route("/health", get(health_index))
         .route("/settings", get(settings_index))
@@ -1532,6 +1533,143 @@ fn hx_refresh() -> Response {
     resp.headers_mut()
         .insert("HX-Refresh", HeaderValue::from_static("true"));
     resp
+}
+
+/// `GET /queue` — what the download clients are doing right now.
+///
+/// Every row is read live from its client. The background sync
+/// ([`crate::queue`]) persists the state transitions; the numbers on
+/// this page are never stored, so they cannot be stale.
+async fn queue_index(State(state): State<AppState>) -> Result<Response, AppError> {
+    let entries = crate::queue::snapshot(&state).await?;
+    // One query for every title in the queue rather than one per row.
+    let titles: std::collections::HashMap<Uuid, String> = library::list(state.pool())
+        .await?
+        .into_iter()
+        .map(|item| (item.id, item.title))
+        .collect();
+
+    let mut downloading = 0usize;
+    let mut done = 0usize;
+    let mut total_speed = 0u64;
+    let views: Vec<_> = entries
+        .iter()
+        .map(|entry| {
+            let view = queue_entry_view(entry, &titles);
+            match view.tone.as_str() {
+                "ok" => done += 1,
+                "err" => {}
+                _ => downloading += 1,
+            }
+            if let crate::queue::Probe::Known(status) = &entry.probe {
+                total_speed += status.speed_bytes.unwrap_or(0);
+            }
+            view
+        })
+        .collect();
+
+    let mut parts = Vec::new();
+    if downloading > 0 {
+        parts.push(format!("{downloading} em andamento"));
+    }
+    if done > 0 {
+        parts.push(format!("{done} concluído(s)"));
+    }
+    html(&crate::web::templates::QueueTemplate {
+        entries: views,
+        summary: parts.join(" · "),
+        total_speed: if total_speed > 0 {
+            format!("{}/s", humanize_bytes(total_speed))
+        } else {
+            String::new()
+        },
+    })
+}
+
+fn queue_entry_view(
+    entry: &crate::queue::QueueEntry,
+    titles: &std::collections::HashMap<Uuid, String>,
+) -> crate::web::templates::QueueEntryView {
+    use crate::queue::Probe;
+    use brarr_download_client::DownloadState;
+
+    let (percent, speed, eta, size, status, tone, detail) = match &entry.probe {
+        Probe::Known(s) => {
+            let percent = (s.progress * 100.0).clamp(0.0, 100.0).round();
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "clamped to 0..=100 on the line above"
+            )]
+            let percent = percent as u8;
+            let (status, tone) = match s.state {
+                DownloadState::Queued => ("na fila", "neutral"),
+                DownloadState::Downloading => ("baixando", "info"),
+                DownloadState::Completed => ("concluído", "ok"),
+                DownloadState::Failed => ("falhou", "err"),
+            };
+            (
+                percent,
+                s.speed_bytes
+                    .map(humanize_bytes)
+                    .map_or_else(String::new, |b| format!("{b}/s")),
+                s.eta_seconds.map_or_else(String::new, humanize_eta),
+                s.size_bytes.map_or_else(String::new, humanize_bytes),
+                status.to_string(),
+                tone.to_string(),
+                s.detail.clone(),
+            )
+        }
+        // Nothing was learned, so the grab's own state is all there is.
+        Probe::Unknown | Probe::Unreachable(_) => {
+            let detail = match &entry.probe {
+                Probe::Unreachable(why) => Some(why.clone()),
+                _ => Some("o cliente não conhece este download".to_string()),
+            };
+            (
+                0,
+                String::new(),
+                String::new(),
+                String::new(),
+                entry.grab.status.label().to_string(),
+                "neutral".to_string(),
+                detail,
+            )
+        }
+    };
+
+    crate::web::templates::QueueEntryView {
+        title: titles
+            .get(&entry.grab.item_id)
+            .cloned()
+            .unwrap_or_else(|| "(removido da biblioteca)".to_string()),
+        item_id: entry.grab.item_id.to_string(),
+        release_name: entry.grab.release_name.clone(),
+        provider_name: entry.grab.provider_name.clone(),
+        protocol: entry.grab.protocol.label().to_string(),
+        client_name: entry.client_name.clone().unwrap_or_else(|| "—".to_string()),
+        size,
+        percent,
+        speed,
+        eta,
+        status,
+        tone,
+        detail,
+    }
+}
+
+/// `540` → `9 min restantes`.
+fn humanize_eta(seconds: u64) -> String {
+    if seconds < 60 {
+        return format!("{seconds} s restantes");
+    }
+    let minutes = seconds / 60;
+    if minutes < 60 {
+        return format!("{minutes} min restantes");
+    }
+    let hours = minutes / 60;
+    let rest = minutes % 60;
+    format!("{hours} h {rest} min restantes")
 }
 
 /// `GET /health` — provider fan-out health + Torznab/Newznab endpoint

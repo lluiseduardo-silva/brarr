@@ -54,7 +54,7 @@ use brarr_orchestrator::db::settings::{
 };
 use brarr_orchestrator::state::{LogReloader, RuntimeConfig};
 use brarr_orchestrator::{
-    AppState, AuthConfig, BypassConfig, TrustedPeers, db, grpc, maintenance, poll, scan, web,
+    AppState, AuthConfig, BypassConfig, TrustedPeers, db, grpc, maintenance, poll, queue, scan, web,
 };
 use tracing::warn;
 use tracing_subscriber::layer::SubscriberExt;
@@ -222,6 +222,9 @@ async fn main() -> Result<()> {
     // while no download client is configured, so a deployment that
     // hasn't set one up sees no change in behaviour.
     let _scan_handle = scan::spawn(state.clone());
+    // Long-lived queue sync — walks handed-over grabs through
+    // downloading → completed from what the clients report.
+    let _queue_handle = queue::spawn(state.clone());
 
     tokio::select! {
         res = web_task => res.context("web task panicked")?.context("web server")?,

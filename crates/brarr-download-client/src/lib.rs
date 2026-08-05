@@ -42,6 +42,7 @@
 //! subsequent call carries the same cookie.
 
 mod error;
+mod infohash;
 mod qbittorrent;
 mod sabnzbd;
 
@@ -210,12 +211,53 @@ pub enum ReleaseFile<'a> {
 /// What the client answered when it accepted a release.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AddedRelease {
-    /// Client-side handle for the download, when the client returns one
-    /// (SABnzbd's `nzo_id`). qBittorrent's add endpoint answers a bare
-    /// `Ok.` with no identifier at all, so `None` here is a normal
-    /// outcome rather than a failure — following that download up means
-    /// listing by category instead.
+    /// Client-side handle for the download.
+    ///
+    /// SABnzbd names what it queued (`nzo_id`). qBittorrent answers a
+    /// bare `Ok.` and names nothing — so the torrent side computes the
+    /// **infohash** from the file it just uploaded, which is the same
+    /// identity qBittorrent itself keys on and the same one Radarr uses.
+    /// `None` only when the release could not be identified at all (a
+    /// magnet spelling its hash in base32, say); the download still runs,
+    /// it just cannot be followed.
     pub client_item_id: Option<String>,
+}
+
+/// Where a download has got to, as the client sees it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DownloadState {
+    /// Accepted but not started — queued, paused, or waiting on
+    /// propagation.
+    Queued,
+    /// Bytes are moving, or the client is checking/moving files.
+    Downloading,
+    /// The download itself is finished. For a torrent that includes
+    /// seeding, which never ends on its own.
+    Completed,
+    /// The client gave up. [`DownloadStatus::detail`] carries its reason.
+    Failed,
+}
+
+/// One download's progress. Everything except [`Self::state`] is
+/// optional because the two clients expose different subsets — SABnzbd
+/// reports speed only for the queue as a whole, so a per-item figure
+/// would be an invention.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DownloadStatus {
+    /// Lifecycle position.
+    pub state: DownloadState,
+    /// `0.0..=1.0`.
+    pub progress: f32,
+    /// Total size in bytes.
+    pub size_bytes: Option<u64>,
+    /// Current download rate in bytes per second.
+    pub speed_bytes: Option<u64>,
+    /// Seconds remaining, as the client estimates it.
+    pub eta_seconds: Option<u64>,
+    /// Where the files are landing. The import phase will need this.
+    pub save_path: Option<String>,
+    /// Client-supplied explanation, mostly for [`DownloadState::Failed`].
+    pub detail: Option<String>,
 }
 
 /// Something brarr can hand a release to.
@@ -263,6 +305,26 @@ pub trait DownloadClient: Send + Sync {
         name: &'a str,
         file: ReleaseFile<'a>,
     ) -> ClientFuture<'a, Result<AddedRelease, DownloadClientError>>;
+
+    /// Ask the client how one download is going.
+    ///
+    /// `client_item_id` is whatever [`AddedRelease::client_item_id`]
+    /// carried — an infohash for torrents, an `nzo_id` for usenet.
+    ///
+    /// `Ok(None)` means the client does not know this download: it was
+    /// removed, or it has not appeared yet. Both clients take a moment
+    /// to list something they just accepted, so a single `None` is not
+    /// evidence that the download is gone.
+    ///
+    /// # Errors
+    ///
+    /// - [`DownloadClientError::Auth`] when the credentials are refused.
+    /// - [`DownloadClientError::Transport`] when the host is unreachable.
+    /// - [`DownloadClientError::Decode`] when the payload does not parse.
+    fn status<'a>(
+        &'a self,
+        client_item_id: &'a str,
+    ) -> ClientFuture<'a, Result<Option<DownloadStatus>, DownloadClientError>>;
 }
 
 /// Build the client matching `config.kind`.

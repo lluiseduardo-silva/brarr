@@ -16,8 +16,8 @@
 )]
 
 use brarr_download_client::{
-    DownloadClient, DownloadClientConfig, DownloadClientError, DownloadClientKind, Protocol,
-    QbittorrentClient, ReleaseFile, SabnzbdClient, build,
+    DownloadClient, DownloadClientConfig, DownloadClientError, DownloadClientKind, DownloadState,
+    Protocol, QbittorrentClient, ReleaseFile, SabnzbdClient, build,
 };
 use url::Url;
 use wiremock::matchers::{body_string_contains, method, path, query_param};
@@ -325,9 +325,10 @@ async fn a_dead_host_surfaces_as_transport_not_as_a_bad_password() {
     );
 }
 
-/// A minimal but real bencode dictionary — enough that the bytes going
-/// over the wire are recognisably a torrent.
-const TORRENT: &[u8] = b"d8:announce20:https://tracker/anne4:infod4:name9:Matrix.mkveee";
+/// A structurally valid torrent, so the client can take its infohash.
+/// SHA-1 of its `info` dictionary is [`TORRENT_HASH`].
+const TORRENT: &[u8] = b"d8:announce11:https://t/a4:infod6:lengthi1024e4:name10:Matrix.mkv12:piece lengthi16384e6:pieces0:e13:creation datei1700000000ee";
+const TORRENT_HASH: &str = "659d65ffe26eab1ba01deb5a4d3daeb91d46e715";
 const NZB: &[u8] =
     br#"<?xml version="1.0"?><nzb xmlns="http://www.newzbin.com/DTD/2003/nzb"></nzb>"#;
 
@@ -346,10 +347,9 @@ async fn qbittorrent_uploads_the_torrent_with_its_category() {
         .add("Matrix.1999.1080p.BluRay", ReleaseFile::Bytes(TORRENT))
         .await
         .unwrap();
-    assert_eq!(
-        added.client_item_id, None,
-        "qBittorrent answers `Ok.` and names nothing"
-    );
+    // qBittorrent answers `Ok.` and names nothing, so the identity has
+    // to come from the file — the same infohash the client keys on.
+    assert_eq!(added.client_item_id.as_deref(), Some(TORRENT_HASH));
 
     let hits = server.received_requests().await.unwrap();
     let add = hits
@@ -483,6 +483,248 @@ async fn sabnzbd_refuses_a_magnet_before_touching_the_network() {
         server.received_requests().await.unwrap().is_empty(),
         "no request should have been made"
     );
+}
+
+#[tokio::test]
+async fn qbittorrent_magnet_identity_comes_from_the_link() {
+    let server = MockServer::start().await;
+    mount_qb_login(&server).await;
+    Mock::given(method("POST"))
+        .and(path("/api/v2/torrents/add"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("Ok."))
+        .mount(&server)
+        .await;
+
+    let client = QbittorrentClient::new(qb_config(&server, Some("admin"))).unwrap();
+    let added = client
+        .add(
+            "Matrix",
+            ReleaseFile::Magnet(&format!(
+                "magnet:?xt=urn:btih:{}",
+                TORRENT_HASH.to_uppercase()
+            )),
+        )
+        .await
+        .unwrap();
+    assert_eq!(added.client_item_id.as_deref(), Some(TORRENT_HASH));
+}
+
+#[tokio::test]
+async fn qbittorrent_status_reports_progress_and_maps_the_state() {
+    let server = MockServer::start().await;
+    mount_qb_login(&server).await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/torrents/info"))
+        .and(query_param("hashes", TORRENT_HASH))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!([{
+                "hash": TORRENT_HASH,
+                "name": "Matrix.1999.1080p",
+                "state": "downloading",
+                "progress": 0.62,
+                "size": 4_400_000_000i64,
+                "dlspeed": 8_200_000i64,
+                "eta": 540,
+                "content_path": "/downloads/Matrix.1999.1080p",
+                "category": "brarr"
+            }])),
+        )
+        .mount(&server)
+        .await;
+
+    let client = QbittorrentClient::new(qb_config(&server, Some("admin"))).unwrap();
+    let status = client.status(TORRENT_HASH).await.unwrap().unwrap();
+    assert_eq!(status.state, DownloadState::Downloading);
+    assert!((status.progress - 0.62).abs() < 0.001);
+    assert_eq!(status.size_bytes, Some(4_400_000_000));
+    assert_eq!(status.speed_bytes, Some(8_200_000));
+    assert_eq!(status.eta_seconds, Some(540));
+    assert_eq!(
+        status.save_path.as_deref(),
+        Some("/downloads/Matrix.1999.1080p")
+    );
+}
+
+#[tokio::test]
+async fn qbittorrent_seeding_counts_as_finished() {
+    let server = MockServer::start().await;
+    mount_qb_login(&server).await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/torrents/info"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!([{
+                "hash": TORRENT_HASH,
+                // Past the download, into seeding — which never ends on its
+                // own, so waiting for it would mean waiting forever.
+                "state": "stalledUP",
+                "progress": 1.0,
+                "size": 10i64,
+                "dlspeed": 0i64,
+                // qBittorrent's "no estimate" sentinel: 100 days.
+                "eta": 8_640_000i64,
+                "content_path": ""
+            }])),
+        )
+        .mount(&server)
+        .await;
+
+    let client = QbittorrentClient::new(qb_config(&server, Some("admin"))).unwrap();
+    let status = client.status(TORRENT_HASH).await.unwrap().unwrap();
+    assert_eq!(status.state, DownloadState::Completed);
+    assert_eq!(status.speed_bytes, None, "zero is absent, not zero");
+    assert_eq!(status.eta_seconds, None, "the sentinel is not an estimate");
+    assert_eq!(status.save_path, None);
+}
+
+#[tokio::test]
+async fn qbittorrent_status_is_none_for_a_torrent_it_does_not_have() {
+    let server = MockServer::start().await;
+    mount_qb_login(&server).await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/torrents/info"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+        .mount(&server)
+        .await;
+
+    let client = QbittorrentClient::new(qb_config(&server, Some("admin"))).unwrap();
+    assert!(client.status(TORRENT_HASH).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn sabnzbd_status_finds_a_running_job_in_the_queue() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api"))
+        .and(query_param("mode", "queue"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "queue": {
+                "status": "Downloading",
+                "slots": [
+                    { "nzo_id": "SABnzbd_nzo_other", "status": "Queued", "percentage": "0",
+                      "mb": "100.0", "timeleft": "0:00:00" },
+                    { "nzo_id": "SABnzbd_nzo_p86tgx", "status": "Downloading", "percentage": "94",
+                      "mb": "2867.2", "timeleft": "0:00:12" }
+                ]
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    let client = SabnzbdClient::new(sab_config(&server, SAB_KEY)).unwrap();
+    let status = client.status("SABnzbd_nzo_p86tgx").await.unwrap().unwrap();
+    assert_eq!(status.state, DownloadState::Downloading);
+    assert!((status.progress - 0.94).abs() < 0.001);
+    assert_eq!(status.size_bytes, Some(2867 * 1024 * 1024));
+    assert_eq!(status.eta_seconds, Some(12));
+    assert_eq!(
+        status.speed_bytes, None,
+        "SABnzbd reports speed per queue, never per job"
+    );
+    assert_eq!(
+        server.received_requests().await.unwrap().len(),
+        1,
+        "found in the queue — no need to read the history"
+    );
+}
+
+#[tokio::test]
+async fn sabnzbd_status_falls_through_to_the_history_once_finished() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api"))
+        .and(query_param("mode", "queue"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({ "queue": { "slots": [] } })),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api"))
+        .and(query_param("mode", "history"))
+        .and(query_param("nzo_ids", "SABnzbd_nzo_p86tgx"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "history": { "slots": [{
+                "nzo_id": "SABnzbd_nzo_p86tgx",
+                "name": "Matrix.1999.1080p",
+                "status": "Completed",
+                "storage": "/downloads/complete/Matrix.1999.1080p",
+                "fail_message": ""
+            }]}
+        })))
+        .mount(&server)
+        .await;
+
+    let client = SabnzbdClient::new(sab_config(&server, SAB_KEY)).unwrap();
+    let status = client.status("SABnzbd_nzo_p86tgx").await.unwrap().unwrap();
+    assert_eq!(status.state, DownloadState::Completed);
+    assert!((status.progress - 1.0).abs() < f32::EPSILON);
+    assert_eq!(
+        status.save_path.as_deref(),
+        Some("/downloads/complete/Matrix.1999.1080p")
+    );
+    assert_eq!(status.detail, None);
+}
+
+#[tokio::test]
+async fn sabnzbd_a_failed_job_carries_its_reason() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api"))
+        .and(query_param("mode", "queue"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({ "queue": { "slots": [] } })),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api"))
+        .and(query_param("mode", "history"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "history": { "slots": [{
+                "nzo_id": "SABnzbd_nzo_p86tgx",
+                "status": "Failed",
+                "storage": "",
+                "fail_message": "Unpacking failed, archive requires a password"
+            }]}
+        })))
+        .mount(&server)
+        .await;
+
+    let client = SabnzbdClient::new(sab_config(&server, SAB_KEY)).unwrap();
+    let status = client.status("SABnzbd_nzo_p86tgx").await.unwrap().unwrap();
+    assert_eq!(status.state, DownloadState::Failed);
+    assert_eq!(
+        status.detail.as_deref(),
+        Some("Unpacking failed, archive requires a password")
+    );
+}
+
+#[tokio::test]
+async fn sabnzbd_status_is_none_when_neither_queue_nor_history_has_it() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api"))
+        .and(query_param("mode", "queue"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({ "queue": { "slots": [] } })),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api"))
+        .and(query_param("mode", "history"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({ "history": { "slots": [] } })),
+        )
+        .mount(&server)
+        .await;
+
+    let client = SabnzbdClient::new(sab_config(&server, SAB_KEY)).unwrap();
+    assert!(client.status("SABnzbd_nzo_gone").await.unwrap().is_none());
 }
 
 #[tokio::test]

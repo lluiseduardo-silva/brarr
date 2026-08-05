@@ -16,6 +16,7 @@
     var SECTION_BY_PREFIX = [
         { prefix: '/providers',        section: 'providers' },
         { prefix: '/download-clients', section: 'download-clients' },
+        { prefix: '/queue',            section: 'queue' },
         { prefix: '/arr-instances',    section: 'arr-instances' },
         { prefix: '/library',          section: 'library' },
         { prefix: '/profiles',         section: 'profiles' },

@@ -1,0 +1,118 @@
+{% extends "base.html" %}
+{% block title %}Fila — brarr{% endblock %}
+{% block content %}
+
+<div class="flex items-center justify-between gap-4 mb-6">
+    <div>
+        <h1 class="font-semibold text-[28px] leading-9 text-fg-primary">Fila</h1>
+        <p class="text-base text-fg-secondary mt-1">
+            {% if entries.is_empty() %}
+            Nada em andamento. O que o scanner entregar aos clientes aparece aqui.
+            {% else %}
+            {{ summary }}{% if !total_speed.is_empty() %} — {{ total_speed }} no total{% endif %}
+            {% endif %}
+        </p>
+    </div>
+</div>
+
+{# Progresso, velocidade e ETA são lidos do cliente agora, na renderização
+   — não ficam no banco. Ver o doc do módulo `queue`. #}
+<section class="card-hairline bg-bg-surface border border-border-default rounded-xl overflow-hidden">
+    {% if entries.is_empty() %}
+    <div class="px-6 py-12 flex flex-col items-center text-center gap-3">
+        <div class="w-14 h-14 rounded-full bg-accent-soft flex items-center justify-center text-accent-soft-fg">
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/>
+            </svg>
+        </div>
+        <div>
+            <h3 class="text-base font-semibold text-fg-primary mb-1">Fila vazia</h3>
+            <p class="text-sm text-fg-secondary max-w-md">
+                Quando o scanner encontrar uma release que passe do threshold do perfil,
+                ela é entregue ao cliente de download e aparece aqui até terminar.
+            </p>
+        </div>
+    </div>
+    {% else %}
+    <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+            <thead class="bg-bg-muted">
+                <tr class="text-left">
+                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Item</th>
+                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Origem</th>
+                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Tamanho</th>
+                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Progresso</th>
+                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Velocidade</th>
+                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Status</th>
+                </tr>
+            </thead>
+            <tbody>
+            {% for e in entries %}
+                <tr class="border-t border-border-default">
+                    <td class="px-4 py-3">
+                        <a href="/library/{{ e.item_id }}" class="font-semibold text-fg-primary hover:text-accent-soft-fg">{{ e.title }}</a>
+                        <div class="text-[11px] font-mono text-fg-muted truncate max-w-[360px]">{{ e.release_name }}</div>
+                    </td>
+
+                    <td class="px-4 py-3">
+                        <div class="flex items-center gap-1.5">
+                            <span class="text-sm text-fg-secondary">{{ e.provider_name }}</span>
+                            {% if e.protocol == "torrent" %}
+                            <span class="badge bg-accent-soft text-accent-soft-fg">torrent</span>
+                            {% else %}
+                            <span class="badge bg-secondary-soft text-secondary-soft-fg">usenet</span>
+                            {% endif %}
+                        </div>
+                        <div class="text-[11px] text-fg-muted mt-0.5">{{ e.client_name }}</div>
+                    </td>
+
+                    <td class="px-4 py-3 font-mono text-xs text-fg-secondary">{{ e.size }}</td>
+
+                    <td class="px-4 py-3 min-w-[240px]">
+                        <div class="text-xs text-fg-secondary mb-1">{{ e.percent }}%</div>
+                        <div class="h-1.5 w-full rounded-full bg-bg-muted overflow-hidden">
+                            {# Largura é dado por linha, então vai inline: uma classe
+                               por porcentagem seriam 101 regras no app.css. #}
+                            <div class="h-1.5 rounded-full {% if e.tone == "ok" %}bg-success-solid{% else %}bg-accent-solid{% endif %}"
+                                 style="width: {{ e.percent }}%"></div>
+                        </div>
+                    </td>
+
+                    <td class="px-4 py-3">
+                        <div class="text-sm text-fg-primary">{% if e.speed.is_empty() %}—{% else %}{{ e.speed }}{% endif %}</div>
+                        {% if !e.eta.is_empty() %}
+                        <div class="text-[11px] text-fg-muted">{{ e.eta }}</div>
+                        {% endif %}
+                    </td>
+
+                    <td class="px-4 py-3">
+                        {% if e.tone == "ok" %}
+                        <span class="badge bg-success-soft text-success-soft-fg">{{ e.status }}</span>
+                        {% else if e.tone == "info" %}
+                        <span class="badge bg-info-soft text-info-soft-fg">{{ e.status }}</span>
+                        {% else if e.tone == "err" %}
+                        <span class="badge bg-danger-soft text-danger-soft-fg">{{ e.status }}</span>
+                        {% else if e.tone == "warn" %}
+                        <span class="badge bg-warning-soft text-warning-soft-fg">{{ e.status }}</span>
+                        {% else %}
+                        <span class="badge bg-bg-muted text-fg-secondary">{{ e.status }}</span>
+                        {% endif %}
+                        {% if let Some(detail) = e.detail %}
+                        <div class="text-[11px] text-fg-muted mt-1 max-w-[360px]">{{ detail }}</div>
+                        {% endif %}
+                    </td>
+                </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+</section>
+
+<p class="text-xs text-fg-muted mt-4 leading-relaxed">
+    Pausar e remover ainda não existem aqui — dependem de uma superfície de controle
+    nos clientes que o brarr ainda não expõe. O acompanhamento roda sozinho a cada
+    {{ crate::queue::SYNC_INTERVAL.as_secs() }}s; esta página lê os clientes na hora.
+</p>
+
+{% endblock %}

@@ -59,6 +59,7 @@ pub mod maintenance;
 pub mod poll;
 pub mod provider_cache;
 pub mod push;
+pub mod queue;
 pub mod scan;
 pub mod search;
 pub mod state;

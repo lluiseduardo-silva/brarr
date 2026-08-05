@@ -150,6 +150,81 @@ fn first_row_id(body: &str, prefix: &str) -> String {
 }
 
 #[tokio::test]
+async fn queue_renders_empty_state() {
+    let (addr, _state) = spawn().await;
+    let resp = reqwest::get(format!("http://{addr}/queue"))
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("Fila vazia"));
+}
+
+#[tokio::test]
+async fn queue_lists_an_in_flight_grab_without_reaching_a_client() {
+    use brarr_orchestrator::db::grabs::{self, NewGrab, Protocol};
+    use brarr_orchestrator::db::library::{self, MediaType, NewLibraryItem};
+    use brarr_orchestrator::db::providers::{self, NewProvider};
+
+    let (addr, state) = spawn().await;
+    let item = library::upsert(
+        state.pool(),
+        &NewLibraryItem {
+            media_type: Some(MediaType::Movie),
+            tmdb_id: 603,
+            title: "The Matrix".to_owned(),
+            ..NewLibraryItem::default()
+        },
+    )
+    .await
+    .unwrap();
+    let provider = providers::insert(
+        state.pool(),
+        NewProvider {
+            name: "capybara",
+            base_url: &url::Url::parse("https://capybarabr.com/").unwrap(),
+            api_token: "tok",
+            kind: "unit3d",
+            plugin_path: None,
+        },
+    )
+    .await
+    .unwrap();
+    grabs::reserve(
+        state.pool(),
+        &NewGrab {
+            item_id: item.id,
+            episode_id: None,
+            season_number: None,
+            decision_id: None,
+            provider_id: provider.id,
+            provider_name: "capybara",
+            release_id_remote: "abc",
+            release_name: "Matrix.1999.1080p.BluRay.PT-BR",
+            download_url: None,
+            protocol: Protocol::Torrent,
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    let body = reqwest::get(format!("http://{addr}/queue"))
+        .await
+        .expect("send")
+        .text()
+        .await
+        .unwrap();
+    assert!(body.contains("The Matrix"));
+    assert!(body.contains("Matrix.1999.1080p.BluRay.PT-BR"));
+    assert!(body.contains("capybara"));
+    // The grab never reached a client, so the row falls back to its own
+    // state instead of inventing progress.
+    assert!(body.contains("reserved"));
+    assert!(body.contains("sem cliente associado"));
+}
+
+#[tokio::test]
 async fn scan_now_reports_that_nothing_was_found() {
     use brarr_orchestrator::db::library::{self, MediaType, NewLibraryItem};
 

@@ -306,6 +306,55 @@ pub struct EditDownloadClientModalPartial {
     pub has_api_key: bool,
 }
 
+/// `/queue` view — what the download clients are doing right now.
+///
+/// Progress figures are read live when this renders, never stored: see
+/// [`crate::queue`].
+#[derive(Debug, Template)]
+#[template(path = "queue.html")]
+pub struct QueueTemplate {
+    /// One row per in-flight grab, oldest first.
+    pub entries: Vec<QueueEntryView>,
+    /// Headline: `"3 baixando · 1 concluído"`, or an empty string when
+    /// nothing is in flight.
+    pub summary: String,
+    /// Combined download rate across every row that reported one.
+    pub total_speed: String,
+}
+
+/// One row of the queue.
+#[derive(Debug)]
+pub struct QueueEntryView {
+    /// Library title the grab belongs to.
+    pub title: String,
+    /// Link target for the title.
+    pub item_id: String,
+    /// Release name, rendered mono.
+    pub release_name: String,
+    /// Provider the release came from.
+    pub provider_name: String,
+    /// `torrent` / `usenet`.
+    pub protocol: String,
+    /// Download client holding it, or `—`.
+    pub client_name: String,
+    /// Humanised size, or empty when the client didn't say.
+    pub size: String,
+    /// `0..=100`, for the bar's width.
+    pub percent: u8,
+    /// Rate, e.g. `8.2 MB/s`. Empty when unknown — SABnzbd never
+    /// reports one per job.
+    pub speed: String,
+    /// `9 min restantes`, or empty.
+    pub eta: String,
+    /// Label for the status pill.
+    pub status: String,
+    /// Pill tone: `ok` / `warn` / `err` / `neutral`.
+    pub tone: String,
+    /// Why, when there is a why — a client-side failure, or the reason
+    /// its client could not be asked.
+    pub detail: Option<String>,
+}
+
 /// `/webhooks` view — recent inbound *arr webhook events (audit log).
 #[derive(Debug, Template)]
 #[template(path = "webhooks.html")]

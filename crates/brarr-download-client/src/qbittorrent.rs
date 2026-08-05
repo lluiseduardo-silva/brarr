@@ -24,14 +24,15 @@ use std::time::Duration;
 
 use reqwest::Client as HttpClient;
 use reqwest::header::{HeaderMap, SET_COOKIE};
+use serde::Deserialize;
 use tokio::sync::Mutex;
-use tracing::debug;
+use tracing::{debug, warn};
 use url::Url;
 
 use crate::error::truncate_body;
 use crate::{
     AddedRelease, ClientFuture, ClientStatus, DownloadClient, DownloadClientConfig,
-    DownloadClientError, DownloadClientKind, ReleaseFile, endpoint,
+    DownloadClientError, DownloadClientKind, DownloadState, DownloadStatus, ReleaseFile, endpoint,
 };
 
 /// The kind every error in this module carries.
@@ -315,11 +316,99 @@ impl DownloadClient for QbittorrentClient {
                     body: truncate_body(body.trim()),
                 });
             }
-            // qBittorrent returns no handle for what it just accepted.
-            Ok(AddedRelease {
-                client_item_id: None,
-            })
+            // qBittorrent names nothing it accepts, so the identity comes
+            // from the file instead — the infohash it keys on internally.
+            let client_item_id = match file {
+                ReleaseFile::Bytes(bytes) => crate::infohash::from_torrent(bytes),
+                ReleaseFile::Magnet(uri) => crate::infohash::from_magnet(uri),
+            };
+            if client_item_id.is_none() {
+                warn!(
+                    target: "brarr_download_client",
+                    name = %self.config.name,
+                    release = name,
+                    "accepted, but the release could not be identified — it will download and cannot be followed"
+                );
+            }
+            Ok(AddedRelease { client_item_id })
         })
+    }
+
+    fn status<'a>(
+        &'a self,
+        client_item_id: &'a str,
+    ) -> ClientFuture<'a, Result<Option<DownloadStatus>, DownloadClientError>> {
+        Box::pin(async move {
+            // `hashes` takes a `|`-separated list; one is a list of one.
+            let mut url = endpoint(&self.config.base_url, "api/v2/torrents/info")?;
+            url.query_pairs_mut()
+                .append_pair("hashes", &client_item_id.to_ascii_lowercase());
+            let body = self.authorized_send(|http| http.get(url.clone())).await?;
+            let torrents: Vec<QbTorrent> = serde_json::from_str(&body)
+                .map_err(|source| DownloadClientError::Decode { kind: KIND, source })?;
+            Ok(torrents.into_iter().next().map(QbTorrent::into_status))
+        })
+    }
+}
+
+/// The slice of a `torrents/info` entry brarr reads. qBittorrent returns
+/// ~50 fields per torrent; the rest belong to its own UI.
+#[derive(Debug, Deserialize)]
+struct QbTorrent {
+    #[serde(default)]
+    state: String,
+    /// `0.0..=1.0` already.
+    #[serde(default)]
+    progress: f32,
+    #[serde(default)]
+    size: i64,
+    #[serde(default)]
+    dlspeed: i64,
+    /// Seconds. qBittorrent uses 8640000 (100 days) as "unknown".
+    #[serde(default)]
+    eta: i64,
+    /// Path to the torrent's own content, which is what the import will
+    /// want — `save_path` is the parent directory.
+    #[serde(default)]
+    content_path: String,
+}
+
+/// qBittorrent's sentinel for "no estimate", 100 days in seconds.
+const ETA_UNKNOWN: i64 = 8_640_000;
+
+impl QbTorrent {
+    fn into_status(self) -> DownloadStatus {
+        DownloadStatus {
+            state: map_state(&self.state),
+            progress: self.progress.clamp(0.0, 1.0),
+            size_bytes: u64::try_from(self.size).ok(),
+            speed_bytes: u64::try_from(self.dlspeed).ok().filter(|&s| s > 0),
+            eta_seconds: u64::try_from(self.eta)
+                .ok()
+                .filter(|&e| e < ETA_UNKNOWN as u64),
+            save_path: Some(self.content_path).filter(|p| !p.is_empty()),
+            detail: None,
+        }
+    }
+}
+
+/// Map qBittorrent's state string onto the shared lifecycle.
+///
+/// The `UP` suffix means the torrent is past its download and into
+/// seeding, which for brarr's purposes is *done* — seeding never ends on
+/// its own, so waiting for it would mean waiting forever.
+///
+/// qBittorrent 5 renamed the paused states to `stopped*`; both spellings
+/// are matched so the client works either side of that release.
+fn map_state(state: &str) -> DownloadState {
+    match state {
+        "error" | "missingFiles" => DownloadState::Failed,
+        "uploading" | "pausedUP" | "stoppedUP" | "queuedUP" | "stalledUP" | "checkingUP"
+        | "forcedUP" => DownloadState::Completed,
+        "pausedDL" | "stoppedDL" | "queuedDL" => DownloadState::Queued,
+        // downloading, metaDL, stalledDL, forcedDL, checkingDL,
+        // checkingResumeData, allocating, moving — all in flight.
+        _ => DownloadState::Downloading,
     }
 }
 
