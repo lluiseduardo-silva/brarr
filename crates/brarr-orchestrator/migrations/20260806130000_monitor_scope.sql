@@ -1,0 +1,42 @@
+-- How much of a title the operator wants chased.
+--
+-- Until now, adding a title posted nothing but a tmdb_id and a media
+-- type: no root folder, no quality profile, no say in what gets
+-- monitored. Everything defaulted invisibly, and the operator's own
+-- words for the problem were "não tenho como controlar qual vai ser
+-- usado".
+--
+-- The first two are already columns (profile_id, root_folder) and only
+-- needed a form. This one needs storage, and the reason is
+-- sync_seasons.
+--
+-- ## Why a column and not just the flags
+--
+-- sync_seasons rebuilds the tree on every metadata refresh and marks
+-- every row it has never seen before as monitored — the `is_none_or`
+-- at library.rs:556 and :575. So "only the first season", expressed
+-- purely as per-season flags, silently becomes "all seasons" the day
+-- TMDB publishes season 2. The choice would last exactly until the
+-- next refresh, which is the same invisible default this work exists
+-- to remove, one cycle later.
+--
+-- ## What this column does NOT mean
+--
+-- It decides the default for a season or episode row sync_seasons has
+-- never seen. It is not, and must never be read as, a summary of what
+-- is monitored now — the tree is the truth for that, and the operator
+-- can edit it by hand at any time. Anything that renders this as "what
+-- you are following" would be a second source of truth, which CLAUDE.md
+-- forbids.
+--
+-- ## Why no "latest season" option
+--
+-- It would need a never-seen row to be monitored (the new season) *and*
+-- the previous one to stop being monitored, and one stored value cannot
+-- express both. Offering it would produce a setting that quietly does
+-- the wrong thing on the second season.
+--
+-- Default 'all' is exactly the behaviour before this migration, so
+-- every existing row keeps doing what it does today.
+ALTER TABLE library_items ADD COLUMN monitor_scope TEXT NOT NULL DEFAULT 'all'
+    CHECK (monitor_scope IN ('all', 'future', 'first-season', 'none'));

@@ -249,6 +249,96 @@ pub async fn add_series(
     Ok(item)
 }
 
+/// What the operator chose in the add dialog.
+///
+/// Every field is optional and `None` means "leave whatever is there".
+/// That matters because adding a title that is *already* in the
+/// catalogue must not quietly wipe the placement the operator set by
+/// hand — [`library::set_placement`] writes both of its columns
+/// unconditionally.
+#[derive(Debug, Clone, Default)]
+pub struct AddOptions {
+    /// Quality profile to score against.
+    pub profile_id: Option<Uuid>,
+    /// Destination root folder, already validated against the
+    /// registered list by the caller.
+    pub root_folder: Option<String>,
+    /// How much of the title to chase.
+    pub monitor_scope: Option<library::MonitorScope>,
+}
+
+/// Add a title with the operator's choices applied, in the one order
+/// that works.
+///
+/// The sequence is not incidental:
+///
+/// 1. **Scope first**, because [`library::sync_seasons`] reads it to
+///    decide the default for every season and episode row it is about
+///    to create. Setting it afterwards would rebuild the tree under the
+///    old scope and then quietly disagree with the screen.
+/// 2. **Then the metadata walk**, which builds the tree.
+/// 3. **Then placement**, which is independent of both.
+///
+/// # Errors
+///
+/// Propagates TMDB and database failures.
+pub async fn add_with_options(
+    pool: &Pool,
+    tmdb: &TmdbClient,
+    media_type: MediaType,
+    tmdb_id: i64,
+    options: &AddOptions,
+) -> Result<LibraryItem, AppError> {
+    // The row has to exist before its scope can be set, and `upsert`
+    // preserves operator state on conflict, so this is safe for a title
+    // that is already catalogued.
+    let (item, season_numbers) = match media_type {
+        MediaType::Movie => {
+            let details = tmdb.movie(tmdb_id).await?;
+            (library::upsert(pool, &movie_to_item(&details)).await?, None)
+        }
+        MediaType::Tv => {
+            let details = tmdb.tv(tmdb_id).await?;
+            let numbers: Vec<i32> = details.seasons.iter().map(|s| s.season_number).collect();
+            (
+                library::upsert(pool, &tv_to_item(&details)).await?,
+                Some(numbers),
+            )
+        }
+    };
+
+    if let Some(scope) = options.monitor_scope {
+        library::set_monitor_scope(pool, item.id, scope).await?;
+    }
+
+    if let Some(numbers) = season_numbers {
+        let mut seasons = Vec::with_capacity(numbers.len());
+        for number in numbers {
+            let season = tmdb.season(tmdb_id, number).await?;
+            seasons.push(season_to_new(&season));
+        }
+        library::sync_seasons(pool, item.id, &seasons).await?;
+    }
+
+    // Only touch placement when the operator actually chose something.
+    // Calling `set_placement` with two `None`s would erase a profile and
+    // a root folder that a previous add — or the detail screen — set.
+    if options.profile_id.is_some() || options.root_folder.is_some() {
+        library::set_placement(
+            pool,
+            item.id,
+            options.profile_id.or(item.profile_id),
+            options
+                .root_folder
+                .as_deref()
+                .or(item.root_folder.as_deref()),
+        )
+        .await?;
+    }
+
+    library::get_by_id(pool, item.id).await
+}
+
 /// Refresh one library item's metadata from TMDB, rebuilding the season
 /// tree for series.
 ///

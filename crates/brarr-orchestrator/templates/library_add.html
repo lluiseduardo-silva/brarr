@@ -83,19 +83,30 @@
             {% endif %}
         </div>
 
-        {% if r.in_library %}
-        <span class="shrink-0 inline-flex items-center px-2.5 py-1 rounded-full text-[11px] font-medium bg-success-soft text-success-soft-fg border border-success-solid">na biblioteca</span>
-        {% else %}
-        <form method="post" action="/library/add" class="shrink-0">
-            <input type="hidden" name="tmdb_id" value="{{ r.tmdb_id }}">
-            <input type="hidden" name="media_type" value="{{ r.media_type }}">
-            <button type="submit"
-                    class="btn btn-md btn-toggle-on">
+        {# Both states open the same dialog. "Na biblioteca" used to be a
+           dead end, which meant an item added before this screen had a
+           way to configure anything could only be fixed on its detail
+           page — if the operator knew to go looking. #}
+        <div class="shrink-0 flex items-center gap-2">
+            {% if r.in_library %}
+            <span class="inline-flex items-center px-2.5 py-1 rounded-full text-[11px] font-medium bg-success-soft text-success-soft-fg border border-success-solid">na biblioteca</span>
+            {% endif %}
+            <button type="button"
+                    {# `year` is a display string, "—" when TMDB has none;
+                       sending that as a query parameter would fail to
+                       parse on the other side. #}
+                    hx-get="/library/add/options?tmdb_id={{ r.tmdb_id }}&amp;media_type={{ r.media_type }}&amp;title={{ r.title|urlencode }}{% if r.year != "—" %}&amp;year={{ r.year }}{% endif %}"
+                    hx-target="#modal-target"
+                    hx-swap="innerHTML"
+                    class="btn btn-md {% if r.in_library %}btn-ghost{% else %}btn-toggle-on{% endif %}">
+                {% if r.in_library %}
+                configurar
+                {% else %}
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
                 Adicionar
+                {% endif %}
             </button>
-        </form>
-        {% endif %}
+        </div>
     </div>
     {% endfor %}
 </div>

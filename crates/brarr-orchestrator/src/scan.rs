@@ -549,6 +549,7 @@ mod tests {
             monitored: true,
             profile_id: None,
             root_folder: None,
+            monitor_scope: crate::db::library::MonitorScope::All,
             added_at: OffsetDateTime::now_utc(),
             metadata_refreshed_at: OffsetDateTime::now_utc(),
         }

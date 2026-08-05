@@ -1,0 +1,136 @@
+{# Add-with-options dialog. Same contract as the other modals on this
+   app: the handler returns this partial into #modal-target and modal.js
+   opens it.
+
+   The whole reason it exists is that "Adicionar" used to post nothing
+   but a tmdb_id, so the destination, the profile and what gets chased
+   were all invisible defaults. Every control here shows what WILL be
+   used before the operator commits. #}
+<dialog class="bg-transparent p-0 max-w-full max-h-full backdrop:bg-[rgba(10,6,18,0.7)]"
+        aria-label="Adicionar à biblioteca">
+    <div class="w-[520px] max-w-full card-hairline bg-bg-surface border border-border-default rounded-2xl"
+         style="box-shadow: 0 24px 60px var(--color-glow);">
+
+    <header class="flex items-center justify-between gap-3 px-6 py-5">
+        <div class="min-w-0">
+            <h2 class="text-[22px] font-semibold leading-tight text-fg-primary truncate">{{ title }}</h2>
+            <p class="text-xs text-fg-secondary">
+                {% if is_series %}Série{% else %}Filme{% endif %}{% if let Some(y) = year %} · {{ y }}{% endif %}
+            </p>
+        </div>
+        {# Not nested inside the form below — a nested <form> is dropped
+           by the HTML parser and its button becomes a submit of the
+           outer one. #}
+        <button type="button"
+                onclick="this.closest('dialog').close()"
+                class="btn btn-md btn-icon btn-secondary"
+                aria-label="Fechar">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
+    </header>
+
+    <div class="h-px bg-border-default"></div>
+
+    {% if already_in_library %}
+    <div class="px-6 pt-2">
+        <div class="px-3 py-2 rounded-md bg-warning-soft text-warning-soft-fg text-xs leading-relaxed">
+            Este título já está na biblioteca. O que você escolher aqui substitui a configuração atual.
+        </div>
+    </div>
+    {% endif %}
+
+    <form hx-post="/library/add"
+          hx-target="#modal-target"
+          hx-swap="innerHTML"
+          class="px-6 py-5 flex flex-col gap-4">
+
+        <input type="hidden" name="tmdb_id" value="{{ tmdb_id }}">
+        <input type="hidden" name="media_type" value="{% if is_series %}tv{% else %}movie{% endif %}">
+
+        {% if let Some(err) = error %}
+        <div class="px-3 py-2 rounded-md bg-danger-soft text-danger-soft-fg text-xs">{{ err }}</div>
+        {% endif %}
+
+        <label class="block">
+            <span class="block mb-1.5 text-xs font-medium uppercase tracking-[0.06em] text-fg-muted">Pasta raiz</span>
+            <select name="root_folder"
+                    class="w-full px-3 h-10 rounded-md bg-bg-canvas border border-border-strong text-sm text-fg-primary focus:outline-none focus:border-accent-solid">
+                {% for f in root_folders %}
+                <option value="{{ f.path }}"{% if f.selected %} selected{% endif %}>{{ f.path }}{% if !f.label.is_empty() %} — {{ f.label }}{% endif %}</option>
+                {% endfor %}
+            </select>
+            {% if root_folders.is_empty() %}
+            <span class="block mt-1.5 text-xs text-warning-soft-fg">
+                Nenhuma pasta raiz serve este tipo. O título entra no catálogo, mas o import vai
+                esperar até você cadastrar uma em Configuração → Clientes.
+            </span>
+            {% else %}
+            <span class="block mt-1.5 text-xs text-fg-muted">É para onde o import vai levar o arquivo.</span>
+            {% endif %}
+        </label>
+
+        <label class="block">
+            <span class="block mb-1.5 text-xs font-medium uppercase tracking-[0.06em] text-fg-muted">Perfil de qualidade</span>
+            <select name="profile_id"
+                    class="w-full px-3 h-10 rounded-md bg-bg-canvas border border-border-strong text-sm text-fg-primary focus:outline-none focus:border-accent-solid">
+                {% for p in profiles %}
+                <option value="{{ p.id }}"{% if p.selected %} selected{% endif %}>{{ p.name }} — corte em {{ p.threshold }}</option>
+                {% endfor %}
+                <option value=""{% if no_profile_selected %} selected{% endif %}>Sem perfil — corte padrão em {{ default_threshold }}</option>
+            </select>
+            <span class="block mt-1.5 text-xs text-fg-muted">
+                Uma release só é aceita automaticamente se pontuar acima do corte.
+            </span>
+        </label>
+
+        {% if is_series %}
+        <label class="block">
+            <span class="block mb-1.5 text-xs font-medium uppercase tracking-[0.06em] text-fg-muted">Monitorar</span>
+            <select name="monitor_scope"
+                    class="w-full px-3 h-10 rounded-md bg-bg-canvas border border-border-strong text-sm text-fg-primary focus:outline-none focus:border-accent-solid">
+                <option value="all"{% if scope == "all" %} selected{% endif %}>Todos os episódios</option>
+                <option value="first-season"{% if scope == "first-season" %} selected{% endif %}>Só a primeira temporada</option>
+                <option value="future"{% if scope == "future" %} selected{% endif %}>Só episódios que ainda não foram ao ar</option>
+                <option value="none"{% if scope == "none" %} selected{% endif %}>Nada por enquanto</option>
+            </select>
+            <span class="block mt-1.5 text-xs text-fg-muted">
+                Vale para as temporadas e episódios que o brarr ainda não conhece — inclusive os que
+                o TMDB publicar depois. O que você marcar à mão na tela da série continua valendo.
+            </span>
+        </label>
+        {% else %}
+        <input type="hidden" name="monitor_scope" value="{{ scope }}">
+        <label class="flex items-start gap-2.5 cursor-pointer">
+            <input type="checkbox" name="monitored_movie" value="1"{% if scope != "none" %} checked{% endif %}
+                   class="mt-0.5 w-4 h-4 rounded border-border-strong">
+            <span class="text-sm text-fg-secondary">
+                Monitorar
+                <span class="block text-xs text-fg-muted mt-0.5">O scanner procura este filme até encontrar.</span>
+            </span>
+        </label>
+        {% endif %}
+
+        <label class="flex items-start gap-2.5 cursor-pointer">
+            <input type="checkbox" name="search_now" value="1" checked
+                   class="mt-0.5 w-4 h-4 rounded border-border-strong">
+            <span class="text-sm text-fg-secondary">
+                Buscar agora
+                <span class="block text-xs text-fg-muted mt-0.5">
+                    Dispara uma varredura assim que o título entrar. Sem isso, ele espera o próximo ciclo.
+                </span>
+            </span>
+        </label>
+
+        <div class="flex items-center justify-end gap-2 pt-1">
+            <button type="button"
+                    onclick="this.closest('dialog').close()"
+                    class="btn btn-md btn-secondary">
+                Cancelar
+            </button>
+            <button type="submit" class="btn btn-md btn-brand">
+                Adicionar
+            </button>
+        </div>
+    </form>
+    </div>
+</dialog>
