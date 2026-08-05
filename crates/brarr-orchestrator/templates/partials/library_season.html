@@ -1,0 +1,28 @@
+{# Episode rows for one season, swapped into the <details> body on the
+   first expand. Kept as its own partial precisely so a series with a
+   hundred-plus episodes does not render them all up front. #}
+{% if episodes.is_empty() %}
+<div class="px-4 py-4 text-xs text-fg-muted italic">Nenhum episódio nesta temporada.</div>
+{% else %}
+{% for e in episodes %}
+<div class="flex items-center gap-3 px-4 py-2.5 border-t border-border-default" id="ep-{{ e.id }}">
+    <span class="shrink-0 w-20 text-[11px] font-mono text-fg-secondary">{{ e.code }}</span>
+    <span class="flex-1 min-w-0 text-sm text-fg-primary truncate">{{ e.title }}</span>
+    <span class="shrink-0 w-28 text-[11px] font-mono text-fg-muted">
+        {%- if e.air_date.is_empty() %}não exibido{% else %}{{ e.air_date }}{% endif -%}
+    </span>
+    {% if e.monitored %}
+    <span class="shrink-0 inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium bg-success-soft text-success-soft-fg border border-success-solid">monitorado</span>
+    {% else %}
+    <span class="shrink-0 inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium bg-bg-muted text-fg-muted">pausado</span>
+    {% endif %}
+    <button type="button"
+            hx-post="/library/{{ item_id }}/episode/{{ e.id }}/monitor"
+            hx-target="#ep-{{ e.id }}"
+            hx-swap="outerHTML"
+            class="shrink-0 px-2.5 h-7 rounded-md text-xs font-medium {% if e.monitored %}bg-bg-canvas border border-border-strong text-fg-secondary{% else %}bg-accent-soft text-accent-soft-fg{% endif %}">
+        {% if e.monitored %}pausar{% else %}monitorar{% endif %}
+    </button>
+</div>
+{% endfor %}
+{% endif %}

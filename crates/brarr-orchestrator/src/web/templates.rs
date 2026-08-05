@@ -823,6 +823,123 @@ pub struct TmdbHitView {
     pub in_library: bool,
 }
 
+/// Detail page at `/library/{id}`.
+#[derive(Debug, Template)]
+#[template(path = "library_detail.html")]
+pub struct LibraryDetailTemplate {
+    /// The catalogue entry.
+    pub item: LibraryDetailView,
+    /// Seasons, ascending. Empty for movies.
+    pub seasons: Vec<SeasonView>,
+    /// Acquisition history, newest first.
+    pub grabs: Vec<GrabView>,
+    /// Every quality profile, for the picker.
+    pub profiles: Vec<(String, String)>,
+}
+
+/// Hero data for the detail page.
+#[derive(Debug)]
+pub struct LibraryDetailView {
+    /// Stringified UUID.
+    pub id: String,
+    /// Localised title.
+    pub title: String,
+    /// Original-language title, shown only when it differs.
+    pub original_title: Option<String>,
+    /// Year, or `—`.
+    pub year: String,
+    /// `Filme` or `Série`.
+    pub kind_label: String,
+    /// `true` for series.
+    pub is_series: bool,
+    /// Poster CDN URL at a larger size than the index uses.
+    pub poster_url: Option<String>,
+    /// Synopsis.
+    pub overview: Option<String>,
+    /// TMDB id.
+    pub tmdb_id: i64,
+    /// Canonical `ttNNNNNNN`.
+    pub imdb_id: Option<String>,
+    /// TVDB id — series only.
+    pub tvdb_id: Option<i64>,
+    /// Whether the scanner chases it.
+    pub monitored: bool,
+    /// Attached profile id, for preselecting the picker.
+    pub profile_id: String,
+    /// TMDB status string.
+    pub status: Option<String>,
+    /// `136 min`, or empty.
+    pub runtime: String,
+    /// `dd/mm/aaaa` of the next unaired episode, or empty.
+    pub next_air_date: String,
+    /// `dd/mm/aaaa` of the digital release, or empty.
+    pub digital_release: String,
+    /// `dd/mm/aaaa` of the physical release, or empty.
+    pub physical_release: String,
+    /// `true` while the digital release date is still in the future —
+    /// searching before it usually only turns up cams.
+    pub in_theatrical_window: bool,
+}
+
+/// One collapsed season header.
+#[derive(Debug)]
+pub struct SeasonView {
+    /// Stringified UUID.
+    pub id: String,
+    /// Season number.
+    pub number: i32,
+    /// `Temporada 4`, or `Especiais` for season 0.
+    pub label: String,
+    /// Episodes TMDB reports.
+    pub episode_count: i32,
+    /// Whether the scanner chases the season.
+    pub monitored: bool,
+}
+
+/// Episode rows returned by the on-demand season expand.
+#[derive(Debug, Template)]
+#[template(path = "partials/library_season.html")]
+pub struct LibrarySeasonPartial {
+    /// Parent item id, for the toggle URLs.
+    pub item_id: String,
+    /// Episodes of one season, ascending.
+    pub episodes: Vec<EpisodeView>,
+}
+
+/// One episode row.
+#[derive(Debug)]
+pub struct EpisodeView {
+    /// Stringified UUID.
+    pub id: String,
+    /// `S04E07`.
+    pub code: String,
+    /// Episode title, or `—`.
+    pub title: String,
+    /// `dd/mm/aaaa`, or empty when unaired.
+    pub air_date: String,
+    /// Whether the scanner chases it.
+    pub monitored: bool,
+}
+
+/// One acquisition row on the detail page.
+#[derive(Debug)]
+pub struct GrabView {
+    /// Release title snapshot.
+    pub release_name: String,
+    /// Provider name snapshot.
+    pub provider_name: String,
+    /// `torrent` or `usenet`.
+    pub protocol: String,
+    /// Lifecycle label.
+    pub status: String,
+    /// UI tone for the status pill: `ok` / `warn` / `err` / `neutral`.
+    pub tone: String,
+    /// `dd/mm/aaaa`.
+    pub grabbed_at: String,
+    /// Failure reason, when there is one.
+    pub error: Option<String>,
+}
+
 /// HTML-escapes a fragment for safe interpolation. Askama auto-escapes
 /// `{{ x }}` by default; this helper is for when we build a string in
 /// Rust before passing it to a template.

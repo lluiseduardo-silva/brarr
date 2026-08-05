@@ -106,7 +106,7 @@
             <div class="shrink-0 rounded bg-bg-muted" style="width:30px;height:44px;"></div>
             {% endif %}
             <div class="min-w-0">
-                <div class="text-sm font-medium text-fg-primary truncate">{{ it.title }} <span class="text-fg-muted font-normal">{{ it.year }}</span></div>
+                <a href="/library/{{ it.id }}" class="block text-sm font-medium text-fg-primary truncate hover:text-accent-solid">{{ it.title }} <span class="text-fg-muted font-normal">{{ it.year }}</span></a>
                 <div class="text-[11px] font-mono text-fg-muted">tmdb {{ it.tmdb_id }}{% if let Some(imdb) = it.imdb_id %} · {{ imdb }}{% endif %}</div>
             </div>
         </div>
@@ -141,7 +141,7 @@
 
     <div class="flex-1 min-w-0 flex flex-col" style="min-height:150px;">
         <div class="flex items-baseline gap-2 min-w-0">
-            <h2 class="text-sm font-medium text-fg-primary truncate">{{ it.title }}</h2>
+            <a href="/library/{{ it.id }}" class="text-sm font-medium text-fg-primary truncate hover:text-accent-solid">{{ it.title }}</a>
             <span class="shrink-0 text-xs text-fg-muted">{{ it.year }}</span>
         </div>
 

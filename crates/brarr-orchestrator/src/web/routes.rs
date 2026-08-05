@@ -40,7 +40,7 @@ use crate::auth::{AuthConfig, SESSION_COOKIE};
 use crate::auth::{BypassConfig, TrustedPeers};
 use crate::db::quality_profiles;
 use crate::db::settings;
-use crate::db::{arr_instances, decisions, library, providers, push_history, searches};
+use crate::db::{arr_instances, decisions, grabs, library, providers, push_history, searches};
 #[allow(
     unused_imports,
     reason = "re-exported for downstream tests that still call it"
@@ -50,13 +50,14 @@ use crate::web::render::html;
 use crate::web::templates::{
     ArrInstanceView, ArrInstancesListPartial, ArrInstancesTemplate, DashboardTemplate,
     DecisionView, EditArrInstanceModalPartial, EditProviderModalPartial, EndpointHealthView,
-    EndpointRequestView, ErrorTemplate, HealthTemplate, LibraryAddTemplate, LibraryItemView,
+    EndpointRequestView, EpisodeView, ErrorTemplate, GrabView, HealthTemplate, LibraryAddTemplate,
+    LibraryDetailTemplate, LibraryDetailView, LibraryItemView, LibrarySeasonPartial,
     LibraryTemplate, LoginTemplate, NewProfileModalPartial, NewSearchModalPartial,
     ProfileEditorTemplate, ProfileView, ProfilesTemplate, ProviderHealthView, ProviderView,
     ProvidersListPartial, ProvidersTemplate, PushGroupView, PushHistoryView, PushesFilterView,
     PushesTemplate, RecentSearchView, ReleasesTemplate, SearchDetailTemplate, SearchesFilterView,
-    SearchesIndexTemplate, SettingsFlash, SettingsTemplate, SettingsValues, TmdbHitView,
-    WebhookEventView, WebhooksTemplate,
+    SearchesIndexTemplate, SeasonView, SettingsFlash, SettingsTemplate, SettingsValues,
+    TmdbHitView, WebhookEventView, WebhooksTemplate,
 };
 use crate::{AppError, AppState};
 use brarr_core::TmdbId;
@@ -114,7 +115,18 @@ pub fn router(state: AppState, static_dir: &std::path::Path) -> Router {
         .route("/library", get(library_index))
         .route("/library/add", get(library_add).post(library_add_submit))
         .route("/library/{id}/monitor", post(library_toggle_monitor))
-        .route("/library/{id}", delete(library_delete))
+        .route("/library/{id}/profile", post(library_set_profile))
+        .route("/library/{id}/refresh", post(library_refresh))
+        .route("/library/{id}/season/{season_id}", get(library_season))
+        .route(
+            "/library/{id}/season/{season_id}/monitor",
+            post(library_season_monitor),
+        )
+        .route(
+            "/library/{id}/episode/{episode_id}/monitor",
+            post(library_episode_monitor),
+        )
+        .route("/library/{id}", get(library_detail).delete(library_delete))
         .route("/webhooks", get(webhooks_index))
         .route("/health", get(health_index))
         .route("/settings", get(settings_index))
@@ -1165,6 +1177,239 @@ async fn library_delete(
         .map_err(|e| AppError::InvalidInput(format!("invalid library id: {e}")))?;
     library::delete(state.pool(), uuid).await?;
     Ok(hx_refresh())
+}
+
+/// Form body of `POST /library/{id}/profile`.
+#[derive(Debug, Deserialize)]
+struct LibraryProfileForm {
+    /// Stringified profile UUID, or empty to detach.
+    #[serde(default)]
+    profile_id: String,
+}
+
+/// `GET /library/{id}` — one catalogue entry in full.
+async fn library_detail(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, AppError> {
+    let uuid = Uuid::parse_str(&id)
+        .map_err(|e| AppError::InvalidInput(format!("invalid library id: {e}")))?;
+    let item = library::get_by_id(state.pool(), uuid).await?;
+    let is_series = item.media_type == library::MediaType::Tv;
+
+    // Seasons carry only their header here; episodes load on expand.
+    let seasons = if is_series {
+        library::seasons(state.pool(), uuid)
+            .await?
+            .into_iter()
+            .map(|s| SeasonView {
+                id: s.id.to_string(),
+                number: s.season_number,
+                label: if s.season_number == 0 {
+                    "Especiais".to_owned()
+                } else {
+                    format!("Temporada {}", s.season_number)
+                },
+                episode_count: s.episode_count,
+                monitored: s.monitored,
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    let grabs = grabs::for_item(state.pool(), uuid)
+        .await?
+        .into_iter()
+        .map(|g| GrabView {
+            release_name: g.release_name,
+            provider_name: g.provider_name,
+            protocol: g.protocol.label().to_owned(),
+            status: g.status.label().to_owned(),
+            tone: match g.status {
+                grabs::GrabStatus::Imported | grabs::GrabStatus::Completed => "ok".to_owned(),
+                grabs::GrabStatus::Failed | grabs::GrabStatus::Rejected => "err".to_owned(),
+                grabs::GrabStatus::Reserved => "warn".to_owned(),
+                _ => "neutral".to_owned(),
+            },
+            grabbed_at: short_date(g.grabbed_at),
+            error: g.error,
+        })
+        .collect();
+
+    let profiles = quality_profiles::list_all(state.pool())
+        .await?
+        .into_iter()
+        .map(|p| (p.id.to_string(), p.name))
+        .collect();
+
+    // Only meaningful for movies, and only while the date is ahead of us.
+    let now = OffsetDateTime::now_utc();
+    let in_theatrical_window = item.digital_release_at.is_some_and(|d| d > now);
+
+    let original_title = item
+        .original_title
+        .clone()
+        .filter(|o| o.trim() != item.title.trim());
+
+    html(&LibraryDetailTemplate {
+        item: LibraryDetailView {
+            id: item.id.to_string(),
+            title: item.title,
+            original_title,
+            year: item.year.map_or_else(|| "—".to_owned(), |y| y.to_string()),
+            kind_label: if is_series { "Série" } else { "Filme" }.to_owned(),
+            is_series,
+            poster_url: brarr_tmdb::image_url(item.poster_path.as_deref(), "w342"),
+            overview: item.overview,
+            tmdb_id: item.tmdb_id,
+            imdb_id: item.imdb_id,
+            tvdb_id: item.tvdb_id,
+            monitored: item.monitored,
+            profile_id: item.profile_id.map(|p| p.to_string()).unwrap_or_default(),
+            status: item.tmdb_status,
+            runtime: item
+                .runtime_minutes
+                .map_or_else(String::new, |r| format!("{r} min")),
+            next_air_date: item.next_air_date.map_or_else(String::new, short_date),
+            digital_release: item.digital_release_at.map_or_else(String::new, short_date),
+            physical_release: item
+                .physical_release_at
+                .map_or_else(String::new, short_date),
+            in_theatrical_window,
+        },
+        seasons,
+        grabs,
+        profiles,
+    })
+}
+
+/// Map episode rows into the shared partial. Used both by the season
+/// expand and by the single-row swap after an episode toggle.
+fn episode_views(episodes: &[library::Episode]) -> Vec<EpisodeView> {
+    episodes
+        .iter()
+        .map(|e| EpisodeView {
+            id: e.id.to_string(),
+            code: format!("S{:02}E{:02}", e.season_number, e.episode_number),
+            title: e.title.clone().unwrap_or_else(|| "—".to_owned()),
+            air_date: e.air_date.map_or_else(String::new, short_date),
+            monitored: e.monitored,
+        })
+        .collect()
+}
+
+/// `GET /library/{id}/season/{season_id}` — episode rows, fetched when
+/// the operator actually opens the season.
+async fn library_season(
+    State(state): State<AppState>,
+    Path((id, season_id)): Path<(String, String)>,
+) -> Result<Response, AppError> {
+    let item_uuid = Uuid::parse_str(&id)
+        .map_err(|e| AppError::InvalidInput(format!("invalid library id: {e}")))?;
+    let season_uuid = Uuid::parse_str(&season_id)
+        .map_err(|e| AppError::InvalidInput(format!("invalid season id: {e}")))?;
+
+    let seasons = library::seasons(state.pool(), item_uuid).await?;
+    let season = seasons
+        .iter()
+        .find(|s| s.id == season_uuid)
+        .ok_or_else(|| AppError::NotFound(format!("library_season {season_id}")))?;
+
+    let all = library::episodes(state.pool(), item_uuid).await?;
+    let episodes: Vec<library::Episode> = all
+        .into_iter()
+        .filter(|e| e.season_number == season.season_number)
+        .collect();
+
+    html(&LibrarySeasonPartial {
+        item_id: id,
+        episodes: episode_views(&episodes),
+    })
+}
+
+/// `POST /library/{id}/season/{season_id}/monitor` — flip a season,
+/// cascading to its episodes.
+async fn library_season_monitor(
+    State(state): State<AppState>,
+    Path((id, season_id)): Path<(String, String)>,
+) -> Result<Response, AppError> {
+    let item_uuid = Uuid::parse_str(&id)
+        .map_err(|e| AppError::InvalidInput(format!("invalid library id: {e}")))?;
+    let season_uuid = Uuid::parse_str(&season_id)
+        .map_err(|e| AppError::InvalidInput(format!("invalid season id: {e}")))?;
+    let current = library::seasons(state.pool(), item_uuid)
+        .await?
+        .into_iter()
+        .find(|s| s.id == season_uuid)
+        .ok_or_else(|| AppError::NotFound(format!("library_season {season_id}")))?;
+    library::set_season_monitored(state.pool(), season_uuid, !current.monitored).await?;
+    // The cascade rewrote every episode of the season, so the open
+    // accordion body is stale — a refresh is the honest answer.
+    Ok(hx_refresh())
+}
+
+/// `POST /library/{id}/episode/{episode_id}/monitor` — flip one
+/// episode and swap its row back.
+async fn library_episode_monitor(
+    State(state): State<AppState>,
+    Path((id, episode_id)): Path<(String, String)>,
+) -> Result<Response, AppError> {
+    let item_uuid = Uuid::parse_str(&id)
+        .map_err(|e| AppError::InvalidInput(format!("invalid library id: {e}")))?;
+    let episode_uuid = Uuid::parse_str(&episode_id)
+        .map_err(|e| AppError::InvalidInput(format!("invalid episode id: {e}")))?;
+
+    let episodes = library::episodes(state.pool(), item_uuid).await?;
+    let current = episodes
+        .iter()
+        .find(|e| e.id == episode_uuid)
+        .ok_or_else(|| AppError::NotFound(format!("library_episode {episode_id}")))?;
+    library::set_episode_monitored(state.pool(), episode_uuid, !current.monitored).await?;
+
+    // Re-read so the swapped row reflects what was actually persisted.
+    let updated = library::episodes(state.pool(), item_uuid)
+        .await?
+        .into_iter()
+        .find(|e| e.id == episode_uuid)
+        .ok_or_else(|| AppError::NotFound(format!("library_episode {episode_id}")))?;
+    html(&LibrarySeasonPartial {
+        item_id: id,
+        episodes: episode_views(&[updated]),
+    })
+}
+
+/// `POST /library/{id}/profile` — attach or detach a quality profile.
+async fn library_set_profile(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Form(form): Form<LibraryProfileForm>,
+) -> Result<Response, AppError> {
+    let uuid = Uuid::parse_str(&id)
+        .map_err(|e| AppError::InvalidInput(format!("invalid library id: {e}")))?;
+    let item = library::get_by_id(state.pool(), uuid).await?;
+    let profile = if form.profile_id.trim().is_empty() {
+        None
+    } else {
+        Some(
+            Uuid::parse_str(form.profile_id.trim())
+                .map_err(|e| AppError::InvalidInput(format!("invalid profile id: {e}")))?,
+        )
+    };
+    library::set_placement(state.pool(), uuid, profile, item.root_folder.as_deref()).await?;
+    Ok(Redirect::to(&format!("/library/{id}")).into_response())
+}
+
+/// `POST /library/{id}/refresh` — re-pull metadata from TMDB.
+async fn library_refresh(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, AppError> {
+    let uuid = Uuid::parse_str(&id)
+        .map_err(|e| AppError::InvalidInput(format!("invalid library id: {e}")))?;
+    let tmdb = crate::tmdb_sync::client(state.pool()).await?;
+    crate::tmdb_sync::refresh(state.pool(), &tmdb, uuid).await?;
+    Ok(Redirect::to(&format!("/library/{id}")).into_response())
 }
 
 /// Empty 200 carrying `HX-Refresh`, which makes HTMX reload the page.

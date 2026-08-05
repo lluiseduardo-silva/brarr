@@ -1,0 +1,184 @@
+{% extends "base.html" %}
+{% block title %}{{ item.title }} — brarr{% endblock %}
+{% block content %}
+
+<a href="/library" class="inline-flex items-center gap-1.5 text-sm text-fg-muted hover:text-fg-primary mb-3">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>
+    Biblioteca
+</a>
+
+{# ---- hero ---- #}
+<div class="card-hairline bg-bg-surface border border-border-default rounded-xl p-5 mb-4">
+    <div class="flex items-start gap-5">
+        {% if let Some(url) = item.poster_url %}
+        <img src="{{ url }}" alt="" class="shrink-0 rounded-lg object-cover" style="width:140px;height:210px;">
+        {% else %}
+        <div class="shrink-0 rounded-lg bg-bg-muted flex items-center justify-center" style="width:140px;height:210px;">
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" class="text-fg-muted">
+                {% if item.is_series %}<rect x="2" y="7" width="20" height="13" rx="2"/><path d="m8 3 4 4 4-4" stroke-linecap="round"/>
+                {% else %}<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 5v14M17 5v14"/>{% endif %}
+            </svg>
+        </div>
+        {% endif %}
+
+        <div class="flex-1 min-w-0">
+            <div class="flex items-baseline gap-2.5 flex-wrap">
+                <h1 class="font-semibold text-[28px] leading-9 text-fg-primary">{{ item.title }}</h1>
+                <span class="text-base text-fg-muted">{{ item.year }}</span>
+            </div>
+            {% if let Some(orig) = item.original_title %}
+            <p class="text-sm italic text-fg-muted mt-0.5">{{ orig }}</p>
+            {% endif %}
+
+            <div class="flex items-center gap-1.5 flex-wrap mt-2.5">
+                <span class="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium {% if item.is_series %}bg-secondary-soft text-secondary-soft-fg{% else %}bg-accent-soft text-accent-soft-fg{% endif %}">{{ item.kind_label }}</span>
+                {% if let Some(st) = item.status %}
+                <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium bg-info-soft text-info-soft-fg border border-info-solid">{{ st }}</span>
+                {% endif %}
+                {% if !item.runtime.is_empty() %}
+                <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium bg-bg-muted text-fg-muted">{{ item.runtime }}</span>
+                {% endif %}
+                {% if !item.next_air_date.is_empty() %}
+                <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium bg-accent-soft text-accent-soft-fg">próximo ep. {{ item.next_air_date }}</span>
+                {% endif %}
+                {% if !item.digital_release.is_empty() %}
+                <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium bg-bg-muted text-fg-muted">digital {{ item.digital_release }}</span>
+                {% endif %}
+                {% if !item.physical_release.is_empty() %}
+                <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium bg-bg-muted text-fg-muted">físico {{ item.physical_release }}</span>
+                {% endif %}
+            </div>
+
+            {% if let Some(ov) = item.overview %}
+            <p class="text-sm text-fg-secondary mt-3 leading-relaxed">{{ ov }}</p>
+            {% else %}
+            <p class="text-sm italic text-fg-muted mt-3">Sem sinopse no TMDB — nem em pt-BR, nem em en-US.</p>
+            {% endif %}
+
+            {# External ids. A movie never carries a tvdb one. #}
+            <div class="flex items-center gap-1.5 flex-wrap mt-3">
+                <span class="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-mono bg-bg-muted text-fg-secondary">tmdb {{ item.tmdb_id }}</span>
+                {% if let Some(imdb) = item.imdb_id %}
+                <span class="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-mono bg-bg-muted text-fg-secondary">{{ imdb }}</span>
+                {% endif %}
+                {% if let Some(tvdb) = item.tvdb_id %}
+                <span class="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-mono bg-bg-muted text-fg-secondary">tvdb {{ tvdb }}</span>
+                {% endif %}
+            </div>
+
+            {# Controls. The profile picker submits on change so there is
+               no save button to forget. #}
+            <div class="flex items-center gap-2.5 flex-wrap mt-4">
+                <button hx-post="/library/{{ item.id }}/monitor"
+                        class="px-4 h-9 rounded-md text-sm font-medium {% if item.monitored %}bg-bg-muted text-fg-secondary{% else %}bg-accent-soft text-accent-soft-fg{% endif %}">
+                    {% if item.monitored %}pausar monitoramento{% else %}voltar a monitorar{% endif %}
+                </button>
+
+                <form method="post" action="/library/{{ item.id }}/profile" class="contents">
+                    <select name="profile_id" onchange="this.form.submit()"
+                            class="h-9 px-3 rounded-md bg-bg-surface border border-accent-solid text-sm text-fg-primary focus:outline-none">
+                        <option value="" {% if item.profile_id.is_empty() %}selected{% endif %}>Sem perfil</option>
+                        {% for p in profiles %}
+                        <option value="{{ p.0 }}" {% if item.profile_id == p.0 %}selected{% endif %}>{{ p.1 }}</option>
+                        {% endfor %}
+                    </select>
+                </form>
+
+                <div class="flex-1"></div>
+
+                <form method="post" action="/library/{{ item.id }}/refresh" class="contents">
+                    <button type="submit" class="px-4 h-9 rounded-md text-sm font-medium bg-bg-muted text-fg-secondary hover:text-fg-primary">
+                        atualizar metadados
+                    </button>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% if item.in_theatrical_window %}
+<div class="flex items-start gap-3 px-4 py-3 mb-4 rounded-lg bg-info-soft border border-info-solid">
+    <div class="shrink-0 w-5 h-5 rounded-full bg-info-solid flex items-center justify-center mt-0.5">
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="3"><circle cx="12" cy="12" r="10"/><path d="M12 11v6M12 7.5v.5" stroke-linecap="round"/></svg>
+    </div>
+    <p class="text-sm text-info-soft-fg">
+        Ainda em janela de cinema. O TMDB anuncia lançamento digital em <strong>{{ item.digital_release }}</strong> — buscar antes disso normalmente só encontra cam.
+    </p>
+</div>
+{% endif %}
+
+{% if item.is_series %}
+{# ---- seasons ----
+   Collapsed by default and expanded on demand: a long-running series
+   can carry a hundred-plus episodes, and rendering every row up front
+   costs a query and a lot of DOM for rows nobody looked at. #}
+<h2 class="text-lg font-semibold text-fg-primary mb-2">Temporadas</h2>
+<div class="card-hairline bg-bg-surface border border-border-default rounded-xl overflow-hidden mb-4">
+    {% for s in seasons %}
+    <details class="border-t border-border-default">
+        <summary class="flex items-center gap-3 px-4 py-3 cursor-pointer bg-bg-muted list-none"
+                 hx-get="/library/{{ item.id }}/season/{{ s.id }}"
+                 hx-target="#season-{{ s.id }}"
+                 hx-trigger="click once"
+                 hx-swap="innerHTML">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 text-fg-secondary"><path d="m6 9 6 6 6-6"/></svg>
+            <span class="text-sm font-medium text-fg-primary">{{ s.label }}</span>
+            <span class="text-xs text-fg-muted">{{ s.episode_count }} episódios</span>
+            <div class="flex-1"></div>
+            {% if s.monitored %}
+            <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium bg-success-soft text-success-soft-fg border border-success-solid">monitorada</span>
+            {% else %}
+            <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium bg-bg-muted text-fg-muted">pausada</span>
+            {% endif %}
+            <button type="button"
+                    hx-post="/library/{{ item.id }}/season/{{ s.id }}/monitor"
+                    class="px-2.5 h-7 rounded-md text-xs font-medium {% if s.monitored %}bg-bg-canvas border border-border-strong text-fg-secondary{% else %}bg-accent-soft text-accent-soft-fg{% endif %}">
+                {% if s.monitored %}pausar{% else %}monitorar{% endif %}
+            </button>
+        </summary>
+        <div id="season-{{ s.id }}">
+            <div class="px-4 py-4 text-xs text-fg-muted italic">carregando episódios…</div>
+        </div>
+    </details>
+    {% endfor %}
+</div>
+{% endif %}
+
+{# ---- grabs ---- #}
+<h2 class="text-lg font-semibold text-fg-primary mb-2">Grabs</h2>
+{% if grabs.is_empty() %}
+<div class="card-hairline bg-bg-surface border border-border-default rounded-xl px-5 py-8 text-center">
+    <p class="text-sm text-fg-muted italic">Nenhuma aquisição ainda.</p>
+    <p class="text-xs text-fg-muted mt-1">O varredor automático e a entrega ao cliente de download chegam na próxima fase.</p>
+</div>
+{% else %}
+<div class="card-hairline bg-bg-surface border border-border-default rounded-xl overflow-hidden">
+    <div class="flex items-center py-2.5 bg-bg-muted">
+        <div class="px-4 flex-1 text-[10px] font-medium uppercase tracking-[0.06em] text-fg-muted">Release</div>
+        <div class="px-4 w-40 text-[10px] font-medium uppercase tracking-[0.06em] text-fg-muted">Provider</div>
+        <div class="px-4 w-28 text-[10px] font-medium uppercase tracking-[0.06em] text-fg-muted">Protocolo</div>
+        <div class="px-4 w-28 text-[10px] font-medium uppercase tracking-[0.06em] text-fg-muted">Status</div>
+        <div class="px-4 w-28 text-[10px] font-medium uppercase tracking-[0.06em] text-fg-muted">Quando</div>
+    </div>
+    {% for g in grabs %}
+    <div class="flex items-center border-t border-border-default">
+        <div class="px-4 py-2.5 flex-1 min-w-0">
+            <div class="text-xs font-mono text-fg-primary truncate">{{ g.release_name }}</div>
+            {% if let Some(err) = g.error %}
+            <div class="text-[11px] text-danger-soft-fg mt-0.5">{{ err }}</div>
+            {% endif %}
+        </div>
+        <div class="px-4 w-40 text-xs text-fg-secondary truncate">{{ g.provider_name }}</div>
+        <div class="px-4 w-28">
+            <span class="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium {% if g.protocol == "usenet" %}bg-secondary-soft text-secondary-soft-fg{% else %}bg-accent-soft text-accent-soft-fg{% endif %}">{{ g.protocol }}</span>
+        </div>
+        <div class="px-4 w-28">
+            <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium {% if g.tone == "ok" %}bg-success-soft text-success-soft-fg border border-success-solid{% else if g.tone == "err" %}bg-danger-soft text-danger-soft-fg{% else if g.tone == "warn" %}bg-warning-soft text-warning-soft-fg{% else %}bg-bg-muted text-fg-muted{% endif %}">{{ g.status }}</span>
+        </div>
+        <div class="px-4 w-28 text-[11px] font-mono text-fg-secondary">{{ g.grabbed_at }}</div>
+    </div>
+    {% endfor %}
+</div>
+{% endif %}
+
+{% endblock %}
