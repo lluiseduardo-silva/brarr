@@ -40,7 +40,7 @@ use crate::auth::{AuthConfig, SESSION_COOKIE};
 use crate::auth::{BypassConfig, TrustedPeers};
 use crate::db::quality_profiles;
 use crate::db::settings;
-use crate::db::{arr_instances, decisions, providers, push_history, searches};
+use crate::db::{arr_instances, decisions, library, providers, push_history, searches};
 #[allow(
     unused_imports,
     reason = "re-exported for downstream tests that still call it"
@@ -50,12 +50,13 @@ use crate::web::render::html;
 use crate::web::templates::{
     ArrInstanceView, ArrInstancesListPartial, ArrInstancesTemplate, DashboardTemplate,
     DecisionView, EditArrInstanceModalPartial, EditProviderModalPartial, EndpointHealthView,
-    EndpointRequestView, ErrorTemplate, HealthTemplate, LoginTemplate, NewProfileModalPartial,
-    NewSearchModalPartial, ProfileEditorTemplate, ProfileView, ProfilesTemplate,
-    ProviderHealthView, ProviderView, ProvidersListPartial, ProvidersTemplate, PushGroupView,
-    PushHistoryView, PushesFilterView, PushesTemplate, RecentSearchView, ReleasesTemplate,
-    SearchDetailTemplate, SearchesFilterView, SearchesIndexTemplate, SettingsFlash,
-    SettingsTemplate, SettingsValues, WebhookEventView, WebhooksTemplate,
+    EndpointRequestView, ErrorTemplate, HealthTemplate, LibraryAddTemplate, LibraryItemView,
+    LibraryTemplate, LoginTemplate, NewProfileModalPartial, NewSearchModalPartial,
+    ProfileEditorTemplate, ProfileView, ProfilesTemplate, ProviderHealthView, ProviderView,
+    ProvidersListPartial, ProvidersTemplate, PushGroupView, PushHistoryView, PushesFilterView,
+    PushesTemplate, RecentSearchView, ReleasesTemplate, SearchDetailTemplate, SearchesFilterView,
+    SearchesIndexTemplate, SettingsFlash, SettingsTemplate, SettingsValues, TmdbHitView,
+    WebhookEventView, WebhooksTemplate,
 };
 use crate::{AppError, AppState};
 use brarr_core::TmdbId;
@@ -110,6 +111,10 @@ pub fn router(state: AppState, static_dir: &std::path::Path) -> Router {
         .route("/searches", get(searches_index).post(searches_create))
         .route("/searches/new", get(new_search_modal))
         .route("/searches/{id}", get(search_detail))
+        .route("/library", get(library_index))
+        .route("/library/add", get(library_add).post(library_add_submit))
+        .route("/library/{id}/monitor", post(library_toggle_monitor))
+        .route("/library/{id}", delete(library_delete))
         .route("/webhooks", get(webhooks_index))
         .route("/health", get(health_index))
         .route("/settings", get(settings_index))
@@ -881,6 +886,295 @@ async fn webhooks_index(State(state): State<AppState>) -> Result<Response, AppEr
         })
         .collect();
     html(&WebhooksTemplate { events: views })
+}
+
+// ---- library ---------------------------------------------------------
+
+/// Query string of `GET /library`.
+#[derive(Debug, Deserialize)]
+struct LibraryQuery {
+    /// `grid` (default) or `list`.
+    #[serde(default)]
+    view: Option<String>,
+    /// `movie`, `tv`, `unmonitored`, or absent for everything.
+    #[serde(default)]
+    filter: Option<String>,
+}
+
+/// Query string of `GET /library/add`.
+#[derive(Debug, Deserialize)]
+struct LibraryAddQuery {
+    /// Free-text search term.
+    #[serde(default)]
+    q: Option<String>,
+    /// `all` (default), `movie` or `tv`.
+    #[serde(default)]
+    kind: Option<String>,
+}
+
+/// Form body of `POST /library/add`.
+#[derive(Debug, Deserialize)]
+struct LibraryAddForm {
+    /// TMDB id of the chosen hit.
+    tmdb_id: i64,
+    /// `movie` or `tv`.
+    media_type: String,
+}
+
+/// Poster size used on the index and the add screen. Small enough that a
+/// full page of them is cheap, large enough not to look soft at 100px.
+const POSTER_SIZE: &str = "w185";
+
+/// Render a stored date as `dd/mm/aaaa`.
+fn short_date(ts: OffsetDateTime) -> String {
+    format!("{:02}/{:02}/{}", ts.day(), u8::from(ts.month()), ts.year())
+}
+
+/// `GET /library` — the catalogue.
+async fn library_index(
+    State(state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<LibraryQuery>,
+) -> Result<Response, AppError> {
+    let view = match q.view.as_deref() {
+        Some("list") => "list".to_owned(),
+        _ => "grid".to_owned(),
+    };
+    let filter = q.filter.unwrap_or_default();
+
+    let counts = library::counts(state.pool()).await?;
+    let all = library::list(state.pool()).await?;
+
+    let mut items = Vec::with_capacity(all.len());
+    for item in all {
+        let keep = match filter.as_str() {
+            "movie" => item.media_type == library::MediaType::Movie,
+            "tv" => item.media_type == library::MediaType::Tv,
+            "unmonitored" => !item.monitored,
+            _ => true,
+        };
+        if !keep {
+            continue;
+        }
+
+        // Only series have a tree, and only series pay for the extra
+        // queries needed to summarise it.
+        let is_series = item.media_type == library::MediaType::Tv;
+        let tree_summary = if is_series {
+            let seasons = library::seasons(state.pool(), item.id).await?;
+            let episodes = library::episodes(state.pool(), item.id).await?;
+            // Season 0 is TMDB's specials bucket, and it is not small:
+            // The Boys carries 76 of them against 40 real episodes.
+            // Both halves of the summary have to exclude it or the line
+            // reads "5 temporadas · 116 episódios", which is nonsense.
+            let real_seasons = seasons.iter().filter(|s| s.season_number > 0).count();
+            let real_episodes = episodes.iter().filter(|e| e.season_number > 0).count();
+            let specials = episodes.len() - real_episodes;
+            if specials > 0 {
+                format!(
+                    "{real_seasons} temporadas · {real_episodes} episódios · {specials} especiais"
+                )
+            } else {
+                format!("{real_seasons} temporadas · {real_episodes} episódios")
+            }
+        } else {
+            String::new()
+        };
+
+        let profile = match item.profile_id {
+            Some(pid) => quality_profiles::get_by_id(state.pool(), pid)
+                .await
+                .map_or_else(|_| "—".to_owned(), |p| p.name),
+            None => "—".to_owned(),
+        };
+
+        items.push(LibraryItemView {
+            id: item.id.to_string(),
+            title: item.title,
+            year: item.year.map_or_else(|| "—".to_owned(), |y| y.to_string()),
+            kind_label: if is_series { "Série" } else { "Filme" }.to_owned(),
+            is_series,
+            poster_url: brarr_tmdb::image_url(item.poster_path.as_deref(), POSTER_SIZE),
+            monitored: item.monitored,
+            profile,
+            tmdb_id: item.tmdb_id,
+            imdb_id: item.imdb_id,
+            tree_summary,
+            added_at: short_date(item.added_at),
+        });
+    }
+
+    let tmdb_ready = crate::tmdb_sync::load_config(state.pool())
+        .await?
+        .is_configured();
+
+    html(&LibraryTemplate {
+        items,
+        movies: counts.movies,
+        series: counts.series,
+        unmonitored: counts.unmonitored,
+        view,
+        filter,
+        tmdb_ready,
+    })
+}
+
+/// `GET /library/add` — TMDB search.
+async fn library_add(
+    State(state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<LibraryAddQuery>,
+) -> Result<Response, AppError> {
+    let query = q.q.unwrap_or_default().trim().to_owned();
+    let kind = match q.kind.as_deref() {
+        Some("movie") => "movie".to_owned(),
+        Some("tv") => "tv".to_owned(),
+        _ => "all".to_owned(),
+    };
+
+    let cfg = crate::tmdb_sync::load_config(state.pool()).await?;
+    if !cfg.is_configured() {
+        return html(&LibraryAddTemplate {
+            query,
+            kind,
+            results: Vec::new(),
+            tmdb_ready: false,
+            error: None,
+            searched: false,
+        });
+    }
+    if query.is_empty() {
+        return html(&LibraryAddTemplate {
+            query,
+            kind,
+            results: Vec::new(),
+            tmdb_ready: true,
+            error: None,
+            searched: false,
+        });
+    }
+
+    // Which TMDB ids are already catalogued, so the list can show a pill
+    // instead of an add button.
+    let existing = library::list(state.pool()).await?;
+
+    let tmdb = crate::tmdb_sync::client(state.pool()).await?;
+    let mut results = Vec::new();
+    let mut error = None;
+
+    if kind != "tv" {
+        match tmdb.search_movies(&query, None).await {
+            Ok(hits) => {
+                for h in hits {
+                    let year = h.year().map_or_else(|| "—".to_owned(), |y| y.to_string());
+                    let in_library = existing.iter().any(|e| {
+                        e.tmdb_id == h.tmdb_id && e.media_type == library::MediaType::Movie
+                    });
+                    results.push(TmdbHitView {
+                        tmdb_id: h.tmdb_id,
+                        media_type: "movie".to_owned(),
+                        kind_label: "Filme".to_owned(),
+                        is_series: false,
+                        title: h.title,
+                        year,
+                        overview: h.overview,
+                        poster_url: brarr_tmdb::image_url(h.poster_path.as_deref(), POSTER_SIZE),
+                        in_library,
+                    });
+                }
+            }
+            Err(e) => error = Some(format!("Busca de filmes falhou: {e}")),
+        }
+    }
+    if kind != "movie" {
+        match tmdb.search_tv(&query, None).await {
+            Ok(hits) => {
+                for h in hits {
+                    let year = h.year().map_or_else(|| "—".to_owned(), |y| y.to_string());
+                    let in_library = existing
+                        .iter()
+                        .any(|e| e.tmdb_id == h.tmdb_id && e.media_type == library::MediaType::Tv);
+                    results.push(TmdbHitView {
+                        tmdb_id: h.tmdb_id,
+                        media_type: "tv".to_owned(),
+                        kind_label: "Série".to_owned(),
+                        is_series: true,
+                        title: h.name,
+                        year,
+                        overview: h.overview,
+                        poster_url: brarr_tmdb::image_url(h.poster_path.as_deref(), POSTER_SIZE),
+                        in_library,
+                    });
+                }
+            }
+            Err(e) => error = Some(format!("Busca de séries falhou: {e}")),
+        }
+    }
+
+    html(&LibraryAddTemplate {
+        query,
+        kind,
+        results,
+        tmdb_ready: true,
+        error,
+        searched: true,
+    })
+}
+
+/// `POST /library/add` — pull the full record from TMDB and catalogue it.
+async fn library_add_submit(
+    State(state): State<AppState>,
+    Form(form): Form<LibraryAddForm>,
+) -> Result<Response, AppError> {
+    let tmdb = crate::tmdb_sync::client(state.pool()).await?;
+    match form.media_type.as_str() {
+        "movie" => {
+            crate::tmdb_sync::add_movie(state.pool(), &tmdb, form.tmdb_id).await?;
+        }
+        "tv" => {
+            // Also walks every season, so the episode tree lands with the
+            // item rather than on a later refresh.
+            crate::tmdb_sync::add_series(state.pool(), &tmdb, form.tmdb_id).await?;
+        }
+        other => {
+            return Err(AppError::InvalidInput(format!(
+                "media_type inválido: {other}"
+            )));
+        }
+    }
+    Ok(Redirect::to("/library").into_response())
+}
+
+/// `POST /library/{id}/monitor` — flip the monitoring flag.
+async fn library_toggle_monitor(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, AppError> {
+    let uuid = Uuid::parse_str(&id)
+        .map_err(|e| AppError::InvalidInput(format!("invalid library id: {e}")))?;
+    let item = library::get_by_id(state.pool(), uuid).await?;
+    library::set_monitored(state.pool(), uuid, !item.monitored).await?;
+    Ok(hx_refresh())
+}
+
+/// `DELETE /library/{id}` — drop the item; seasons, episodes and grabs
+/// cascade.
+async fn library_delete(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, AppError> {
+    let uuid = Uuid::parse_str(&id)
+        .map_err(|e| AppError::InvalidInput(format!("invalid library id: {e}")))?;
+    library::delete(state.pool(), uuid).await?;
+    Ok(hx_refresh())
+}
+
+/// Empty 200 carrying `HX-Refresh`, which makes HTMX reload the page.
+/// Used where returning a fragment would mean maintaining the same row
+/// markup in two layouts.
+fn hx_refresh() -> Response {
+    let mut resp = StatusCode::OK.into_response();
+    resp.headers_mut()
+        .insert("HX-Refresh", HeaderValue::from_static("true"));
+    resp
 }
 
 /// `GET /health` — provider fan-out health + Torznab/Newznab endpoint
@@ -2031,6 +2325,15 @@ async fn load_settings_values(state: &AppState) -> Result<SettingsValues, AppErr
         newznab_base,
         indexer_apikey,
         profiles,
+        // Reflects the effective state, so an operator who set
+        // BRARR_TMDB_TOKEN in the environment sees "configurado" rather
+        // than an empty box implying nothing is set.
+        tmdb_configured: crate::tmdb_sync::load_config(state.pool())
+            .await?
+            .is_configured(),
+        tmdb_language: get(settings::KEY_TMDB_LANGUAGE),
+        tmdb_country: get(settings::KEY_TMDB_COUNTRY),
+        tmdb_ttl_days: get(settings::KEY_TMDB_TTL_DAYS),
     })
 }
 
@@ -2071,6 +2374,16 @@ struct SettingsGeneralForm {
     log_level: String,
     #[serde(default)]
     backtrace: String,
+    // Blank means "leave the stored credential alone" — the form never
+    // echoes it back, so an empty box must not wipe it.
+    #[serde(default)]
+    tmdb_token: String,
+    #[serde(default)]
+    tmdb_language: String,
+    #[serde(default)]
+    tmdb_country: String,
+    #[serde(default)]
+    tmdb_ttl_days: String,
 }
 
 #[allow(
@@ -2232,6 +2545,18 @@ async fn settings_general(
     .await?;
     settings::set(pool, settings::KEY_LOG_LEVEL, log_spec).await?;
     settings::set(pool, settings::KEY_BACKTRACE, &backtrace).await?;
+
+    // TMDB. The credential is write-only from the UI: the form never
+    // echoes it back, so a blank box means "leave it alone" rather than
+    // "clear it". The other three are plain overrides and blanking them
+    // legitimately falls back to the defaults.
+    let tmdb_token = form.tmdb_token.trim();
+    if !tmdb_token.is_empty() {
+        settings::set(pool, settings::KEY_TMDB_TOKEN, tmdb_token).await?;
+    }
+    settings::set(pool, settings::KEY_TMDB_LANGUAGE, form.tmdb_language.trim()).await?;
+    settings::set(pool, settings::KEY_TMDB_COUNTRY, form.tmdb_country.trim()).await?;
+    settings::set(pool, settings::KEY_TMDB_TTL_DAYS, form.tmdb_ttl_days.trim()).await?;
 
     // Swap runtime config — atomic per-field.
     state

@@ -1,0 +1,18 @@
+{# Row actions shared by the grid and list layouts of /library.
+   Expects `it` (a LibraryItemView) in scope.
+
+   Both handlers answer with `HX-Refresh: true` rather than a row
+   fragment: the row markup differs between the two layouts, and
+   duplicating it into a partial just to swap in place would mean
+   maintaining the same row twice. A refresh is cheap here — the page is
+   a single query. #}
+<button hx-post="/library/{{ it.id }}/monitor"
+        title="{% if it.monitored %}pausar monitoramento{% else %}voltar a monitorar{% endif %}"
+        class="px-2.5 h-7 rounded-md text-xs font-medium {% if it.monitored %}bg-bg-muted text-fg-secondary{% else %}bg-accent-soft text-accent-soft-fg{% endif %}">
+    {% if it.monitored %}pausar{% else %}monitorar{% endif %}
+</button>
+<button hx-delete="/library/{{ it.id }}"
+        hx-confirm="Remover “{{ it.title }}” da biblioteca? O histórico de grabs vai junto."
+        class="px-2.5 h-7 rounded-md text-xs font-medium text-danger-soft-fg hover:bg-danger-soft">
+    remover
+</button>

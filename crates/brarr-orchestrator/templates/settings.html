@@ -116,6 +116,46 @@
 
     <section class="card-hairline bg-bg-surface border border-border-default rounded-xl p-5">
         <header class="mb-4">
+            <div class="flex items-center gap-2">
+                <h2 class="text-lg font-semibold text-fg-primary">TMDB</h2>
+                {% if values.tmdb_configured %}
+                <span class="px-2 py-0.5 rounded-full text-[10px] font-semibold uppercase tracking-[0.06em] bg-success-soft text-success-soft-fg border border-success-solid">configurado</span>
+                {% else %}
+                <span class="px-2 py-0.5 rounded-full text-[10px] font-semibold uppercase tracking-[0.06em] bg-warning-soft text-warning-soft-fg border border-warning-solid">sem credencial</span>
+                {% endif %}
+            </div>
+            <p class="text-xs text-fg-muted mt-1">
+                Fonte de metadados da biblioteca. Aceita tanto o <strong>read access token (v4)</strong> quanto a <strong>API key (v3)</strong> — o formato é detectado sozinho. Deixe o campo em branco para manter a credencial atual.
+            </p>
+        </header>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <label class="block md:col-span-2">
+                <span class="block mb-1.5 text-xs font-medium uppercase tracking-[0.06em] text-fg-muted">Credencial</span>
+                <input name="tmdb_token" type="password" autocomplete="off"
+                       placeholder="{% if values.tmdb_configured %}••••••••  (mantém a atual){% else %}cole o token v4 ou a API key v3{% endif %}"
+                       class="w-full px-3 h-10 rounded-md bg-bg-canvas border border-border-strong text-sm text-fg-primary placeholder:text-fg-muted focus:outline-none focus:border-accent-solid">
+            </label>
+            <label class="block">
+                <span class="block mb-1.5 text-xs font-medium uppercase tracking-[0.06em] text-fg-muted">Idioma</span>
+                <input name="tmdb_language" value="{{ values.tmdb_language }}" placeholder="pt-BR"
+                       class="w-full px-3 h-10 rounded-md bg-bg-canvas border border-border-strong text-sm text-fg-primary placeholder:text-fg-muted focus:outline-none focus:border-accent-solid">
+            </label>
+            <label class="block">
+                <span class="block mb-1.5 text-xs font-medium uppercase tracking-[0.06em] text-fg-muted">País (datas de lançamento)</span>
+                <input name="tmdb_country" value="{{ values.tmdb_country }}" placeholder="BR"
+                       class="w-full px-3 h-10 rounded-md bg-bg-canvas border border-border-strong text-sm text-fg-primary placeholder:text-fg-muted focus:outline-none focus:border-accent-solid">
+            </label>
+            <label class="block">
+                <span class="block mb-1.5 text-xs font-medium uppercase tracking-[0.06em] text-fg-muted">TTL de metadados (dias)</span>
+                <input name="tmdb_ttl_days" value="{{ values.tmdb_ttl_days }}" inputmode="numeric" placeholder="30"
+                       class="w-full px-3 h-10 rounded-md bg-bg-canvas border border-border-strong text-sm text-fg-primary placeholder:text-fg-muted focus:outline-none focus:border-accent-solid">
+                <span class="block mt-1.5 text-[11px] text-fg-muted">Os termos do TMDB limitam cache de metadados a seis meses.</span>
+            </label>
+        </div>
+    </section>
+
+    <section class="card-hairline bg-bg-surface border border-border-default rounded-xl p-5">
+        <header class="mb-4">
             <h2 class="text-lg font-semibold text-fg-primary">Histórico &amp; retenção</h2>
             <p class="text-xs text-fg-muted mt-1">Quantos dias de <code class="font-mono">decisions</code>/<code class="font-mono">searches</code> manter antes da poda automática. <code class="font-mono">0</code> = manter pra sempre. Decisões já empurradas ao *arr são preservadas.</p>
         </header>

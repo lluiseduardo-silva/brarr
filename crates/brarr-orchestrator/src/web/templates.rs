@@ -646,6 +646,15 @@ pub struct SettingsValues {
     /// `(id, name)` of every quality profile — drives the card's profile
     /// picker, which builds the `&profile=<id>` additional parameter.
     pub profiles: Vec<(String, String)>,
+    /// `true` when a TMDB credential is stored or present in the
+    /// environment. The field itself is never echoed back.
+    pub tmdb_configured: bool,
+    /// Metadata language (default `pt-BR`).
+    pub tmdb_language: String,
+    /// Country used for release-date resolution (default `BR`).
+    pub tmdb_country: String,
+    /// Metadata refresh window in days.
+    pub tmdb_ttl_days: String,
 }
 
 /// One-shot flash message rendered above the settings form. `kind`
@@ -717,6 +726,101 @@ pub struct SearchDetailTemplate {
     pub arr_instances: Vec<ArrInstanceView>,
     /// Per-provider failure messages (transient — not persisted).
     pub failures: Vec<(String, String)>,
+}
+
+// ---- library ---------------------------------------------------------
+
+/// Library index at `/library`.
+#[derive(Debug, Template)]
+#[template(path = "library.html")]
+pub struct LibraryTemplate {
+    /// Catalogue rows, already filtered.
+    pub items: Vec<LibraryItemView>,
+    /// Monitored movies.
+    pub movies: u64,
+    /// Monitored series.
+    pub series: u64,
+    /// Entries with monitoring switched off.
+    pub unmonitored: u64,
+    /// `"grid"` or `"list"` — drives which layout renders.
+    pub view: String,
+    /// Active filter chip: `""`, `"movie"`, `"tv"` or `"unmonitored"`.
+    pub filter: String,
+    /// `false` when no TMDB credential is configured, which is the only
+    /// state where an empty library is not the operator's own doing.
+    pub tmdb_ready: bool,
+}
+
+/// One catalogue row.
+#[derive(Debug)]
+pub struct LibraryItemView {
+    /// Stringified UUID.
+    pub id: String,
+    /// Localised title.
+    pub title: String,
+    /// Release / first-air year, or `—`.
+    pub year: String,
+    /// `Filme` or `Série`.
+    pub kind_label: String,
+    /// `true` for series — drives the badge tone and the episode line.
+    pub is_series: bool,
+    /// Full CDN URL, or `None` for the placeholder tile.
+    pub poster_url: Option<String>,
+    /// Whether the scanner should chase it.
+    pub monitored: bool,
+    /// Quality profile name, or `—`.
+    pub profile: String,
+    /// TMDB id, rendered as a mono chip.
+    pub tmdb_id: i64,
+    /// Canonical `ttNNNNNNN`, when known.
+    pub imdb_id: Option<String>,
+    /// `3 temporadas · 24 episódios` for series; empty for movies.
+    pub tree_summary: String,
+    /// Localised `dd/mm/aaaa` of when it was added.
+    pub added_at: String,
+}
+
+/// TMDB search page at `/library/add`.
+#[derive(Debug, Template)]
+#[template(path = "library_add.html")]
+pub struct LibraryAddTemplate {
+    /// Echoed back into the search box.
+    pub query: String,
+    /// `"all"`, `"movie"` or `"tv"`.
+    pub kind: String,
+    /// Hits, movies before series.
+    pub results: Vec<TmdbHitView>,
+    /// `false` when no credential is configured — the page then explains
+    /// how to set one instead of showing an empty result list.
+    pub tmdb_ready: bool,
+    /// Non-empty when the search itself failed.
+    pub error: Option<String>,
+    /// `true` once a query has run, so "nenhum resultado" only shows
+    /// after an actual search.
+    pub searched: bool,
+}
+
+/// One TMDB hit on the add screen.
+#[derive(Debug)]
+pub struct TmdbHitView {
+    /// TMDB id.
+    pub tmdb_id: i64,
+    /// `movie` or `tv` — posted back on add.
+    pub media_type: String,
+    /// `Filme` or `Série`.
+    pub kind_label: String,
+    /// `true` for series.
+    pub is_series: bool,
+    /// Localised title.
+    pub title: String,
+    /// Year, or `—`.
+    pub year: String,
+    /// Synopsis, after the en-US backfill.
+    pub overview: Option<String>,
+    /// Poster CDN URL.
+    pub poster_url: Option<String>,
+    /// Already in the catalogue — renders a pill instead of a button.
+    pub in_library: bool,
 }
 
 /// HTML-escapes a fragment for safe interpolation. Askama auto-escapes

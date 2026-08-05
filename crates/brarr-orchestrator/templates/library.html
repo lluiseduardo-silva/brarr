@@ -1,0 +1,174 @@
+{% extends "base.html" %}
+{% block title %}Biblioteca — brarr{% endblock %}
+{% block content %}
+
+<div class="flex items-center justify-between gap-4 mb-6">
+    <div>
+        <h1 class="font-semibold text-[28px] leading-9 text-fg-primary">Biblioteca</h1>
+        <p class="text-base text-fg-secondary mt-1">
+            {{ movies }} filmes · {{ series }} séries monitoradas{% if unmonitored > 0 %} · {{ unmonitored }} pausados{% endif %}.
+            O brarr monitora e busca sozinho.
+        </p>
+    </div>
+    <a href="/library/add"
+       class="brand-gradient flex items-center gap-2 px-5 h-11 rounded-lg text-white text-base font-semibold whitespace-nowrap"
+       style="box-shadow: 0 8px 20px var(--color-glow);">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round">
+            <path d="M12 5v14M5 12h14"/>
+        </svg>
+        Adicionar título
+    </a>
+</div>
+
+{# Filter chips + view switch. Both are plain links carrying query
+   params — the whole surface is server-rendered, so there is no state
+   to keep in sync on the client. #}
+<div class="flex items-center gap-2 mb-4 flex-wrap">
+    <a href="/library?view={{ view }}"
+       class="inline-flex items-center px-3 h-7 rounded-full text-sm font-medium {% if filter.is_empty() %}bg-accent-solid text-on-accent-solid{% else %}bg-bg-surface border border-border-default text-fg-secondary hover:text-fg-primary{% endif %}">Todos</a>
+    <a href="/library?view={{ view }}&filter=movie"
+       class="inline-flex items-center px-3 h-7 rounded-full text-sm font-medium {% if filter == "movie" %}bg-accent-solid text-on-accent-solid{% else %}bg-bg-surface border border-border-default text-fg-secondary hover:text-fg-primary{% endif %}">Filmes</a>
+    <a href="/library?view={{ view }}&filter=tv"
+       class="inline-flex items-center px-3 h-7 rounded-full text-sm font-medium {% if filter == "tv" %}bg-accent-solid text-on-accent-solid{% else %}bg-bg-surface border border-border-default text-fg-secondary hover:text-fg-primary{% endif %}">Séries</a>
+    <a href="/library?view={{ view }}&filter=unmonitored"
+       class="inline-flex items-center px-3 h-7 rounded-full text-sm font-medium {% if filter == "unmonitored" %}bg-accent-solid text-on-accent-solid{% else %}bg-bg-surface border border-border-default text-fg-secondary hover:text-fg-primary{% endif %}">Pausados</a>
+
+    <div class="flex-1"></div>
+
+    <div class="inline-flex items-center gap-0.5 p-0.5 rounded-md bg-bg-muted">
+        <a href="/library?view=grid{% if !filter.is_empty() %}&filter={{ filter }}{% endif %}"
+           title="grade"
+           class="inline-flex items-center justify-center w-8 h-7 rounded {% if view != "list" %}bg-bg-surface text-fg-primary{% else %}text-fg-muted hover:text-fg-primary{% endif %}">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="3" y="3" width="7.5" height="7.5" rx="1.5"/><rect x="13.5" y="3" width="7.5" height="7.5" rx="1.5"/>
+                <rect x="3" y="13.5" width="7.5" height="7.5" rx="1.5"/><rect x="13.5" y="13.5" width="7.5" height="7.5" rx="1.5"/>
+            </svg>
+        </a>
+        <a href="/library?view=list{% if !filter.is_empty() %}&filter={{ filter }}{% endif %}"
+           title="lista"
+           class="inline-flex items-center justify-center w-8 h-7 rounded {% if view == "list" %}bg-bg-surface text-fg-primary{% else %}text-fg-muted hover:text-fg-primary{% endif %}">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                <path d="M8 6h13M8 12h13M8 18h13M3.5 6h.01M3.5 12h.01M3.5 18h.01"/>
+            </svg>
+        </a>
+    </div>
+</div>
+
+{% if items.is_empty() %}
+<div class="card-hairline bg-bg-surface border border-border-default rounded-xl px-5 py-16 text-center">
+    <div class="w-12 h-12 rounded-xl bg-accent-soft inline-flex items-center justify-center mb-3">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" class="text-accent-soft-fg">
+            <rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M9 4v16"/>
+        </svg>
+    </div>
+    {% if !tmdb_ready %}
+    <h2 class="text-lg font-semibold text-fg-primary mb-1">Configure o TMDB primeiro</h2>
+    <p class="text-sm text-fg-muted mb-4">
+        A biblioteca usa o TMDB como fonte de metadados. Sem credencial não há como buscar títulos.
+    </p>
+    <a href="/settings" class="inline-flex items-center gap-2 px-5 h-10 rounded-lg border border-accent-solid border-dashed text-sm font-medium text-accent-soft-fg">
+        Ir para configurações →
+    </a>
+    {% else if !filter.is_empty() %}
+    <h2 class="text-lg font-semibold text-fg-primary mb-1">Nenhum título neste filtro</h2>
+    <p class="text-sm text-fg-muted">
+        <a href="/library?view={{ view }}" class="text-accent-soft-fg hover:underline">Ver a biblioteca inteira</a>
+    </p>
+    {% else %}
+    <h2 class="text-lg font-semibold text-fg-primary mb-1">Sua biblioteca está vazia</h2>
+    <p class="text-sm text-fg-muted mb-4">
+        Adicione um filme ou uma série e o brarr passa a monitorar, buscar e baixar sozinho.
+    </p>
+    <a href="/library/add" class="inline-flex items-center gap-2 px-5 h-10 rounded-lg border border-accent-solid border-dashed text-sm font-medium text-accent-soft-fg">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+        Adicionar seu primeiro título
+    </a>
+    {% endif %}
+</div>
+
+{% else if view == "list" %}
+{# ---- list view: denser, and surfaces the ids the grid hides ---- #}
+<div class="card-hairline bg-bg-surface border border-border-default rounded-xl overflow-hidden">
+    <div class="flex items-center py-2.5 bg-bg-muted">
+        <div class="px-4 flex-1 text-[10px] font-medium uppercase tracking-[0.06em] text-fg-muted">Título</div>
+        <div class="px-4 w-20 text-[10px] font-medium uppercase tracking-[0.06em] text-fg-muted">Tipo</div>
+        <div class="px-4 w-56 text-[10px] font-medium uppercase tracking-[0.06em] text-fg-muted">Conteúdo</div>
+        <div class="px-4 w-40 text-[10px] font-medium uppercase tracking-[0.06em] text-fg-muted">Perfil</div>
+        <div class="px-4 w-28 text-[10px] font-medium uppercase tracking-[0.06em] text-fg-muted">Adicionado</div>
+        <div class="px-4 w-44 text-[10px] font-medium uppercase tracking-[0.06em] text-fg-muted text-right">Ações</div>
+    </div>
+    {% for it in items %}
+    <div class="flex items-center border-t border-border-default" id="lib-{{ it.id }}">
+        <div class="px-4 py-2.5 flex-1 flex items-center gap-3 min-w-0">
+            {% if let Some(url) = it.poster_url %}
+            <img src="{{ url }}" alt="" width="30" height="44" loading="lazy" class="shrink-0 w-[18px] h-[26px] rounded object-cover" style="width:30px;height:44px;">
+            {% else %}
+            <div class="shrink-0 rounded bg-bg-muted" style="width:30px;height:44px;"></div>
+            {% endif %}
+            <div class="min-w-0">
+                <div class="text-sm font-medium text-fg-primary truncate">{{ it.title }} <span class="text-fg-muted font-normal">{{ it.year }}</span></div>
+                <div class="text-[11px] font-mono text-fg-muted">tmdb {{ it.tmdb_id }}{% if let Some(imdb) = it.imdb_id %} · {{ imdb }}{% endif %}</div>
+            </div>
+        </div>
+        <div class="px-4 w-20">
+            <span class="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium {% if it.is_series %}bg-secondary-soft text-secondary-soft-fg{% else %}bg-accent-soft text-accent-soft-fg{% endif %}">{{ it.kind_label }}</span>
+        </div>
+        <div class="px-4 w-56 text-xs text-fg-secondary">{% if it.tree_summary.is_empty() %}—{% else %}{{ it.tree_summary }}{% endif %}</div>
+        <div class="px-4 w-40 text-xs text-fg-secondary truncate">{{ it.profile }}</div>
+        <div class="px-4 w-28 text-[11px] font-mono text-fg-secondary">{{ it.added_at }}</div>
+        <div class="px-4 w-44 flex items-center justify-end gap-1.5">
+            {% include "partials/library_actions.html" %}
+        </div>
+    </div>
+    {% endfor %}
+</div>
+
+{% else %}
+{# ---- grid view ---- #}
+<div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+{% for it in items %}
+<div class="card-hairline bg-bg-surface border border-border-default rounded-xl p-4 flex items-start gap-3.5" id="lib-{{ it.id }}">
+    {% if let Some(url) = it.poster_url %}
+    <img src="{{ url }}" alt="" loading="lazy" class="shrink-0 rounded-md object-cover" style="width:100px;height:150px;">
+    {% else %}
+    <div class="shrink-0 rounded-md bg-bg-muted flex items-center justify-center" style="width:100px;height:150px;">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" class="text-fg-muted">
+            {% if it.is_series %}<rect x="2" y="7" width="20" height="13" rx="2"/><path d="m8 3 4 4 4-4" stroke-linecap="round"/>
+            {% else %}<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 5v14M17 5v14"/>{% endif %}
+        </svg>
+    </div>
+    {% endif %}
+
+    <div class="flex-1 min-w-0 flex flex-col" style="min-height:150px;">
+        <div class="flex items-baseline gap-2 min-w-0">
+            <h2 class="text-sm font-medium text-fg-primary truncate">{{ it.title }}</h2>
+            <span class="shrink-0 text-xs text-fg-muted">{{ it.year }}</span>
+        </div>
+
+        <div class="flex items-center gap-1.5 flex-wrap mt-2">
+            <span class="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium {% if it.is_series %}bg-secondary-soft text-secondary-soft-fg{% else %}bg-accent-soft text-accent-soft-fg{% endif %}">{{ it.kind_label }}</span>
+            {% if it.monitored %}
+            <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium bg-success-soft text-success-soft-fg border border-success-solid">monitorado</span>
+            {% else %}
+            <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium bg-bg-muted text-fg-muted">pausado</span>
+            {% endif %}
+        </div>
+
+        {% if !it.tree_summary.is_empty() %}
+        <p class="text-xs text-fg-muted mt-2">{{ it.tree_summary }}</p>
+        {% endif %}
+
+        <div class="flex-1"></div>
+
+        <div class="flex items-center gap-1.5 flex-wrap">
+            <span class="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] bg-bg-muted text-fg-secondary truncate max-w-[120px]">{{ it.profile }}</span>
+            <div class="flex-1"></div>
+            {% include "partials/library_actions.html" %}
+        </div>
+    </div>
+</div>
+{% endfor %}
+</div>
+{% endif %}
+
+{% endblock %}
