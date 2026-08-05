@@ -382,6 +382,7 @@ mod tests {
             provider_name: "p".into(),
             release_name: "Matrix.1999.1080p.BluRay-FOO".into(),
             release_id_remote: 1,
+            release_guid: None,
             score: 700,
             rejected: false,
             tags: vec![],

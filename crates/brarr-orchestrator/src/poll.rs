@@ -944,6 +944,7 @@ mod tests {
             provider_name: "p".into(),
             release_name: "r".into(),
             release_id_remote: 1,
+            release_guid: None,
             score: 200,
             rejected: false,
             tags: vec![],

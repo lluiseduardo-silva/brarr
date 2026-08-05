@@ -27,6 +27,12 @@ pub struct DecisionRow {
     pub release_name: String,
     /// Provider-side numeric id (so the UI can deep-link).
     pub release_id_remote: u64,
+    /// Provider-side release id **verbatim**, before the lossy numeric
+    /// parse above. This is the only form stable enough to key the grab
+    /// barrier on: Newznab guids are not numeric, and
+    /// [`Self::release_id_remote`] collapses every one of them onto `0`.
+    /// `None` on rows written before the `20260804140000` migration.
+    pub release_guid: Option<String>,
     /// Score assigned by the rules engine.
     pub score: u32,
     /// Whether the engine rejected this release.
@@ -86,6 +92,23 @@ pub struct DecisionRow {
     pub decided_at: OffsetDateTime,
 }
 
+impl DecisionRow {
+    /// The release identifier to key the grab barrier on.
+    ///
+    /// Prefers [`Self::release_guid`] — the provider's own string, which
+    /// is the same on every search that finds this release. Falls back to
+    /// the numeric id for rows written before that column existed, which
+    /// is still correct for UNIT3D (numeric ids) and no worse than what
+    /// those rows ever had for Newznab.
+    #[must_use]
+    pub fn stable_release_key(&self) -> String {
+        match self.release_guid.as_deref() {
+            Some(guid) if !guid.is_empty() => guid.to_owned(),
+            _ => self.release_id_remote.to_string(),
+        }
+    }
+}
+
 /// Input bundle used to insert a single decision row.
 #[derive(Debug, Clone)]
 pub struct DecisionInsert {
@@ -99,6 +122,8 @@ pub struct DecisionInsert {
     pub release_name: String,
     /// Provider-side numeric id.
     pub release_id_remote: u64,
+    /// Provider-side id verbatim — see [`DecisionRow::release_guid`].
+    pub release_guid: Option<String>,
     /// Engine score.
     pub score: u32,
     /// Rejected flag.
@@ -161,10 +186,11 @@ pub async fn insert(pool: &Pool, ins: DecisionInsert) -> Result<DecisionRow, App
     sqlx::query(
         "INSERT INTO decisions ( \
             id, search_id, provider_id, provider_name, release_name, release_id_remote, \
-            score, rejected, tags_json, matched_json, seeders, leechers, size_bytes, \
-            resolution, kind, decided_at, download_url, details_url, provider_kind, \
-            published_at, audio_langs_json, subtitle_langs_json, profile_scores_json \
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            release_guid, score, rejected, tags_json, matched_json, seeders, leechers, \
+            size_bytes, resolution, kind, decided_at, download_url, details_url, \
+            provider_kind, published_at, audio_langs_json, subtitle_langs_json, \
+            profile_scores_json \
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(id.to_string())
     .bind(ins.search_id.to_string())
@@ -172,6 +198,7 @@ pub async fn insert(pool: &Pool, ins: DecisionInsert) -> Result<DecisionRow, App
     .bind(&ins.provider_name)
     .bind(&ins.release_name)
     .bind(i64_from_u64(ins.release_id_remote))
+    .bind(&ins.release_guid)
     .bind(i64::from(ins.score))
     .bind(i64::from(u8::from(ins.rejected)))
     .bind(&tags_json)
@@ -199,6 +226,7 @@ pub async fn insert(pool: &Pool, ins: DecisionInsert) -> Result<DecisionRow, App
         provider_name: ins.provider_name,
         release_name: ins.release_name,
         release_id_remote: ins.release_id_remote,
+        release_guid: ins.release_guid,
         score: ins.score,
         rejected: ins.rejected,
         tags: ins.tags,
@@ -227,6 +255,7 @@ pub async fn insert(pool: &Pool, ins: DecisionInsert) -> Result<DecisionRow, App
 pub async fn list_for_search(pool: &Pool, search_id: Uuid) -> Result<Vec<DecisionRow>, AppError> {
     let rows = sqlx::query(
         "SELECT id, search_id, provider_id, provider_name, release_name, release_id_remote, \
+                release_guid, \
                 score, rejected, tags_json, matched_json, seeders, leechers, size_bytes, \
                 resolution, kind, decided_at, download_url, details_url, provider_kind, \
                 published_at, audio_langs_json, subtitle_langs_json, profile_scores_json \
@@ -249,6 +278,7 @@ pub async fn list_for_search(pool: &Pool, search_id: Uuid) -> Result<Vec<Decisio
 pub async fn get_by_id(pool: &Pool, id: Uuid) -> Result<DecisionRow, AppError> {
     let row_opt = sqlx::query(
         "SELECT id, search_id, provider_id, provider_name, release_name, release_id_remote, \
+                release_guid, \
                 score, rejected, tags_json, matched_json, seeders, leechers, size_bytes, \
                 resolution, kind, decided_at, download_url, details_url, provider_kind, \
                 published_at, audio_langs_json, subtitle_langs_json, profile_scores_json \
@@ -276,6 +306,7 @@ pub async fn recent(pool: &Pool, limit: u32) -> Result<Vec<DecisionRow>, AppErro
     };
     let rows = sqlx::query(
         "SELECT id, search_id, provider_id, provider_name, release_name, release_id_remote, \
+                release_guid, \
                 score, rejected, tags_json, matched_json, seeders, leechers, size_bytes, \
                 resolution, kind, decided_at, download_url, details_url, provider_kind, \
                 published_at, audio_langs_json, subtitle_langs_json, profile_scores_json \
@@ -304,6 +335,7 @@ fn row_to_decision(row: &SqliteRow) -> Result<DecisionRow, AppError> {
     };
     let release_id_remote_i64: i64 = row.try_get("release_id_remote")?;
     let release_id_remote = u64_from_i64(release_id_remote_i64);
+    let release_guid: Option<String> = row.try_get("release_guid").ok().flatten();
     let score_i64: i64 = row.try_get("score")?;
     let rejected_i64: i64 = row.try_get("rejected")?;
     let tags_json: String = row.try_get("tags_json")?;
@@ -365,6 +397,7 @@ fn row_to_decision(row: &SqliteRow) -> Result<DecisionRow, AppError> {
         provider_name: row.try_get("provider_name")?,
         release_name: row.try_get("release_name")?,
         release_id_remote,
+        release_guid,
         score: u32::try_from(score_i64).unwrap_or(0),
         rejected: rejected_i64 != 0,
         tags: serde_json::from_str(&tags_json)?,
@@ -452,6 +485,7 @@ mod tests {
             provider_name: "capybara".into(),
             release_name: "The Matrix 1999 1080p BluRay x264".into(),
             release_id_remote: 12345,
+            release_guid: None,
             score,
             rejected: false,
             tags: vec!["PT-BR".into()],

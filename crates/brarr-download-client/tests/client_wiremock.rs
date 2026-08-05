@@ -17,7 +17,7 @@
 
 use brarr_download_client::{
     DownloadClient, DownloadClientConfig, DownloadClientError, DownloadClientKind, Protocol,
-    QbittorrentClient, SabnzbdClient, build,
+    QbittorrentClient, ReleaseFile, SabnzbdClient, build,
 };
 use url::Url;
 use wiremock::matchers::{body_string_contains, method, path, query_param};
@@ -322,6 +322,166 @@ async fn a_dead_host_surfaces_as_transport_not_as_a_bad_password() {
     assert!(
         matches!(err, DownloadClientError::Transport { .. }),
         "got {err:?}"
+    );
+}
+
+/// A minimal but real bencode dictionary — enough that the bytes going
+/// over the wire are recognisably a torrent.
+const TORRENT: &[u8] = b"d8:announce20:https://tracker/anne4:infod4:name9:Matrix.mkveee";
+const NZB: &[u8] =
+    br#"<?xml version="1.0"?><nzb xmlns="http://www.newzbin.com/DTD/2003/nzb"></nzb>"#;
+
+#[tokio::test]
+async fn qbittorrent_uploads_the_torrent_with_its_category() {
+    let server = MockServer::start().await;
+    mount_qb_login(&server).await;
+    Mock::given(method("POST"))
+        .and(path("/api/v2/torrents/add"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("Ok."))
+        .mount(&server)
+        .await;
+
+    let client = QbittorrentClient::new(qb_config(&server, Some("admin"))).unwrap();
+    let added = client
+        .add("Matrix.1999.1080p.BluRay", ReleaseFile::Bytes(TORRENT))
+        .await
+        .unwrap();
+    assert_eq!(
+        added.client_item_id, None,
+        "qBittorrent answers `Ok.` and names nothing"
+    );
+
+    let hits = server.received_requests().await.unwrap();
+    let add = hits
+        .iter()
+        .find(|r| r.url.path() == "/api/v2/torrents/add")
+        .unwrap();
+    let body = String::from_utf8_lossy(&add.body);
+    assert!(body.contains("name=\"torrents\""), "sent as a file part");
+    assert!(body.contains("Matrix.1999.1080p.BluRay.torrent"));
+    assert!(body.contains("8:announce"), "the torrent bytes travel");
+    assert!(body.contains("brarr"), "the configured category is applied");
+    let cookie = add.headers.get("cookie").unwrap().to_str().unwrap();
+    assert_eq!(cookie, format!("SID={SID}"));
+}
+
+#[tokio::test]
+async fn qbittorrent_sends_a_magnet_as_a_url_not_a_file() {
+    let server = MockServer::start().await;
+    mount_qb_login(&server).await;
+    Mock::given(method("POST"))
+        .and(path("/api/v2/torrents/add"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("Ok."))
+        .mount(&server)
+        .await;
+
+    let client = QbittorrentClient::new(qb_config(&server, Some("admin"))).unwrap();
+    client
+        .add("Matrix", ReleaseFile::Magnet("magnet:?xt=urn:btih:abc"))
+        .await
+        .unwrap();
+
+    let hits = server.received_requests().await.unwrap();
+    let add = hits
+        .iter()
+        .find(|r| r.url.path() == "/api/v2/torrents/add")
+        .unwrap();
+    let body = String::from_utf8_lossy(&add.body);
+    assert!(body.starts_with("urls="), "form-encoded, got {body}");
+    assert!(body.contains("magnet"));
+}
+
+#[tokio::test]
+async fn qbittorrent_refusing_a_torrent_in_a_200_is_still_a_failure() {
+    let server = MockServer::start().await;
+    mount_qb_login(&server).await;
+    Mock::given(method("POST"))
+        .and(path("/api/v2/torrents/add"))
+        // The same trap as the login, on the path that matters most:
+        // reporting this as success would mark the grab sent forever.
+        .respond_with(ResponseTemplate::new(200).set_body_string("Fails."))
+        .mount(&server)
+        .await;
+
+    let client = QbittorrentClient::new(qb_config(&server, Some("admin"))).unwrap();
+    let err = client
+        .add("Matrix", ReleaseFile::Bytes(TORRENT))
+        .await
+        .unwrap_err();
+    match err {
+        DownloadClientError::Http { body, .. } => assert_eq!(body, "Fails."),
+        other => panic!("expected the refusal to surface, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn sabnzbd_uploads_the_nzb_and_keeps_the_nzo_id() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api"))
+        .and(query_param("mode", "addfile"))
+        .and(query_param("apikey", SAB_KEY))
+        .and(query_param("cat", "brarr"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "status": true,
+            "nzo_ids": ["SABnzbd_nzo_p86tgx"]
+        })))
+        .mount(&server)
+        .await;
+
+    let client = SabnzbdClient::new(sab_config(&server, SAB_KEY)).unwrap();
+    let added = client
+        .add("Matrix.1999.1080p.WEB-DL", ReleaseFile::Bytes(NZB))
+        .await
+        .unwrap();
+    assert_eq!(
+        added.client_item_id.as_deref(),
+        Some("SABnzbd_nzo_p86tgx"),
+        "the handle exists only at hand-off time — losing it means losing the download"
+    );
+
+    let hits = server.received_requests().await.unwrap();
+    let body = String::from_utf8_lossy(&hits[0].body);
+    assert!(body.contains("name=\"name\""), "the upload field is `name`");
+    assert!(body.contains("Matrix.1999.1080p.WEB-DL.nzb"));
+    assert!(body.contains("newzbin"), "the nzb bytes travel");
+}
+
+#[tokio::test]
+async fn sabnzbd_queuing_nothing_is_not_a_success() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({ "status": true, "nzo_ids": [] })),
+        )
+        .mount(&server)
+        .await;
+
+    let client = SabnzbdClient::new(sab_config(&server, SAB_KEY)).unwrap();
+    let err = client
+        .add("Matrix", ReleaseFile::Bytes(NZB))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, DownloadClientError::Http { .. }),
+        "got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn sabnzbd_refuses_a_magnet_before_touching_the_network() {
+    let server = MockServer::start().await;
+    let client = SabnzbdClient::new(sab_config(&server, SAB_KEY)).unwrap();
+    let err = client
+        .add("Matrix", ReleaseFile::Magnet("magnet:?xt=urn:btih:abc"))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, DownloadClientError::Config { .. }));
+    assert!(
+        server.received_requests().await.unwrap().is_empty(),
+        "no request should have been made"
     );
 }
 

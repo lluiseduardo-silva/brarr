@@ -191,6 +191,33 @@ pub struct ClientStatus {
     pub version: String,
 }
 
+/// The release itself, as handed to [`DownloadClient::add`].
+///
+/// brarr fetches the `.torrent` / `.nzb` rather than passing the
+/// provider URL through for the client to fetch. It costs one request,
+/// and it buys the difference between "the tracker refused brarr's
+/// token" and a torrent that silently sits in the client erroring — the
+/// client would answer `Ok.` either way.
+#[derive(Debug, Clone, Copy)]
+pub enum ReleaseFile<'a> {
+    /// Bytes brarr already fetched and validated.
+    Bytes(&'a [u8]),
+    /// A magnet URI. Nothing to fetch — the client resolves it itself.
+    /// Torrent-only; a Usenet client rejects it.
+    Magnet(&'a str),
+}
+
+/// What the client answered when it accepted a release.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AddedRelease {
+    /// Client-side handle for the download, when the client returns one
+    /// (SABnzbd's `nzo_id`). qBittorrent's add endpoint answers a bare
+    /// `Ok.` with no identifier at all, so `None` here is a normal
+    /// outcome rather than a failure — following that download up means
+    /// listing by category instead.
+    pub client_item_id: Option<String>,
+}
+
 /// Something brarr can hand a release to.
 ///
 /// Two implementations ([`QbittorrentClient`], [`SabnzbdClient`]), which
@@ -213,6 +240,29 @@ pub trait DownloadClient: Send + Sync {
     /// - [`DownloadClientError::Transport`] when the host is unreachable.
     /// - [`DownloadClientError::Http`] on an unexpected status code.
     fn test_connection(&self) -> ClientFuture<'_, Result<ClientStatus, DownloadClientError>>;
+
+    /// Hand a release over to the client to download.
+    ///
+    /// `name` is the release title, used for the upload's file name and
+    /// as the download's display name where the client accepts one. The
+    /// configured [`DownloadClientConfig::category`] is applied here.
+    ///
+    /// Returning `Ok` means the client accepted the release — again, not
+    /// merely that it answered.
+    ///
+    /// # Errors
+    ///
+    /// - [`DownloadClientError::Auth`] when the credentials are refused.
+    /// - [`DownloadClientError::Http`] when the client rejects the file
+    ///   (an invalid torrent, a truncated nzb).
+    /// - [`DownloadClientError::Config`] when the file kind cannot go to
+    ///   this client at all — a magnet handed to SABnzbd.
+    /// - [`DownloadClientError::Transport`] when the host is unreachable.
+    fn add<'a>(
+        &'a self,
+        name: &'a str,
+        file: ReleaseFile<'a>,
+    ) -> ClientFuture<'a, Result<AddedRelease, DownloadClientError>>;
 }
 
 /// Build the client matching `config.kind`.

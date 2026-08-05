@@ -680,7 +680,10 @@ fn build_insert(
     profile_scores: std::collections::HashMap<Uuid, u32>,
 ) -> DecisionInsert {
     // Best-effort parse of the provider-side release id. Falls back to 0
-    // if the source kept the id as a non-numeric string.
+    // if the source kept the id as a non-numeric string — which Newznab
+    // guids always are. `release_guid` carries the untouched form
+    // alongside it; anything that needs a *stable* release key (the grab
+    // barrier) must read that one, not this.
     let release_id_remote = release.tracker_release_id.parse::<u64>().unwrap_or(0);
     DecisionInsert {
         search_id: *search_id,
@@ -688,6 +691,7 @@ fn build_insert(
         provider_name: provider.name.clone(),
         release_name: release.title.clone(),
         release_id_remote,
+        release_guid: Some(release.tracker_release_id.clone()),
         score: outcome.score.get(),
         rejected: outcome.rejected,
         tags: outcome.tags.clone(),

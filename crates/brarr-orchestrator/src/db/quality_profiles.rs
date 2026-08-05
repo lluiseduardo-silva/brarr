@@ -40,6 +40,25 @@ pub struct QualityProfileRow {
     pub created_at: OffsetDateTime,
 }
 
+/// Score a decision carries **under one profile**.
+///
+/// `profile_scores` is filled at search time by evaluating the release
+/// against every profile that existed then, so a row can predate a
+/// profile (or predate the column). Those fall back to the baseline
+/// engine's score, which is the only number they have.
+///
+/// Shared by the two surfaces that gate on a profile — the Torznab
+/// feed's `?profile=` pre-filter and the scanner's pick — so the two can
+/// never drift into judging the same release differently.
+#[must_use]
+pub fn effective_score<S: std::hash::BuildHasher>(
+    profile_scores: &std::collections::HashMap<Uuid, u32, S>,
+    baseline: u32,
+    profile_id: Uuid,
+) -> u32 {
+    profile_scores.get(&profile_id).copied().unwrap_or(baseline)
+}
+
 /// Bundle of values used to create a new profile.
 #[derive(Debug, Clone)]
 pub struct NewQualityProfile<'a> {

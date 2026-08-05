@@ -30,15 +30,15 @@ use url::Url;
 
 use crate::error::truncate_body;
 use crate::{
-    ClientFuture, ClientStatus, DownloadClient, DownloadClientConfig, DownloadClientError,
-    DownloadClientKind, endpoint,
+    AddedRelease, ClientFuture, ClientStatus, DownloadClient, DownloadClientConfig,
+    DownloadClientError, DownloadClientKind, ReleaseFile, endpoint,
 };
 
 /// The kind every error in this module carries.
 const KIND: DownloadClientKind = DownloadClientKind::Qbittorrent;
 
-/// qBittorrent answers its login POST with one of these two literals,
-/// status `200` either way.
+/// qBittorrent's affirmative answer, used for both `auth/login` and
+/// `torrents/add`. The negative is `Fails.` — status `200` either way.
 const LOGIN_OK: &str = "Ok.";
 
 /// HTTP client for one qBittorrent instance.
@@ -159,16 +159,17 @@ impl QbittorrentClient {
         *self.session.lock().await = None;
     }
 
-    /// One GET, returning `(status, body)` without interpreting either.
-    async fn send_get(
+    /// Send one request, returning `(status, body)` without interpreting
+    /// either.
+    async fn send(
         &self,
-        url: Url,
+        req: reqwest::RequestBuilder,
         sid: Option<&str>,
     ) -> Result<(u16, String), DownloadClientError> {
-        let mut req = self.http.get(url);
-        if let Some(sid) = sid {
-            req = req.header(reqwest::header::COOKIE, format!("SID={sid}"));
-        }
+        let req = match sid {
+            Some(sid) => req.header(reqwest::header::COOKIE, format!("SID={sid}")),
+            None => req,
+        };
         let resp = req
             .send()
             .await
@@ -181,12 +182,19 @@ impl QbittorrentClient {
         Ok((status, body))
     }
 
-    /// Authenticated GET returning the body as text, retrying once
-    /// through a fresh login when the session has expired.
-    async fn authorized_get(&self, path: &str) -> Result<String, DownloadClientError> {
-        let url = endpoint(&self.config.base_url, path)?;
+    /// Run an authenticated request, retrying once through a fresh login
+    /// when the session has expired.
+    ///
+    /// `build` is a closure rather than a prepared request because the
+    /// retry has to construct a second one: a multipart body is consumed
+    /// on send and `reqwest::RequestBuilder` is not cloneable once it
+    /// carries one.
+    async fn authorized_send<F>(&self, build: F) -> Result<String, DownloadClientError>
+    where
+        F: Fn(&HttpClient) -> reqwest::RequestBuilder,
+    {
         let sid = self.session_id().await?;
-        let (status, body) = self.send_get(url.clone(), sid.as_deref()).await?;
+        let (status, body) = self.send(build(&self.http), sid.as_deref()).await?;
 
         let (status, body) = if status == 403 && sid.is_some() {
             debug!(
@@ -196,7 +204,7 @@ impl QbittorrentClient {
             );
             self.invalidate_session().await;
             let fresh = self.session_id().await?;
-            self.send_get(url, fresh.as_deref()).await?
+            self.send(build(&self.http), fresh.as_deref()).await?
         } else {
             (status, body)
         };
@@ -217,6 +225,54 @@ impl QbittorrentClient {
         }
         Ok(body)
     }
+
+    /// Authenticated GET returning the body as text.
+    async fn authorized_get(&self, path: &str) -> Result<String, DownloadClientError> {
+        let url = endpoint(&self.config.base_url, path)?;
+        self.authorized_send(|http| http.get(url.clone())).await
+    }
+
+    /// Build the `torrents/add` request for one release.
+    ///
+    /// Two shapes, because qBittorrent takes the two sources on
+    /// different fields: a magnet goes in the `urls` form field, a
+    /// `.torrent` as a `torrents` file part.
+    fn build_add(
+        &self,
+        http: &HttpClient,
+        url: &Url,
+        name: &str,
+        file: ReleaseFile<'_>,
+    ) -> reqwest::RequestBuilder {
+        let category = self.config.category.clone().unwrap_or_default();
+        match file {
+            ReleaseFile::Magnet(uri) => http.post(url.clone()).form(&[
+                ("urls", uri),
+                ("category", category.as_str()),
+                ("paused", "false"),
+            ]),
+            ReleaseFile::Bytes(bytes) => {
+                // Rebuilt per attempt: `Part::bytes` takes ownership and
+                // the form is consumed on send, so the 403 retry cannot
+                // reuse the first one.
+                let part = reqwest::multipart::Part::bytes(bytes.to_vec())
+                    .file_name(format!("{name}.torrent"))
+                    .mime_str("application/x-bittorrent")
+                    // The MIME string is a literal, so this cannot fail;
+                    // falling back to the un-typed part keeps the
+                    // no-unwrap rule without inventing an error path.
+                    .unwrap_or_else(|_| {
+                        reqwest::multipart::Part::bytes(bytes.to_vec())
+                            .file_name(format!("{name}.torrent"))
+                    });
+                let form = reqwest::multipart::Form::new()
+                    .part("torrents", part)
+                    .text("category", category)
+                    .text("paused", "false");
+                http.post(url.clone()).multipart(form)
+            }
+        }
+    }
 }
 
 impl DownloadClient for QbittorrentClient {
@@ -234,6 +290,34 @@ impl DownloadClient for QbittorrentClient {
             let version = self.authorized_get("api/v2/app/version").await?;
             Ok(ClientStatus {
                 version: version.trim().to_owned(),
+            })
+        })
+    }
+
+    fn add<'a>(
+        &'a self,
+        name: &'a str,
+        file: ReleaseFile<'a>,
+    ) -> ClientFuture<'a, Result<AddedRelease, DownloadClientError>> {
+        Box::pin(async move {
+            let url = endpoint(&self.config.base_url, "api/v2/torrents/add")?;
+            let body = self
+                .authorized_send(|http| self.build_add(http, &url, name, file))
+                .await?;
+            // Same trap as the login: a refused torrent comes back as
+            // `Fails.` with HTTP 200. (A malformed file is one of the few
+            // things qBittorrent does answer 415 to, which the status
+            // check above already catches.)
+            if !body.trim().eq_ignore_ascii_case(LOGIN_OK) {
+                return Err(DownloadClientError::Http {
+                    kind: KIND,
+                    status: 200,
+                    body: truncate_body(body.trim()),
+                });
+            }
+            // qBittorrent returns no handle for what it just accepted.
+            Ok(AddedRelease {
+                client_item_id: None,
             })
         })
     }

@@ -23,8 +23,8 @@ use url::Url;
 
 use crate::error::truncate_body;
 use crate::{
-    ClientFuture, ClientStatus, DownloadClient, DownloadClientConfig, DownloadClientError,
-    DownloadClientKind, endpoint,
+    AddedRelease, ClientFuture, ClientStatus, DownloadClient, DownloadClientConfig,
+    DownloadClientError, DownloadClientKind, ReleaseFile, endpoint,
 };
 
 /// The kind every error in this module carries.
@@ -55,6 +55,9 @@ struct SabEnvelope {
     /// Payload of `mode=version`.
     #[serde(default)]
     version: Option<String>,
+    /// Payload of `mode=addfile` — one entry per accepted nzb.
+    #[serde(default)]
+    nzo_ids: Option<Vec<String>>,
 }
 
 /// The slice of the queue payload this crate reads. SABnzbd returns
@@ -123,17 +126,25 @@ impl SabnzbdClient {
     /// converted here so callers never see a `status: false` body.
     async fn call(&self, params: &[(&str, &str)]) -> Result<SabEnvelope, DownloadClientError> {
         let url = self.api_url(params)?;
+        self.send(self.http.get(url), params).await
+    }
+
+    /// Shared tail of every call: run the request, reject a non-2xx, then
+    /// look inside the body for the refusals SABnzbd delivers with a
+    /// `200`.
+    async fn send(
+        &self,
+        req: reqwest::RequestBuilder,
+        params: &[(&str, &str)],
+    ) -> Result<SabEnvelope, DownloadClientError> {
         debug!(
             target: "brarr_download_client",
             name = %self.config.name,
             // Deliberately not the full URL: the apikey lives in the query.
-            path = url.path(),
             mode = params.first().map(|(_, v)| *v).unwrap_or_default(),
             "sabnzbd call"
         );
-        let resp = self
-            .http
-            .get(url)
+        let resp = req
             .send()
             .await
             .map_err(|source| DownloadClientError::Transport { kind: KIND, source })?;
@@ -188,6 +199,66 @@ impl DownloadClient for SabnzbdClient {
             Ok(ClientStatus {
                 version: fallback.version.unwrap_or_default(),
             })
+        })
+    }
+
+    fn add<'a>(
+        &'a self,
+        name: &'a str,
+        file: ReleaseFile<'a>,
+    ) -> ClientFuture<'a, Result<AddedRelease, DownloadClientError>> {
+        Box::pin(async move {
+            let ReleaseFile::Bytes(bytes) = file else {
+                // Unreachable through the scanner — a magnet only ever
+                // comes off a torrent provider, and those route to the
+                // torrent client. Worth an explicit error rather than a
+                // confusing upload failure if a caller gets it wrong.
+                return Err(DownloadClientError::Config {
+                    kind: KIND,
+                    detail: "SABnzbd é usenet e não aceita magnet".to_owned(),
+                });
+            };
+            let mut params: Vec<(&str, &str)> = vec![("mode", "addfile"), ("nzbname", name)];
+            if let Some(category) = self
+                .config
+                .category
+                .as_deref()
+                .map(str::trim)
+                .filter(|c| !c.is_empty())
+            {
+                params.push(("cat", category));
+            }
+            let url = self.api_url(&params)?;
+            // The upload field is literally called `name`; SABnzbd reads
+            // the nzb out of it and takes the display name from the
+            // `nzbname` query parameter above.
+            let part = reqwest::multipart::Part::bytes(bytes.to_vec())
+                .file_name(format!("{name}.nzb"))
+                .mime_str("application/x-nzb")
+                .unwrap_or_else(|_| {
+                    reqwest::multipart::Part::bytes(bytes.to_vec()).file_name(format!("{name}.nzb"))
+                });
+            let form = reqwest::multipart::Form::new().part("name", part);
+            let envelope = self
+                .send(self.http.post(url).multipart(form), &params)
+                .await?;
+            // An accepted upload always names what it created; an empty
+            // list means SABnzbd took the request and queued nothing.
+            let client_item_id = envelope
+                .nzo_ids
+                .unwrap_or_default()
+                .into_iter()
+                .next()
+                .filter(|id| !id.is_empty());
+            if client_item_id.is_none() {
+                return Err(DownloadClientError::Http {
+                    kind: KIND,
+                    status: 200,
+                    body: "SABnzbd aceitou a chamada mas não enfileirou nada (nzo_ids vazio)"
+                        .to_owned(),
+                });
+            }
+            Ok(AddedRelease { client_item_id })
         })
     }
 }

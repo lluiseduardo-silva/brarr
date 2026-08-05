@@ -84,6 +84,19 @@
                     </select>
                 </form>
 
+                {# Same sweep the scheduler runs, minus the per-cycle cap
+                   — the operator asked for this title specifically. The
+                   verdict lands in the badge next to it. #}
+                <button hx-post="/library/{{ item.id }}/scan"
+                        hx-target="#scan-{{ item.id }}"
+                        hx-swap="outerHTML"
+                        hx-indicator="#scan-{{ item.id }}"
+                        title="Busca em todos os providers, aplica o perfil e entrega ao cliente de download"
+                        class="px-4 h-9 rounded-md text-sm font-medium bg-accent-soft text-accent-soft-fg">
+                    buscar agora
+                </button>
+                <span id="scan-{{ item.id }}" class="text-xs italic text-fg-muted"></span>
+
                 <div class="flex-1"></div>
 
                 <form method="post" action="/library/{{ item.id }}/refresh" class="contents">

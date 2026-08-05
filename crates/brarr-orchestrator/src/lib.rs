@@ -52,12 +52,14 @@
 
 pub mod auth;
 pub mod db;
+pub mod deliver;
 pub mod error;
 pub mod grpc;
 pub mod maintenance;
 pub mod poll;
 pub mod provider_cache;
 pub mod push;
+pub mod scan;
 pub mod search;
 pub mod state;
 pub mod tmdb_sync;

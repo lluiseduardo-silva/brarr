@@ -150,6 +150,109 @@ fn first_row_id(body: &str, prefix: &str) -> String {
 }
 
 #[tokio::test]
+async fn scan_now_reports_that_nothing_was_found() {
+    use brarr_orchestrator::db::library::{self, MediaType, NewLibraryItem};
+
+    let (addr, state) = spawn().await;
+    let item = library::upsert(
+        state.pool(),
+        &NewLibraryItem {
+            media_type: Some(MediaType::Movie),
+            tmdb_id: 603,
+            title: "The Matrix".to_owned(),
+            ..NewLibraryItem::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    // No providers configured, so the search fans out to nobody.
+    let resp = reqwest::Client::new()
+        .post(format!("http://{addr}/library/{}/scan", item.id))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 200);
+    let badge = resp.text().await.unwrap();
+    assert!(badge.contains("nada encontrado"), "badge = {badge}");
+    assert!(
+        badge.contains("bg-danger-soft"),
+        "the badge carries defined colours, badge = {badge}"
+    );
+
+    // And nothing was reserved — a sweep that finds nothing must not
+    // leave a grab behind that would keep the item out of later sweeps.
+    let grabs = brarr_orchestrator::db::grabs::for_item(state.pool(), item.id)
+        .await
+        .unwrap();
+    assert!(grabs.is_empty());
+}
+
+#[tokio::test]
+async fn scan_now_says_so_when_a_grab_already_covers_the_item() {
+    use brarr_orchestrator::db::grabs::{self, NewGrab, Protocol};
+    use brarr_orchestrator::db::library::{self, MediaType, NewLibraryItem};
+    use brarr_orchestrator::db::providers::{self, NewProvider};
+
+    let (addr, state) = spawn().await;
+    let item = library::upsert(
+        state.pool(),
+        &NewLibraryItem {
+            media_type: Some(MediaType::Movie),
+            tmdb_id: 603,
+            title: "The Matrix".to_owned(),
+            ..NewLibraryItem::default()
+        },
+    )
+    .await
+    .unwrap();
+    let provider = providers::insert(
+        state.pool(),
+        NewProvider {
+            name: "capybara",
+            base_url: &url::Url::parse("https://capybarabr.com/").unwrap(),
+            api_token: "tok",
+            kind: "unit3d",
+            plugin_path: None,
+        },
+    )
+    .await
+    .unwrap();
+    grabs::reserve(
+        state.pool(),
+        &NewGrab {
+            item_id: item.id,
+            episode_id: None,
+            season_number: None,
+            decision_id: None,
+            provider_id: provider.id,
+            provider_name: "capybara",
+            release_id_remote: "abc",
+            release_name: "Matrix.1999.1080p",
+            download_url: None,
+            protocol: Protocol::Torrent,
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    let badge = reqwest::Client::new()
+        .post(format!("http://{addr}/library/{}/scan", item.id))
+        .send()
+        .await
+        .expect("send")
+        .text()
+        .await
+        .unwrap();
+    assert!(badge.contains("já coberto"), "badge = {badge}");
+    assert!(
+        badge.contains("bg-success-soft"),
+        "already covered is a fine outcome, not an error: {badge}"
+    );
+}
+
+#[tokio::test]
 async fn download_clients_index_renders_empty_state() {
     let (addr, _state) = spawn().await;
     let resp = reqwest::get(format!("http://{addr}/download-clients"))
@@ -814,6 +917,7 @@ async fn decisions_push_records_transport_failure_against_dead_arr() {
             provider_name: "p".into(),
             release_name: "Matrix.1999.1080p-FOO".into(),
             release_id_remote: 1,
+            release_guid: None,
             score: 800,
             rejected: false,
             tags: vec![],

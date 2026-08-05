@@ -126,6 +126,23 @@ impl GrabStatus {
     pub fn is_active(self) -> bool {
         matches!(self, Self::Reserved | Self::Sent | Self::Downloading)
     }
+
+    /// Whether a grab in this state means "this item is taken care of",
+    /// so the scanner must not search for it again.
+    ///
+    /// This is brarr's answer to "do I already have the file?" — the
+    /// operator chose to infer it from the acquisition record rather
+    /// than by scanning the disk, which is the phase-2 import's job.
+    /// Everything except the two terminal failures counts: `failed` and
+    /// `rejected` are exactly the states where trying again is right.
+    ///
+    /// Known limitation, accepted deliberately: a file deleted outside
+    /// brarr leaves an `imported` grab behind, and the item stays out of
+    /// the queue until that row is removed.
+    #[must_use]
+    pub fn blocks_search(self) -> bool {
+        !matches!(self, Self::Failed | Self::Rejected)
+    }
 }
 
 /// One acquisition attempt.
@@ -154,6 +171,14 @@ pub struct Grab {
     pub download_url: Option<String>,
     /// Transport.
     pub protocol: Protocol,
+    /// Download client the release was handed to. `None` before the
+    /// hand-off, and after the client row is deleted (`ON DELETE SET
+    /// NULL` — the history outlives the client).
+    pub client_id: Option<Uuid>,
+    /// Handle the client answered with, when it gives one (SABnzbd's
+    /// `nzo_id`). qBittorrent answers a bare `Ok.`, so `None` there is
+    /// normal rather than a failure.
+    pub client_item_id: Option<String>,
     /// Lifecycle position.
     pub status: GrabStatus,
     /// Failure reason when [`GrabStatus::Failed`].
@@ -192,7 +217,7 @@ pub struct NewGrab<'a> {
 
 const GRAB_COLUMNS: &str = "id, item_id, episode_id, season_number, decision_id, provider_id, \
      provider_name, release_id_remote, release_name, download_url, protocol, \
-     status, error, grabbed_at, updated_at";
+     client_id, client_item_id, status, error, grabbed_at, updated_at";
 
 fn opt_uuid_at(row: &SqliteRow, col: &str) -> Result<Option<Uuid>, AppError> {
     let raw: Option<String> = row.try_get(col)?;
@@ -229,6 +254,8 @@ fn row_to_grab(row: &SqliteRow) -> Result<Grab, AppError> {
         release_name: row.try_get("release_name")?,
         download_url: row.try_get("download_url")?,
         protocol: Protocol::from_label(&protocol_raw)?,
+        client_id: opt_uuid_at(row, "client_id")?,
+        client_item_id: row.try_get("client_item_id")?,
         status: GrabStatus::from_label(&status_raw)?,
         error: row.try_get("error")?,
         grabbed_at: OffsetDateTime::from_unix_timestamp(grabbed)
@@ -368,6 +395,68 @@ pub async fn active_for_item(pool: &Pool, item_id: Uuid) -> Result<Vec<Grab>, Ap
     .fetch_all(pool)
     .await?;
     rows.iter().map(row_to_grab).collect()
+}
+
+/// Grabs that keep the scanner away from an item — see
+/// [`GrabStatus::blocks_search`]. Movie-level: pass `episode_id = None`
+/// to ask "is this whole item taken care of", or `Some(id)` to ask about
+/// one episode.
+///
+/// A movie-level grab (`episode_id IS NULL`) blocks the episode query
+/// too: a season pack or a full-series grab covers the episode even
+/// though no row names it.
+///
+/// # Errors
+///
+/// Returns [`AppError::Database`] on SQL failure.
+pub async fn blocking_for(
+    pool: &Pool,
+    item_id: Uuid,
+    episode_id: Option<Uuid>,
+) -> Result<Vec<Grab>, AppError> {
+    let rows = sqlx::query(&format!(
+        "SELECT {GRAB_COLUMNS} FROM grabs \
+         WHERE item_id = ? AND status NOT IN ('failed', 'rejected') \
+           AND (episode_id IS NULL OR episode_id IS ?) \
+         ORDER BY grabbed_at DESC"
+    ))
+    .bind(item_id.to_string())
+    .bind(episode_id.map(|e| e.to_string()))
+    .fetch_all(pool)
+    .await?;
+    rows.iter().map(row_to_grab).collect()
+}
+
+/// Record a successful hand-off: the client accepted the release.
+///
+/// `client_item_id` is the handle the client answered with when it gives
+/// one (SABnzbd's `nzo_id`); qBittorrent returns none, so `None` is a
+/// normal outcome, not a failure.
+///
+/// # Errors
+///
+/// - [`AppError::NotFound`] when the id is absent.
+/// - [`AppError::Database`] on SQL failure.
+pub async fn mark_sent(
+    pool: &Pool,
+    id: Uuid,
+    client_id: Uuid,
+    client_item_id: Option<&str>,
+) -> Result<(), AppError> {
+    let res = sqlx::query(
+        "UPDATE grabs SET status = 'sent', error = NULL, client_id = ?, \
+         client_item_id = ?, updated_at = ? WHERE id = ?",
+    )
+    .bind(client_id.to_string())
+    .bind(client_item_id)
+    .bind(OffsetDateTime::now_utc().unix_timestamp())
+    .bind(id.to_string())
+    .execute(pool)
+    .await?;
+    if res.rows_affected() == 0 {
+        return Err(AppError::NotFound(format!("grab {id}")));
+    }
+    Ok(())
 }
 
 /// Every grab for an item, newest first.
@@ -718,6 +807,186 @@ mod tests {
             get_by_id(&pool, grab.id).await.unwrap().error.is_none(),
             "a stale message must not follow the grab into a retry"
         );
+    }
+
+    #[tokio::test]
+    async fn only_the_terminal_failures_let_the_scanner_back_in() {
+        let pool = open_memory().await.unwrap();
+        let (item_id, provider_id) = fixture(&pool).await;
+        let grab = reserve(&pool, &new_grab(item_id, provider_id, "abc"))
+            .await
+            .unwrap()
+            .unwrap();
+
+        // Everything up to and including `imported` means "taken care
+        // of" — that is brarr's whole answer to "do I have this?".
+        for status in [
+            GrabStatus::Reserved,
+            GrabStatus::Sent,
+            GrabStatus::Downloading,
+            GrabStatus::Completed,
+            GrabStatus::Imported,
+        ] {
+            set_status(&pool, grab.id, status, None).await.unwrap();
+            assert!(
+                !blocking_for(&pool, item_id, None).await.unwrap().is_empty(),
+                "{} must keep the item out of the sweep",
+                status.label()
+            );
+        }
+        for status in [GrabStatus::Failed, GrabStatus::Rejected] {
+            set_status(&pool, grab.id, status, None).await.unwrap();
+            assert!(
+                blocking_for(&pool, item_id, None).await.unwrap().is_empty(),
+                "{} is exactly when trying again is right",
+                status.label()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_item_level_grab_covers_an_episode_query_too() {
+        let pool = open_memory().await.unwrap();
+        let (_, provider_id) = fixture(&pool).await;
+        let series = library::upsert(
+            &pool,
+            &NewLibraryItem {
+                media_type: Some(MediaType::Tv),
+                tmdb_id: 76479,
+                title: "The Boys".to_owned(),
+                ..NewLibraryItem::default()
+            },
+        )
+        .await
+        .unwrap();
+        library::sync_seasons(
+            &pool,
+            series.id,
+            &[NewSeason {
+                season_number: 4,
+                episode_count: 2,
+                air_date: None,
+                episodes: vec![
+                    NewEpisode {
+                        episode_number: 1,
+                        title: None,
+                        air_date: None,
+                    },
+                    NewEpisode {
+                        episode_number: 2,
+                        title: None,
+                        air_date: None,
+                    },
+                ],
+            }],
+        )
+        .await
+        .unwrap();
+        let eps = library::episodes(&pool, series.id).await.unwrap();
+
+        // A grab with no episode named — a season pack, or a whole-series
+        // acquisition — covers every episode under it.
+        reserve(&pool, &new_grab(series.id, provider_id, "pack"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            !blocking_for(&pool, series.id, Some(eps[0].id))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        // …while an episode-level grab is specific to its episode.
+        let pool2 = open_memory().await.unwrap();
+        let (_, provider2) = fixture(&pool2).await;
+        let series2 = library::upsert(
+            &pool2,
+            &NewLibraryItem {
+                media_type: Some(MediaType::Tv),
+                tmdb_id: 76479,
+                title: "The Boys".to_owned(),
+                ..NewLibraryItem::default()
+            },
+        )
+        .await
+        .unwrap();
+        library::sync_seasons(
+            &pool2,
+            series2.id,
+            &[NewSeason {
+                season_number: 4,
+                episode_count: 2,
+                air_date: None,
+                episodes: vec![
+                    NewEpisode {
+                        episode_number: 1,
+                        title: None,
+                        air_date: None,
+                    },
+                    NewEpisode {
+                        episode_number: 2,
+                        title: None,
+                        air_date: None,
+                    },
+                ],
+            }],
+        )
+        .await
+        .unwrap();
+        let eps2 = library::episodes(&pool2, series2.id).await.unwrap();
+        let mut only_first = new_grab(series2.id, provider2, "ep1");
+        only_first.episode_id = Some(eps2[0].id);
+        reserve(&pool2, &only_first).await.unwrap().unwrap();
+        assert!(
+            !blocking_for(&pool2, series2.id, Some(eps2[0].id))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            blocking_for(&pool2, series2.id, Some(eps2[1].id))
+                .await
+                .unwrap()
+                .is_empty(),
+            "the next episode is still wanted"
+        );
+    }
+
+    #[tokio::test]
+    async fn mark_sent_records_who_took_it() {
+        let pool = open_memory().await.unwrap();
+        let (item_id, provider_id) = fixture(&pool).await;
+        let grab = reserve(&pool, &new_grab(item_id, provider_id, "abc"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(grab.client_id.is_none());
+
+        let client = crate::db::download_clients::insert(
+            &pool,
+            crate::db::download_clients::NewDownloadClient {
+                name: "qb",
+                kind: brarr_download_client::DownloadClientKind::Qbittorrent,
+                base_url: &url::Url::parse("http://10.0.1.246:8080/").unwrap(),
+                username: None,
+                password: None,
+                api_key: None,
+                category: None,
+                priority: None,
+                enabled: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        mark_sent(&pool, grab.id, client.id, Some("SABnzbd_nzo_x"))
+            .await
+            .unwrap();
+        let after = get_by_id(&pool, grab.id).await.unwrap();
+        assert_eq!(after.status, GrabStatus::Sent);
+        assert_eq!(after.client_id, Some(client.id));
+        assert_eq!(after.client_item_id.as_deref(), Some("SABnzbd_nzo_x"));
     }
 
     #[tokio::test]

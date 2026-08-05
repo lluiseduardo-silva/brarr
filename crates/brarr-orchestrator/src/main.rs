@@ -54,7 +54,7 @@ use brarr_orchestrator::db::settings::{
 };
 use brarr_orchestrator::state::{LogReloader, RuntimeConfig};
 use brarr_orchestrator::{
-    AppState, AuthConfig, BypassConfig, TrustedPeers, db, grpc, maintenance, poll, web,
+    AppState, AuthConfig, BypassConfig, TrustedPeers, db, grpc, maintenance, poll, scan, web,
 };
 use tracing::warn;
 use tracing_subscriber::layer::SubscriberExt;
@@ -217,6 +217,11 @@ async fn main() -> Result<()> {
     // Long-lived db janitor. Same fire-and-forget contract as the poller:
     // prunes history past the retention window and reclaims space.
     let _maint_handle = maintenance::spawn(state.clone());
+    // Long-lived library scanner — brarr's own answer to "what am I
+    // missing", replacing the *arr's. Same contract again. It no-ops
+    // while no download client is configured, so a deployment that
+    // hasn't set one up sees no change in behaviour.
+    let _scan_handle = scan::spawn(state.clone());
 
     tokio::select! {
         res = web_task => res.context("web task panicked")?.context("web server")?,

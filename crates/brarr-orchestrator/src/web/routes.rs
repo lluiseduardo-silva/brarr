@@ -121,6 +121,7 @@ pub fn router(state: AppState, static_dir: &std::path::Path) -> Router {
         .route("/library/{id}/monitor", post(library_toggle_monitor))
         .route("/library/{id}/profile", post(library_set_profile))
         .route("/library/{id}/refresh", post(library_refresh))
+        .route("/library/{id}/scan", post(library_scan_now))
         .route("/library/{id}/season/{season_id}", get(library_season))
         .route(
             "/library/{id}/season/{season_id}/monitor",
@@ -1434,6 +1435,93 @@ async fn library_refresh(
     let tmdb = crate::tmdb_sync::client(state.pool()).await?;
     crate::tmdb_sync::refresh(state.pool(), &tmdb, uuid).await?;
     Ok(Redirect::to(&format!("/library/{id}")).into_response())
+}
+
+/// How long the "buscar agora" request waits for its own sweep before
+/// answering "still running".
+///
+/// The sweep is spawned rather than awaited inline, and the wait is on
+/// its `JoinHandle`, so a timeout here reports without cancelling
+/// anything. A movie is one search and lands well inside the window; a
+/// series is one search *per aired episode* — The Boys is 40 — and
+/// holding an HTTP request open for that long would just hit the
+/// browser's own timeout with nothing to show.
+const MANUAL_SCAN_WAIT: Duration = Duration::from_secs(10);
+
+/// `POST /library/{id}/scan` — "buscar agora" for one item.
+///
+/// Runs the same sweep the scheduler runs, minus the per-cycle cap: the
+/// operator asked for this title specifically. Answers a small badge
+/// with the counts so the detail page can report without a reload;
+/// clicking it again after a grab lands is a no-op, because the grab now
+/// covers the item.
+async fn library_scan_now(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, AppError> {
+    let uuid = Uuid::parse_str(&id)
+        .map_err(|e| AppError::InvalidInput(format!("invalid library id: {e}")))?;
+    let item = library::get_by_id(state.pool(), uuid).await?;
+
+    let task_state = state.clone();
+    let handle =
+        tokio::spawn(async move { crate::scan::run_once_for_item(&task_state, &item).await });
+    let summary = match tokio::time::timeout(MANUAL_SCAN_WAIT, handle).await {
+        Ok(Ok(Ok(summary))) => summary,
+        Ok(Ok(Err(e))) => return Err(e),
+        Ok(Err(join)) => {
+            return Err(AppError::InvalidInput(format!("busca falhou: {join}")));
+        }
+        Err(_elapsed) => {
+            // The task owns itself now; it keeps going and its results
+            // land in the item's grab history.
+            let badge = PingBadge {
+                ok: true,
+                label: "em andamento".to_string(),
+                detail: "a busca continua rodando em segundo plano; recarregue a página para ver os grabs".to_string(),
+            };
+            return Ok(html_string(render_status_badge(
+                &format!("scan-{uuid}"),
+                &badge,
+            )));
+        }
+    };
+
+    let badge = if summary.grabbed > 0 {
+        PingBadge {
+            ok: true,
+            label: format!("{} grab(s)", summary.grabbed),
+            detail: format!("{} alvo(s), {} busca(s)", summary.targets, summary.searches),
+        }
+    } else if let Some((target, reason)) = summary.failures.first() {
+        PingBadge {
+            ok: false,
+            label: "erro".to_string(),
+            detail: format!("{target}: {reason}"),
+        }
+    } else if summary.skipped_covered > 0 && summary.searches == 0 {
+        PingBadge {
+            ok: true,
+            label: "já coberto".to_string(),
+            detail: format!(
+                "{} alvo(s) já têm grab; nada a buscar",
+                summary.skipped_covered
+            ),
+        }
+    } else {
+        PingBadge {
+            ok: false,
+            label: "nada encontrado".to_string(),
+            detail: format!(
+                "{} busca(s), nenhuma release passou do threshold do perfil",
+                summary.searches
+            ),
+        }
+    };
+    Ok(html_string(render_status_badge(
+        &format!("scan-{uuid}"),
+        &badge,
+    )))
 }
 
 /// Empty 200 carrying `HX-Refresh`, which makes HTMX reload the page.

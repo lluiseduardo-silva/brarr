@@ -98,6 +98,32 @@ pub async fn create(pool: &Pool, request: SearchRequestJson) -> Result<SearchRow
     })
 }
 
+/// Tie a search back to the catalogue entry that triggered it.
+///
+/// Set by the scanner; ad-hoc searches from the admin UI, the CLI and
+/// the *arr feeds leave the column NULL, which is what "nobody asked for
+/// this on behalf of a library item" means.
+///
+/// # Errors
+///
+/// - [`AppError::NotFound`] when no search matches `id`.
+/// - [`AppError::Database`] on SQL failure.
+pub async fn attach_library_item(
+    pool: &Pool,
+    id: Uuid,
+    library_item_id: Uuid,
+) -> Result<(), AppError> {
+    let res = sqlx::query("UPDATE searches SET library_item_id = ? WHERE id = ?")
+        .bind(library_item_id.to_string())
+        .bind(id.to_string())
+        .execute(pool)
+        .await?;
+    if res.rows_affected() == 0 {
+        return Err(AppError::NotFound(format!("search {id}")));
+    }
+    Ok(())
+}
+
 /// Update `result_count` after the search pipeline finished persisting
 /// its decision rows.
 ///
@@ -642,6 +668,7 @@ mod tests {
                 provider_name: "p".to_string(),
                 release_name: "r".to_string(),
                 release_id_remote: 1,
+                release_guid: None,
                 score: 800,
                 rejected: false,
                 tags: Vec::new(),
@@ -672,6 +699,7 @@ mod tests {
                 provider_name: "p".to_string(),
                 release_name: "r".to_string(),
                 release_id_remote: 2,
+                release_guid: None,
                 score: 0,
                 rejected: true,
                 tags: Vec::new(),

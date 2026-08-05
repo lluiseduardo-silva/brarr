@@ -1,0 +1,31 @@
+-- Two columns the scanner needs before it can take a reservation.
+--
+-- 1. `decisions.release_guid`
+--
+-- The idempotency barrier keys on `(provider, release, item[, episode])`,
+-- and the release half has to be *stable across searches* — the same
+-- release found again tomorrow must produce the same key, or the barrier
+-- lets the second grab through.
+--
+-- `decisions.release_id_remote` cannot serve: it is INTEGER, and
+-- `search.rs` fills it with `tracker_release_id.parse::<u64>()
+-- .unwrap_or(0)`. Newznab guids are not numeric, so every Newznab
+-- release in the table collapsed onto 0 — the exact defect the `grabs`
+-- schema notes call out, still live on the decisions side.
+--
+-- This adds the untouched provider-side string alongside it rather than
+-- rewriting the numeric column: an ALTER cannot change a column type in
+-- SQLite, the numeric id is what the UI deep-links with, and legacy rows
+-- have nothing to backfill from. NULL means "row predates this column";
+-- the scanner falls back to the numeric form for those.
+ALTER TABLE decisions ADD COLUMN release_guid TEXT;
+
+-- 2. `grabs.client_item_id`
+--
+-- The handle the download client answers with when it accepts a release
+-- (SABnzbd returns `nzo_ids`). It exists only at hand-off time, so not
+-- storing it means losing it: following the download afterwards would
+-- have nothing to correlate against. qBittorrent's add endpoint answers
+-- a bare `Ok.` with no id, so this stays NULL there — the category plus
+-- the release name are the only handle that side gives us today.
+ALTER TABLE grabs ADD COLUMN client_item_id TEXT;

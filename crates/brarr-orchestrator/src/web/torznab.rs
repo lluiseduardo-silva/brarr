@@ -638,7 +638,7 @@ fn score_passes(
     baseline: u32,
     pf: &ProfileFilter,
 ) -> bool {
-    profile_scores.get(&pf.id).copied().unwrap_or(baseline) >= pf.threshold
+    crate::db::quality_profiles::effective_score(profile_scores, baseline, pf.id) >= pf.threshold
 }
 
 async fn handle_movie(
