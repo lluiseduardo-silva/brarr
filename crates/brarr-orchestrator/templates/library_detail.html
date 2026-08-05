@@ -111,6 +111,33 @@
 
                 <div class="flex-1"></div>
 
+                <form hx-get="/library/{{ item.id }}/interactive"
+                      hx-target="#interactive-results"
+                      hx-swap="outerHTML"
+                      hx-indicator="#interactive-results"
+                      class="flex items-center gap-2">
+                    {% if item.is_series %}
+                    {# Temporada obrigatória para série: o eixo TVDB é o
+                       único que entende temporada, e sem ela a busca
+                       volta a série inteira. Episódio em branco = pack. #}
+                    <select name="season"
+                            class="h-9 px-3 rounded-md bg-bg-canvas border border-border-strong text-sm text-fg-primary focus:outline-none focus:border-accent-solid">
+                        {# Temporada 0 é o balde de especiais do TMDB, e o
+                           varredor a exclui em todo lugar — oferecê-la
+                           aqui seria a única porta para ela. #}
+                        {% for s in seasons %}{% if s.number > 0 %}
+                        <option value="{{ s.number }}">Temporada {{ s.number }}</option>
+                        {% endif %}{% endfor %}
+                    </select>
+                    <input name="episode" type="number" min="1" placeholder="ep."
+                           title="Em branco busca o pack da temporada inteira"
+                           class="w-20 h-9 px-3 rounded-md bg-bg-canvas border border-border-strong text-sm text-fg-primary placeholder:text-fg-muted focus:outline-none focus:border-accent-solid">
+                    {% endif %}
+                    <button type="submit" class="btn btn-md btn-secondary">
+                        busca interativa
+                    </button>
+                </form>
+
                 <form method="post" action="/library/{{ item.id }}/refresh" class="contents">
                     <button type="submit" class="btn btn-md btn-secondary">
                         atualizar metadados
@@ -120,6 +147,10 @@
         </div>
     </div>
 </div>
+
+{# Alvo dos resultados: fora do card do hero para a tabela poder ocupar
+   a largura toda. #}
+<div id="interactive-results"></div>
 
 {% if item.in_theatrical_window %}
 <div class="flex items-start gap-3 px-4 py-3 mb-4 rounded-lg bg-info-soft border border-info-solid">

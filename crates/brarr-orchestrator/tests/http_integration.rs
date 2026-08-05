@@ -150,6 +150,107 @@ fn first_row_id(body: &str, prefix: &str) -> String {
 }
 
 #[tokio::test]
+async fn interactive_search_reports_when_nothing_is_found() {
+    use brarr_orchestrator::db::library::{self, MediaType, NewLibraryItem};
+
+    let (addr, state) = spawn().await;
+    let item = library::upsert(
+        state.pool(),
+        &NewLibraryItem {
+            media_type: Some(MediaType::Movie),
+            tmdb_id: 603,
+            title: "The Matrix".to_owned(),
+            ..NewLibraryItem::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let body = reqwest::get(format!("http://{addr}/library/{}/interactive", item.id))
+        .await
+        .expect("send")
+        .text()
+        .await
+        .unwrap();
+    assert!(body.contains("nenhuma release encontrada"), "body = {body}");
+    assert!(body.contains("interactive-results"));
+}
+
+#[tokio::test]
+async fn grabbing_a_release_that_lost_its_provider_says_so() {
+    use brarr_orchestrator::db::decisions::{self, DecisionInsert};
+    use brarr_orchestrator::db::library::{self, MediaType, NewLibraryItem};
+    use brarr_orchestrator::db::searches::{self, SearchRequestJson};
+
+    let (addr, state) = spawn().await;
+    let item = library::upsert(
+        state.pool(),
+        &NewLibraryItem {
+            media_type: Some(MediaType::Movie),
+            tmdb_id: 603,
+            title: "The Matrix".to_owned(),
+            ..NewLibraryItem::default()
+        },
+    )
+    .await
+    .unwrap();
+    let search = searches::create(state.pool(), SearchRequestJson::default())
+        .await
+        .unwrap();
+    // `provider_id: None` is what a decision looks like once its
+    // provider row is deleted — the barrier has no key without one.
+    let decision = decisions::insert(
+        state.pool(),
+        DecisionInsert {
+            search_id: search.id,
+            provider_id: None,
+            provider_name: "sumido".into(),
+            release_name: "Matrix.1999.1080p".into(),
+            release_id_remote: 1,
+            release_guid: Some("abc".into()),
+            score: 500,
+            rejected: false,
+            tags: vec![],
+            matched_rules: vec![],
+            seeders: 10,
+            leechers: 0,
+            size_bytes: 1,
+            resolution: brarr_core::Resolution::P1080,
+            kind: brarr_core::ReleaseKind::WebDl,
+            download_url: Some("https://x/1".into()),
+            details_url: None,
+            provider_kind: Some("unit3d".into()),
+            published_at: None,
+            audio_languages: vec![],
+            subtitle_languages: vec![],
+            profile_scores: std::collections::HashMap::new(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let badge = reqwest::Client::new()
+        .post(format!(
+            "http://{addr}/library/{}/grab/{}",
+            item.id, decision.id
+        ))
+        .send()
+        .await
+        .expect("send")
+        .text()
+        .await
+        .unwrap();
+    assert!(badge.contains("provider removido"), "badge = {badge}");
+    assert!(
+        brarr_orchestrator::db::grabs::for_item(state.pool(), item.id)
+            .await
+            .unwrap()
+            .is_empty(),
+        "nothing may be reserved without a barrier key"
+    );
+}
+
+#[tokio::test]
 async fn queue_renders_empty_state() {
     let (addr, _state) = spawn().await;
     let resp = reqwest::get(format!("http://{addr}/queue"))

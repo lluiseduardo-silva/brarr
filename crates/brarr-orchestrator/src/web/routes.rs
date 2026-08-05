@@ -55,14 +55,14 @@ use crate::web::templates::{
     DecisionView, DownloadClientView, DownloadClientsListPartial, DownloadClientsTemplate,
     EditArrInstanceModalPartial, EditDownloadClientModalPartial, EditProviderModalPartial,
     EndpointHealthView, EndpointRequestView, EpisodeView, ErrorTemplate, GrabView, HealthTemplate,
-    LibraryAddTemplate, LibraryDetailTemplate, LibraryDetailView, LibraryItemView,
-    LibrarySeasonPartial, LibraryTemplate, LoginTemplate, NewProfileModalPartial,
-    NewSearchModalPartial, ProfileEditorTemplate, ProfileView, ProfilesTemplate,
-    ProviderHealthView, ProviderView, ProvidersListPartial, ProvidersTemplate, PushGroupView,
-    PushHistoryView, PushesFilterView, PushesTemplate, RecentSearchView, ReleasesTemplate,
-    RootFolderView, RootFoldersListPartial, SearchDetailTemplate, SearchesFilterView,
-    SearchesIndexTemplate, SeasonView, SettingsFlash, SettingsTemplate, SettingsValues,
-    TmdbHitView, WebhookEventView, WebhooksTemplate,
+    InteractiveReleaseView, InteractiveResultsPartial, LibraryAddTemplate, LibraryDetailTemplate,
+    LibraryDetailView, LibraryItemView, LibrarySeasonPartial, LibraryTemplate, LoginTemplate,
+    NewProfileModalPartial, NewSearchModalPartial, ProfileEditorTemplate, ProfileView,
+    ProfilesTemplate, ProviderHealthView, ProviderView, ProvidersListPartial, ProvidersTemplate,
+    PushGroupView, PushHistoryView, PushesFilterView, PushesTemplate, RecentSearchView,
+    ReleasesTemplate, RootFolderView, RootFoldersListPartial, SearchDetailTemplate,
+    SearchesFilterView, SearchesIndexTemplate, SeasonView, SettingsFlash, SettingsTemplate,
+    SettingsValues, TmdbHitView, WebhookEventView, WebhooksTemplate,
 };
 use crate::{AppError, AppState};
 use brarr_core::TmdbId;
@@ -125,6 +125,8 @@ pub fn router(state: AppState, static_dir: &std::path::Path) -> Router {
         .route("/library/{id}/profile", post(library_set_profile))
         .route("/library/{id}/refresh", post(library_refresh))
         .route("/library/{id}/scan", post(library_scan_now))
+        .route("/library/{id}/interactive", get(library_interactive))
+        .route("/library/{id}/grab/{decision_id}", post(library_grab))
         .route("/library/{id}/season/{season_id}", get(library_season))
         .route(
             "/library/{id}/season/{season_id}/monitor",
@@ -1508,6 +1510,238 @@ async fn library_set_profile(
     });
     library::set_placement(state.pool(), uuid, profile, root_folder.as_deref()).await?;
     Ok(Redirect::to(&format!("/library/{id}")).into_response())
+}
+
+/// Axis of a manual search: which season and episode, if any.
+#[derive(Debug, Default, Deserialize)]
+struct InteractiveQuery {
+    #[serde(default)]
+    season: Option<String>,
+    #[serde(default)]
+    episode: Option<String>,
+}
+
+impl InteractiveQuery {
+    fn parsed(&self) -> (Option<u16>, Option<u16>) {
+        let read = |v: &Option<String>| {
+            v.as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .and_then(|s| s.parse::<u16>().ok())
+        };
+        (read(&self.season), read(&self.episode))
+    }
+}
+
+/// `GET /library/{id}/interactive` — run a search the operator drives.
+///
+/// The automatic sweep picks the best release above the item's
+/// threshold; this shows everything it found and lets the operator
+/// choose — a specific provider, a season pack, a particular encode.
+/// Nothing is graded away: the score column says which side of the
+/// threshold a release fell on, and that is all it does.
+async fn library_interactive(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<InteractiveQuery>,
+) -> Result<Response, AppError> {
+    let uuid = Uuid::parse_str(&id)
+        .map_err(|e| AppError::InvalidInput(format!("invalid library id: {e}")))?;
+    let item = library::get_by_id(state.pool(), uuid).await?;
+    let (season, episode) = q.parsed();
+
+    let keys = interactive_keys(&item, season, episode);
+    if !keys.has_any() {
+        return html(&InteractiveResultsPartial {
+            item_id: id,
+            axis: String::new(),
+            season: String::new(),
+            episode: String::new(),
+            results: Vec::new(),
+            message: "este título não tem id externo utilizável para busca".to_string(),
+        });
+    }
+
+    let outcome = crate::search::run_search(&state, keys).await?;
+    let profile = match item.profile_id {
+        Some(pid) => quality_profiles::get_by_id(state.pool(), pid).await.ok(),
+        None => None,
+    };
+    let threshold = profile
+        .as_ref()
+        .map_or(crate::scan::DEFAULT_PUSH_THRESHOLD, |p| p.push_threshold);
+
+    let mut results: Vec<InteractiveReleaseView> = outcome
+        .decisions
+        .iter()
+        .map(|d| {
+            let score = profile.as_ref().map_or(d.score, |p| {
+                quality_profiles::effective_score(&d.profile_scores, d.score, p.id)
+            });
+            InteractiveReleaseView {
+                id: d.id.to_string(),
+                release_name: d.release_name.clone(),
+                provider_name: d.provider_name.clone(),
+                protocol: if d
+                    .provider_kind
+                    .as_deref()
+                    .is_some_and(|k| k.eq_ignore_ascii_case("newznab"))
+                {
+                    "usenet".to_string()
+                } else {
+                    "torrent".to_string()
+                },
+                size: humanize_bytes(d.size_bytes),
+                seeders: if d.seeders == 0 {
+                    "—".to_string()
+                } else {
+                    d.seeders.to_string()
+                },
+                score,
+                passes: score >= threshold,
+                rejected: d.rejected,
+                languages: audio_chips_from_languages(&d.audio_languages, &d.subtitle_languages),
+                grabbable: d.download_url.is_some(),
+            }
+        })
+        .collect();
+    // Best first — the operator scans down from the top.
+    results.sort_by_key(|r| std::cmp::Reverse(r.score));
+
+    let axis = match (season, episode) {
+        (Some(s), Some(e)) => format!("S{s:02}E{e:02}"),
+        (Some(s), None) => format!("temporada {s} (pack)"),
+        _ => String::new(),
+    };
+    let message = if results.is_empty() {
+        "nenhuma release encontrada nos providers configurados".to_string()
+    } else {
+        String::new()
+    };
+    html(&InteractiveResultsPartial {
+        item_id: id,
+        axis,
+        season: season.map(|s| s.to_string()).unwrap_or_default(),
+        episode: episode.map(|e| e.to_string()).unwrap_or_default(),
+        results,
+        message,
+    })
+}
+
+/// Search axis for a manual search. A series with a season asks the TVDB
+/// axis (the only one that understands seasons); everything else asks
+/// the movie axes the item carries.
+fn interactive_keys(
+    item: &crate::db::library::LibraryItem,
+    season: Option<u16>,
+    episode: Option<u16>,
+) -> crate::search::SearchKeys {
+    use brarr_core::{ImdbId, TmdbId, TvdbId};
+    let tvdb = item
+        .tvdb_id
+        .and_then(|v| u32::try_from(v).ok())
+        .and_then(|v| TvdbId::new(v).ok());
+    if let (Some(tvdb), Some(season)) = (tvdb, season) {
+        return crate::search::SearchKeys::from_tvdb(tvdb, Some(season), episode);
+    }
+    crate::search::SearchKeys {
+        tmdb: u32::try_from(item.tmdb_id)
+            .ok()
+            .and_then(|v| TmdbId::new(v).ok()),
+        imdb: item
+            .imdb_id
+            .as_deref()
+            .map(|raw| raw.trim().trim_start_matches("tt"))
+            .and_then(|d| d.parse::<u32>().ok())
+            .and_then(|v| ImdbId::new(v).ok()),
+        tvdb,
+        ..crate::search::SearchKeys::default()
+    }
+}
+
+/// `POST /library/{id}/grab/{decision_id}` — take this exact release.
+///
+/// The barrier still applies: the operator picking a release does not
+/// make it safe to grab the same one twice. What is bypassed is the
+/// *threshold*, because the whole point of the screen is choosing
+/// something the automatic rules would not have.
+async fn library_grab(
+    State(state): State<AppState>,
+    Path((id, decision_id)): Path<(String, String)>,
+    axum::extract::Query(q): axum::extract::Query<InteractiveQuery>,
+) -> Result<Response, AppError> {
+    let item_uuid = Uuid::parse_str(&id)
+        .map_err(|e| AppError::InvalidInput(format!("invalid library id: {e}")))?;
+    let decision_uuid = Uuid::parse_str(&decision_id)
+        .map_err(|e| AppError::InvalidInput(format!("invalid decision id: {e}")))?;
+    let decision = decisions::get_by_id(state.pool(), decision_uuid).await?;
+    let (season, episode_number) = q.parsed();
+
+    // An episode number resolves to a row; a season with no episode is a
+    // pack, which records the season and names no episode.
+    let episode_id = match (season, episode_number) {
+        (Some(s), Some(e)) => library::episodes(state.pool(), item_uuid)
+            .await?
+            .into_iter()
+            .find(|row| row.season_number == i32::from(s) && row.episode_number == i32::from(e))
+            .map(|row| row.id),
+        _ => None,
+    };
+    let Some(provider_id) = decision.provider_id else {
+        return Ok(html_string(render_status_badge(
+            &format!("ir-result-{decision_id}"),
+            &PingBadge {
+                ok: false,
+                label: "provider removido".to_string(),
+                detail: "a release veio de um provider que não existe mais".to_string(),
+            },
+        )));
+    };
+
+    let new = grabs::NewGrab {
+        item_id: item_uuid,
+        episode_id,
+        season_number: season.map(i32::from),
+        decision_id: Some(decision.id),
+        provider_id,
+        provider_name: &decision.provider_name,
+        release_id_remote: &decision.stable_release_key(),
+        release_name: &decision.release_name,
+        download_url: decision.download_url.as_deref(),
+        protocol: if decision
+            .provider_kind
+            .as_deref()
+            .is_some_and(|k| k.eq_ignore_ascii_case("newznab"))
+        {
+            grabs::Protocol::Usenet
+        } else {
+            grabs::Protocol::Torrent
+        },
+    };
+
+    let badge = match grabs::reserve(state.pool(), &new).await? {
+        None => PingBadge {
+            ok: false,
+            label: "já pego".to_string(),
+            detail: "esta release já foi reservada ou tentada para este alvo".to_string(),
+        },
+        Some(grab) => match crate::deliver::deliver(&state, &grab).await? {
+            crate::deliver::DeliveryOutcome::Sent { client_name, .. } => PingBadge {
+                ok: true,
+                label: "enviado".to_string(),
+                detail: format!("entregue a {client_name}"),
+            },
+            other => PingBadge {
+                ok: false,
+                label: "falhou".to_string(),
+                detail: other.reason().to_string(),
+            },
+        },
+    };
+    Ok(html_string(render_status_badge(
+        &format!("ir-result-{decision_id}"),
+        &badge,
+    )))
 }
 
 /// `POST /library/{id}/refresh` — re-pull metadata from TMDB.

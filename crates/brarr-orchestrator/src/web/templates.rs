@@ -1105,6 +1105,55 @@ pub struct EpisodeView {
     pub monitored: bool,
 }
 
+/// Results of a manual search, swapped into the item detail page.
+#[derive(Debug, Template)]
+#[template(path = "partials/interactive_results.html")]
+pub struct InteractiveResultsPartial {
+    /// Item the search was run for.
+    pub item_id: String,
+    /// What was searched, echoed back: `"temporada 4"`, `"S04E07"`, or
+    /// empty for a movie.
+    pub axis: String,
+    /// Season the grab should record, as a string for the form.
+    pub season: String,
+    /// Episode number the grab should record; empty means a season pack.
+    pub episode: String,
+    /// Candidates, best score first.
+    pub results: Vec<InteractiveReleaseView>,
+    /// Shown instead of the table when there is nothing to show.
+    pub message: String,
+}
+
+/// One candidate release in the interactive search.
+#[derive(Debug)]
+pub struct InteractiveReleaseView {
+    /// Decision id — what the grab button posts.
+    pub id: String,
+    /// Release title.
+    pub release_name: String,
+    /// Provider it came from.
+    pub provider_name: String,
+    /// `torrent` / `usenet`.
+    pub protocol: String,
+    /// Humanised size.
+    pub size: String,
+    /// Seeder count; `—` for usenet.
+    pub seeders: String,
+    /// Score under the item's profile, or baseline when it has none.
+    pub score: u32,
+    /// `true` when that score clears the profile's push threshold — the
+    /// automatic sweep would have taken it. The operator can grab either
+    /// way; this only says which side of the line it fell on.
+    pub passes: bool,
+    /// `true` when every quality profile rejected it.
+    pub rejected: bool,
+    /// Language chips, `(label, kind)` — same shape the release card uses.
+    pub languages: Vec<(String, String)>,
+    /// `false` when the release exposed no download URL, so there is
+    /// nothing to hand a client.
+    pub grabbable: bool,
+}
+
 /// One acquisition row on the detail page.
 #[derive(Debug)]
 pub struct GrabView {

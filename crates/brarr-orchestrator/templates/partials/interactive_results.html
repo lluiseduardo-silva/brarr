@@ -1,0 +1,84 @@
+{# Resultados da busca interativa. Trocado inteiro a cada busca.
+
+   O que o varredor faz sozinho é escolher a melhor release acima do
+   threshold do perfil. Aqui quem escolhe é o operador — o threshold vira
+   informação (a coluna "score" diz de que lado da linha caiu), não
+   veto. #}
+<div id="interactive-results" class="mt-4">
+    {% if !message.is_empty() %}
+    <div class="card-hairline bg-bg-surface border border-border-default rounded-xl px-5 py-6 text-center">
+        <p class="text-sm text-fg-secondary">{{ message }}</p>
+    </div>
+    {% else %}
+    <div class="card-hairline bg-bg-surface border border-border-default rounded-xl overflow-hidden">
+        <header class="flex items-center justify-between gap-3 px-4 py-3 bg-bg-muted">
+            <span class="text-xs font-medium uppercase tracking-[0.06em] text-fg-muted">
+                {{ results.len() }} release(s){% if !axis.is_empty() %} · {{ axis }}{% endif %}
+            </span>
+            <span class="text-[11px] text-fg-muted">clicar em baixar entrega direto ao cliente, ignorando o threshold</span>
+        </header>
+        <div class="overflow-x-auto">
+            <table class="w-full text-sm">
+                <thead class="bg-bg-muted">
+                    <tr class="text-left">
+                        <th class="px-4 py-2 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Release</th>
+                        <th class="px-4 py-2 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Origem</th>
+                        <th class="px-4 py-2 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Tamanho</th>
+                        <th class="px-4 py-2 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Seeds</th>
+                        <th class="px-4 py-2 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Score</th>
+                        <th class="px-4 py-2 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted text-right">Ação</th>
+                    </tr>
+                </thead>
+                <tbody>
+                {% for r in results %}
+                    <tr class="border-t border-border-default" id="ir-{{ r.id }}">
+                        <td class="px-4 py-2.5">
+                            <div class="text-xs font-mono text-fg-primary break-all">{{ r.release_name }}</div>
+                            {% if !r.languages.is_empty() %}
+                            <div class="flex items-center gap-1 flex-wrap mt-1">
+                                {% for l in r.languages %}
+                                <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium {% if l.1 == "pt" %}bg-success-soft text-success-soft-fg{% else if l.1 == "accent" %}bg-accent-soft text-accent-soft-fg{% else %}bg-bg-muted text-fg-muted{% endif %}">{{ l.0 }}</span>
+                                {% endfor %}
+                            </div>
+                            {% endif %}
+                        </td>
+
+                        <td class="px-4 py-2.5">
+                            <div class="text-xs text-fg-secondary">{{ r.provider_name }}</div>
+                            <span class="badge {% if r.protocol == "usenet" %}bg-secondary-soft text-secondary-soft-fg{% else %}bg-accent-soft text-accent-soft-fg{% endif %}">{{ r.protocol }}</span>
+                        </td>
+
+                        <td class="px-4 py-2.5 font-mono text-xs text-fg-secondary whitespace-nowrap">{{ r.size }}</td>
+                        <td class="px-4 py-2.5 font-mono text-xs text-fg-secondary">{{ r.seeders }}</td>
+
+                        <td class="px-4 py-2.5">
+                            <span class="badge {% if r.rejected %}bg-danger-soft text-danger-soft-fg{% else if r.passes %}bg-success-soft text-success-soft-fg{% else %}bg-bg-muted text-fg-secondary{% endif %}"
+                                  title="{% if r.rejected %}rejeitado por todos os profiles{% else if r.passes %}passaria no automático{% else %}abaixo do threshold do perfil — o varredor não pegaria{% endif %}">
+                                {{ r.score }}
+                            </span>
+                        </td>
+
+                        <td class="px-4 py-2.5">
+                            <div class="flex items-center justify-end gap-1.5">
+                                {% if r.grabbable %}
+                                <button hx-post="/library/{{ item_id }}/grab/{{ r.id }}?season={{ season }}&episode={{ episode }}"
+                                        hx-target="#ir-result-{{ r.id }}"
+                                        hx-swap="outerHTML"
+                                        hx-indicator="#ir-result-{{ r.id }}"
+                                        class="btn btn-sm btn-primary">
+                                    baixar
+                                </button>
+                                {% else %}
+                                <span class="text-[11px] italic text-fg-muted">sem URL de download</span>
+                                {% endif %}
+                                <span id="ir-result-{{ r.id }}" class="text-[11px] text-fg-muted"></span>
+                            </div>
+                        </td>
+                    </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+    {% endif %}
+</div>
