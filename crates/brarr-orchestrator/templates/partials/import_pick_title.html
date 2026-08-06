@@ -52,10 +52,20 @@
         </p>
         {% endif %}
         {% for t in titles %}
+        {# In bulk mode the choice applies to whatever the importer has
+           ticked, so the request pulls that form's fields in and the
+           answer comes back as out-of-band row swaps. #}
         <button type="button"
+                {% if bulk %}
+                hx-post="/library/import/bulk"
+                hx-vals='{"action": "title", "target": "{{ t.id }}"}'
+                hx-include="#import-form"
+                hx-swap="none"
+                {% else %}
                 hx-get="/library/import/row?folder={{ folder|urlencode_strict }}&amp;path={{ path|urlencode_strict }}&amp;idx={{ idx }}&amp;target={{ t.id }}{% if let Some(id) = item_id %}&amp;item={{ id }}{% endif %}"
                 hx-target="#import-row-{{ idx }}"
                 hx-swap="outerHTML"
+                {% endif %}
                 onclick="this.closest('dialog').close()"
                 class="w-full flex items-center gap-3 px-6 py-2.5 border-b border-border-default cursor-pointer text-left hover:bg-bg-muted">
             <div class="min-w-0 flex-1 flex items-center gap-2">

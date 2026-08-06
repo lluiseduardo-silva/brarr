@@ -10,9 +10,12 @@
    picker that re-rendered the whole dialog would reset every checkbox
    and every assignment already made. #}
 <div class="flex items-center gap-3 px-6 py-2.5 border-b border-border-default {% if row.covered %}bg-bg-canvas{% endif %}"
-     id="import-row-{{ row.idx }}">
+     id="import-row-{{ row.idx }}"{% if oob %} hx-swap-oob="true"{% endif %}>
     <div class="w-4 shrink-0">
-        <input type="checkbox" name="sel" value="{{ row.path }}"{% if row.token.is_some() %} checked{% endif %}
+        {# The index rides in the value so a bulk action can aim its
+           out-of-band swap at the right row. `splitn(2, '|')` on the way
+           back, because a path may legitimately contain a pipe. #}
+        <input type="checkbox" name="sel" value="{{ row.idx }}|{{ row.path }}"{% if row.token.is_some() %} checked{% endif %}
                class="w-4 h-4 rounded border-border-strong">
     </div>
     {% if let Some(token) = row.token %}

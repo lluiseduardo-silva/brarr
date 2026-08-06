@@ -50,10 +50,20 @@
         </p>
         {% endif %}
         {% for slot in slots %}
+        {# Bulk mode numbers every ticked row from here, in the order
+           their names sort — which is the order the scan produced and
+           the order they are shown in. #}
         <button type="button"
+                {% if bulk %}
+                hx-post="/library/import/bulk"
+                hx-vals='{"action": "sequence", "target": "{{ target_item }}", "episode": "{{ slot.id }}"}'
+                hx-include="#import-form"
+                hx-swap="none"
+                {% else %}
                 hx-get="/library/import/row?folder={{ folder|urlencode_strict }}&amp;path={{ path|urlencode_strict }}&amp;idx={{ idx }}&amp;target={{ target_item }}&amp;episode={{ slot.id }}{% if let Some(id) = item_id %}&amp;item={{ id }}{% endif %}"
                 hx-target="#import-row-{{ idx }}"
                 hx-swap="outerHTML"
+                {% endif %}
                 onclick="this.closest('dialog').close()"
                 class="w-full flex items-center gap-3 px-6 py-2.5 border-b border-border-default cursor-pointer text-left hover:bg-bg-muted {% if slot.taken %}bg-bg-canvas{% endif %}">
             <span class="w-20 shrink-0 text-sm font-mono {% if slot.taken %}text-fg-muted{% else %}text-fg-primary{% endif %}">{{ slot.code }}</span>
@@ -71,11 +81,19 @@
 
     <footer class="flex items-center gap-3 px-6 py-4">
         <div class="min-w-0 w-[380px]">
+            {% if bulk %}
+            <p class="text-sm font-medium text-fg-primary">Numera as linhas marcadas a partir daqui</p>
+            <p class="text-xs text-fg-muted">
+                Em sequência, na ordem do nome. Confira antes de importar — é uma inferência, não uma
+                leitura do nome do arquivo.
+            </p>
+            {% else %}
             <p class="text-sm font-medium text-fg-primary">Escolher aqui vale só para este arquivo</p>
             <p class="text-xs text-fg-muted">
                 Escolher um episódio já coberto não sobrescreve nada: a barreira recusa a segunda adoção
                 e a linha volta com o motivo.
             </p>
+            {% endif %}
         </div>
         <div class="flex-1"></div>
         <button type="button"

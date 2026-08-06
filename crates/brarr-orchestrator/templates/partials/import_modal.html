@@ -99,11 +99,48 @@
 
     {% else %}
 
-    <form hx-post="/library/import"
+    <form id="import-form"
+          hx-post="/library/import"
           hx-target="#modal-target"
           hx-swap="innerHTML">
         <input type="hidden" name="folder" value="{{ folder }}">
         {% if let Some(id) = item_id %}<input type="hidden" name="item" value="{{ id }}">{% endif %}
+
+        {# Bulk bar. It acts on whatever is ticked at the moment the
+           action runs, so there is no client-side selection state to
+           keep in sync — and the answer comes back as out-of-band swaps
+           of the affected rows, which is what leaves every other
+           assignment alone.
+
+           "numerar em sequência" is the answer to absolute anime
+           numbering: 545 files across the operator's library carry no
+           SxxEyy at all, and assigning them one by one is one decision
+           per file instead of one per folder. #}
+        <div class="flex items-center gap-2 flex-wrap px-6 py-2.5 bg-accent-soft border-b border-border-default">
+            <span class="text-xs font-medium text-accent-soft-fg">aplicar às linhas marcadas</span>
+            <button type="button"
+                    hx-get="/library/import/pick-title?bulk=1&amp;folder={{ folder|urlencode_strict }}&amp;path=&amp;idx=0{% if let Some(id) = item_id %}&amp;item={{ id }}{% endif %}"
+                    hx-target="#modal-target-2"
+                    hx-swap="innerHTML"
+                    class="btn btn-sm btn-secondary">
+                definir título
+            </button>
+            <button type="button"
+                    hx-get="/library/import/pick-episode?bulk=1&amp;folder={{ folder|urlencode_strict }}&amp;path=&amp;idx=0{% if let Some(id) = item_id %}&amp;item={{ id }}&amp;target={{ id }}{% endif %}"
+                    hx-target="#modal-target-2"
+                    hx-swap="innerHTML"
+                    title="Numera as linhas marcadas em sequência, na ordem do nome, a partir do episódio escolhido"
+                    class="btn btn-sm btn-secondary"{% if item_id.is_none() %} disabled{% endif %}>
+                numerar em sequência
+            </button>
+            <span class="text-xs text-fg-muted">
+                {% if item_id.is_none() %}
+                defina o título primeiro para numerar em sequência
+                {% else %}
+                a sequência segue a ordem do nome do arquivo
+                {% endif %}
+            </span>
+        </div>
 
         <div class="flex items-center gap-3 px-6 py-2.5 bg-bg-muted">
             <div class="w-4"></div>

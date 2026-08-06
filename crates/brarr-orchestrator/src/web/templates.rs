@@ -1344,6 +1344,10 @@ pub struct ImportModalPartial {
     pub ignored: Vec<ImportIgnoredView>,
     /// `true` when the operator asked to see the ignored list.
     pub showing_ignored: bool,
+    /// Always false here. The shared row partial reads it, and Askama
+    /// resolves an included template against the parent context — so
+    /// the field has to exist on both. Only a bulk action sets it.
+    pub oob: bool,
     /// Validation message — a folder that is not readable, say.
     pub error: Option<String>,
 }
@@ -1405,12 +1409,17 @@ pub struct ImportRowPartial {
     pub folder: String,
     /// Item the dialog is pinned to, when it is.
     pub item_id: Option<String>,
+    /// Emit `hx-swap-oob`, so a bulk action can return several rows in
+    /// one response and leave everything else in the dialog alone.
+    pub oob: bool,
 }
 
 /// The title picker — a dialog on top of the import dialog.
 #[derive(Debug, Template)]
 #[template(path = "partials/import_pick_title.html")]
 pub struct ImportPickTitlePartial {
+    /// Apply the choice to every ticked row instead of to one file.
+    pub bulk: bool,
     /// File the choice applies to.
     pub file_name: String,
     /// Its absolute path, posted back.
@@ -1450,6 +1459,8 @@ pub struct PickTitleView {
 #[derive(Debug, Template)]
 #[template(path = "partials/import_pick_episode.html")]
 pub struct ImportPickEpisodePartial {
+    /// Number every ticked row from the chosen episode onwards.
+    pub bulk: bool,
     /// File the choice applies to.
     pub file_name: String,
     /// Its absolute path, posted back.

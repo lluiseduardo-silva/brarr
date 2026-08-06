@@ -475,6 +475,90 @@ async fn the_episode_picker_shows_taken_slots_too() {
     assert!(picker.contains("7 sem arquivo"), "8 episodes, 1 taken");
 }
 
+/// The answer to absolute anime numbering: 545 files in this operator's
+/// library carry no `SxxEyy` at all, and one decision per file is not an
+/// answer. Numbering in sequence is one decision per folder.
+#[tokio::test]
+async fn numbering_in_sequence_assigns_consecutive_episodes() {
+    let h = spawn("sequence").await;
+    let item = add_series(&h.state).await;
+    let folder = h.base.join("torrents");
+    // Absolute numbering, the shape that defeats every marker parser.
+    for name in [
+        "[Anitsu] Bofuri 2 - 01 [BD 1080p].mkv",
+        "[Anitsu] Bofuri 2 - 02 [BD 1080p].mkv",
+        "[Anitsu] Bofuri 2 - 03 [BD 1080p].mkv",
+    ] {
+        std::fs::write(folder.join(name), b"x").unwrap();
+    }
+    let dir = folder.to_string_lossy().to_string();
+    let client = reqwest::Client::new();
+
+    let body = client
+        .get(format!("http://{}/library/import", h.addr))
+        .query(&[("folder", dir.clone())])
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        fingerprints(&body).is_empty(),
+        "nothing is importable while no episode is known"
+    );
+
+    let episodes = library::episodes(h.state.pool(), item).await.unwrap();
+    let first = episodes.iter().find(|e| e.episode_number == 1).unwrap();
+    let selection: Vec<(String, String)> = (0..3)
+        .map(|i| {
+            let name = format!("[Anitsu] Bofuri 2 - 0{} [BD 1080p].mkv", i + 1);
+            (
+                "sel".to_owned(),
+                format!("{i}|{}", folder.join(name).to_string_lossy()),
+            )
+        })
+        .collect();
+    let mut form: Vec<(String, String)> = vec![
+        ("folder".to_owned(), dir.clone()),
+        ("action".to_owned(), "sequence".to_owned()),
+        ("target".to_owned(), item.to_string()),
+        ("episode".to_owned(), first.id.to_string()),
+    ];
+    form.extend(selection);
+
+    let swapped = client
+        .post(format!("http://{}/library/import/bulk", h.addr))
+        .form(&form)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+
+    // Three rows, each marked for an out-of-band swap into its own slot.
+    for idx in 0..3 {
+        assert!(
+            swapped.contains(&format!("id=\"import-row-{idx}\"")),
+            "row {idx} missing: {swapped}"
+        );
+    }
+    assert_eq!(swapped.matches("hx-swap-oob").count(), 3);
+    assert_eq!(
+        fingerprints(&swapped).len(),
+        3,
+        "all three became importable"
+    );
+    // Consecutive, in the order the names sort.
+    for n in 1..=3 {
+        assert!(
+            swapped.contains(&format!("{n} — Episódio {n}")),
+            "episode {n} not assigned in order: {swapped}"
+        );
+    }
+}
+
 /// A folder brarr cannot read is a form error inside the dialog, not a
 /// 500 — the operator retypes the path in the field that is already
 /// there. In Docker a wrong path is the single most likely mistake.

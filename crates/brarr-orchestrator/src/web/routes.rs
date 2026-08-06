@@ -22,6 +22,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use askama::Template as _;
 use axum::Router;
 use axum::extract::{Form, Path, Request, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
@@ -209,6 +210,7 @@ fn import_routes() -> Router<AppState> {
             get(library_import_pick_episode),
         )
         .route("/library/import/row", get(library_import_row))
+        .route("/library/import/bulk", post(library_import_bulk))
 }
 
 fn download_client_routes() -> Router<AppState> {
@@ -2135,6 +2137,7 @@ async fn import_modal(
         ignored_here: 0,
         ignored,
         showing_ignored,
+        oob: false,
         error,
     };
     if folder.trim().is_empty() {
@@ -2291,6 +2294,8 @@ struct PickQuery {
     season: Option<i32>,
     /// Filter text in the title picker.
     q: Option<String>,
+    /// Apply the choice to every ticked row instead of to one file.
+    bulk: Option<String>,
 }
 
 /// `GET /library/import/pick-title` — the library, to choose from.
@@ -2345,6 +2350,7 @@ async fn library_import_pick_title(
         query,
         titles,
         total,
+        bulk: q.bulk.is_some(),
     })
 }
 
@@ -2382,6 +2388,7 @@ async fn library_import_pick_episode(
         target_title: item.title,
         seasons,
         season,
+        bulk: q.bulk.is_some(),
         slots: shown
             .iter()
             .map(|s| PickEpisodeView {
@@ -2417,6 +2424,9 @@ async fn library_import_row(
         row: import_row(q.idx, file),
         folder: q.folder,
         item_id: q.item.map(|i| i.to_string()),
+        // Targeted swap: the picker aimed at this row's id, so no
+        // out-of-band marker is needed.
+        oob: false,
     })
 }
 
@@ -2424,6 +2434,83 @@ fn file_name_of(path: &str) -> String {
     std::path::Path::new(path)
         .file_name()
         .map_or_else(|| path.to_owned(), |n| n.to_string_lossy().to_string())
+}
+
+/// `POST /library/import/bulk` — one decision applied to every ticked
+/// row.
+///
+/// The answer is a set of out-of-band row swaps rather than a fresh
+/// dialog. Re-rendering the dialog would reset every checkbox and every
+/// assignment the operator had already made, and nothing on the server
+/// holds that state: the plan is rebuilt from disk on each request, on
+/// purpose.
+async fn library_import_bulk(
+    State(state): State<AppState>,
+    Form(fields): Form<Vec<(String, String)>>,
+) -> Result<Response, AppError> {
+    let value = |key: &str| {
+        fields
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.clone())
+    };
+    let folder = value("folder").unwrap_or_default();
+    let item = value("item").and_then(|raw| Uuid::parse_str(&raw).ok());
+    let action = value("action").unwrap_or_default();
+    let target = value("target").and_then(|raw| Uuid::parse_str(&raw).ok());
+    let target =
+        target.ok_or_else(|| AppError::InvalidInput("nenhum título escolhido".to_owned()))?;
+
+    // Selected rows, in the order the form sent them — which is DOM
+    // order, which is scan order. The sequence action depends on it.
+    let selected: Vec<(usize, String)> = fields
+        .iter()
+        .filter(|(k, _)| k == "sel")
+        .filter_map(|(_, v)| {
+            let mut parts = v.splitn(2, '|');
+            let idx = parts.next()?.parse().ok()?;
+            Some((idx, parts.next()?.to_owned()))
+        })
+        .collect();
+
+    // For "sequence", walk the season's slots from the chosen one and
+    // hand them out in order. Anything past the end of the season simply
+    // gets nothing — better a row still asking than a row pointing at an
+    // episode that does not exist.
+    let mut queue: Vec<Uuid> = Vec::new();
+    if action == "sequence" {
+        let start = value("episode").and_then(|raw| Uuid::parse_str(&raw).ok());
+        let slots = crate::adopt::episode_slots(&state, target, None).await?;
+        if let Some(start) = start {
+            let from = slots.iter().position(|s| s.id == start).unwrap_or(0);
+            queue = slots[from..].iter().map(|s| s.id).collect();
+        }
+    }
+
+    let mut body = String::new();
+    for (offset, (idx, path)) in selected.iter().enumerate() {
+        let episode = if action == "sequence" {
+            queue.get(offset).copied()
+        } else {
+            None
+        };
+        let file = crate::adopt::plan_one(
+            &state,
+            std::path::Path::new(&folder),
+            std::path::Path::new(path),
+            Some(target),
+            episode,
+        )
+        .await?;
+        let partial = ImportRowPartial {
+            row: import_row(*idx, file),
+            folder: folder.clone(),
+            item_id: item.map(|i| i.to_string()),
+            oob: true,
+        };
+        body.push_str(&partial.render()?);
+    }
+    Ok(html_string(body))
 }
 
 /// Form for `POST /library/import/unignore`.
