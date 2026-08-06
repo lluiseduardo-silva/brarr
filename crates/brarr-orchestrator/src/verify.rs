@@ -138,7 +138,7 @@ pub async fn run_once(state: &AppState) -> Result<VerifySummary, AppError> {
 /// mount that is temporarily unreachable, an I/O error — none of those
 /// mean the file was deleted, and treating them as such would have brarr
 /// re-download a library because a disk was busy.
-fn is_gone(path: &Path) -> bool {
+pub(crate) fn is_gone(path: &Path) -> bool {
     match std::fs::metadata(path) {
         Ok(_) => false,
         Err(e) => e.kind() == std::io::ErrorKind::NotFound,

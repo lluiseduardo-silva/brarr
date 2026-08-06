@@ -11,6 +11,7 @@ pub mod arr_instances;
 pub mod decisions;
 pub mod download_clients;
 pub mod grabs;
+pub mod ignored_paths;
 pub mod library;
 pub mod maintenance;
 pub mod metrics;

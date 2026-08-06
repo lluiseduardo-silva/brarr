@@ -377,7 +377,7 @@ fn unreachable_path_message(located: &Located) -> String {
 }
 
 /// Root folder for this item — its own override first, then the rule.
-async fn resolve_root(
+pub(crate) async fn resolve_root(
     state: &AppState,
     item: &LibraryItem,
 ) -> Result<Option<RootFolder>, AppError> {
@@ -629,7 +629,7 @@ fn pick_video(source: &Path, episode: Option<(u16, u16)>) -> Result<PathBuf, Pic
 /// (`Release/Subs/`, `Release/CD1/`); anything deeper is not a layout
 /// worth chasing, and an unbounded walk over a symlink loop is not a
 /// risk worth taking.
-fn collect_videos(dir: &Path, out: &mut Vec<(PathBuf, u64)>, depth: u8) {
+pub(crate) fn collect_videos(dir: &Path, out: &mut Vec<(PathBuf, u64)>, depth: u8) {
     const MAX_DEPTH: u8 = 3;
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -647,7 +647,7 @@ fn collect_videos(dir: &Path, out: &mut Vec<(PathBuf, u64)>, depth: u8) {
     }
 }
 
-fn is_video(path: &Path) -> bool {
+pub(crate) fn is_video(path: &Path) -> bool {
     path.extension()
         .map(|e| e.to_string_lossy().to_ascii_lowercase())
         .is_some_and(|ext| VIDEO_EXTENSIONS.contains(&ext.as_str()))
@@ -663,7 +663,7 @@ fn is_video(path: &Path) -> bool {
 ///   import refuse, because an ancestor directory said "sample".
 /// - Tokens, not substrings, so a release from a group called `SAMPLES`
 ///   is not mistaken for a sample of itself.
-fn looks_like_sample(path: &Path, base: &Path) -> bool {
+pub(crate) fn looks_like_sample(path: &Path, base: &Path) -> bool {
     let relative = path.strip_prefix(base).unwrap_or(path);
     relative.components().any(|component| {
         component
@@ -679,7 +679,7 @@ fn looks_like_sample(path: &Path, base: &Path) -> bool {
 ///
 /// - movie: `{root}/Título (Ano)/Título (Ano).mkv`
 /// - episode: `{root}/Título (Ano)/Season 01/Título - S01E02.mkv`
-fn destination(
+pub(crate) fn destination(
     root: &Path,
     title: &str,
     year: Option<i32>,
@@ -709,7 +709,7 @@ fn destination(
 /// rules apply everywhere: no `\/:*?"<>|`, no control characters, no
 /// trailing dot or space, and the reserved device names are not
 /// available as a whole name.
-fn sanitize(raw: &str) -> String {
+pub(crate) fn sanitize(raw: &str) -> String {
     const ILLEGAL: &[char] = &['<', '>', ':', '"', '/', '\\', '|', '?', '*'];
     const RESERVED: &[&str] = &[
         "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8",
@@ -747,7 +747,7 @@ fn sanitize(raw: &str) -> String {
 
 /// Cap a component's length on a char boundary. 255 bytes is the usual
 /// filesystem limit; 200 chars leaves room for a multi-byte title.
-fn truncate_chars(s: &str, max: usize) -> String {
+pub(crate) fn truncate_chars(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         return s.to_owned();
     }

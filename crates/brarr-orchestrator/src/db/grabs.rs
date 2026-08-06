@@ -350,6 +350,225 @@ pub async fn reserve(pool: &Pool, new: &NewGrab<'_>) -> Result<Option<Grab>, App
     get_by_id(pool, id).await.map(Some)
 }
 
+/// Written to `grabs.provider_name`, which is NOT NULL and is what the
+/// detail screen's "Provider" column renders.
+pub const LOCAL_PROVIDER_NAME: &str = "disco local";
+
+/// Everything needed to reserve a file that was already on disk.
+///
+/// A separate type from [`NewGrab`] on purpose. Loosening
+/// [`NewGrab::provider_id`] to `Option<Uuid>` would silently remove the
+/// barrier from every *other* caller that got it wrong, and two of them
+/// write releases today. Adoption gets its own type, its own index, and
+/// no way to name a provider.
+#[derive(Debug, Clone)]
+pub struct LocalGrab<'a> {
+    /// Catalogue entry the file belongs to.
+    pub item_id: Uuid,
+    /// Episode, when the file is one. Deliberately outside the barrier
+    /// key — see `idx_grabs_unique_local`.
+    pub episode_id: Option<Uuid>,
+    /// Absolute path as found on disk. It is the second half of the key,
+    /// stored in `release_id_remote`.
+    pub source_path: &'a str,
+    /// File name, for the grab history.
+    pub release_name: &'a str,
+}
+
+/// Take the reservation for a file that was already on disk.
+///
+/// Sibling of [`reserve`], separate from it because an adopted file has
+/// no provider and [`NewGrab::provider_id`] cannot express that. Same
+/// contract: `Ok(Some(grab))` means this caller won and may touch the
+/// filesystem; `Ok(None)` means this item already has a live grab for
+/// this path and the caller must write **nothing** — not retry, not
+/// link, not record.
+///
+/// Reserving before placing, rather than inserting straight as
+/// `imported`, is what stops a failed hardlink from leaving a
+/// half-adopted state: the caller calls [`release_reservation`] and the
+/// key goes free again. Delivery never sees the row — it goes from
+/// `reserved` to `imported` without passing through `sent`.
+///
+/// `season_number` stays NULL even for an episode, mirroring what the
+/// sweep writes: a non-null `season_number` on a row with
+/// `episode_id IS NULL` is what [`blocking_for`] reads as "this pack
+/// covers the whole season", and adoption never produces that.
+///
+/// # Errors
+///
+/// Returns [`AppError::Database`] on SQL failure.
+pub async fn reserve_local(pool: &Pool, new: &LocalGrab<'_>) -> Result<Option<Grab>, AppError> {
+    let id = Uuid::new_v4();
+    let now = OffsetDateTime::now_utc().unix_timestamp();
+    // Bare `ON CONFLICT DO NOTHING` for the same reason as `reserve`:
+    // `INSERT OR IGNORE` would also swallow CHECK and FK violations.
+    let res = sqlx::query(
+        "INSERT INTO grabs ( \
+            id, item_id, episode_id, season_number, decision_id, provider_id, \
+            provider_name, release_id_remote, release_name, download_url, \
+            protocol, status, grabbed_at, updated_at \
+         ) VALUES (?, ?, ?, NULL, NULL, NULL, ?, ?, ?, NULL, 'local', 'reserved', ?, ?) \
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(id.to_string())
+    .bind(new.item_id.to_string())
+    .bind(new.episode_id.map(|e| e.to_string()))
+    .bind(LOCAL_PROVIDER_NAME)
+    .bind(new.source_path)
+    .bind(new.release_name)
+    .bind(now)
+    .bind(now)
+    .execute(pool)
+    .await?;
+
+    if res.rows_affected() == 0 {
+        return Ok(None);
+    }
+    get_by_id(pool, id).await.map(Some)
+}
+
+/// `true` when brarr adopted this file where it stood and wrote nothing.
+///
+/// In an in-place adoption the source path *is* the imported path; in a
+/// link they differ by construction. That invariant is what lets undo
+/// know, without an extra column, whether there is a file to remove.
+#[must_use]
+pub fn is_in_place(grab: &Grab) -> bool {
+    grab.protocol == Protocol::Local
+        && grab.imported_path.as_deref() == Some(grab.release_id_remote.as_str())
+}
+
+/// Delete an adoption. **Only** `protocol = 'local'` rows — a tracker
+/// grab is acquisition history and is never deleted from the UI.
+///
+/// Returns the row so the caller can undo the link it created. Deleting
+/// rather than marking: an adoption created no acquisition history worth
+/// preserving, and deleting is what frees the key for the operator to
+/// adopt again after fixing whatever was wrong. [`mark_file_missing`]
+/// would be wrong here — it says "the file vanished", and it did not.
+///
+/// # Errors
+///
+/// [`AppError::NotFound`] when absent or not local, [`AppError::Database`]
+/// on SQL failure.
+pub async fn delete_adopted(pool: &Pool, id: Uuid) -> Result<Grab, AppError> {
+    let grab = get_by_id(pool, id).await?;
+    if grab.protocol != Protocol::Local {
+        return Err(AppError::NotFound(format!("adoption {id}")));
+    }
+    sqlx::query("DELETE FROM grabs WHERE id = ? AND protocol = 'local'")
+        .bind(id.to_string())
+        .execute(pool)
+        .await?;
+    Ok(grab)
+}
+
+/// Delete local reservations for an item older than `cutoff`.
+///
+/// A crash between the reservation and the import leaves a `reserved`
+/// row holding the key with nothing behind it. Nothing else in brarr
+/// clears it: `queue::snapshot` answers `Probe::Unreachable` for a grab
+/// with no client and `next_status` never acts on that, deliberately.
+/// Adoption is interactive and ends within one request, so anything
+/// older than an hour is debris.
+///
+/// # Errors
+///
+/// Returns [`AppError::Database`] on SQL failure.
+pub async fn clear_stale_local_reservations(
+    pool: &Pool,
+    item_id: Uuid,
+    cutoff: OffsetDateTime,
+) -> Result<u64, AppError> {
+    let res = sqlx::query(
+        "DELETE FROM grabs WHERE protocol = 'local' AND status = 'reserved' \
+           AND item_id = ? AND updated_at < ?",
+    )
+    .bind(item_id.to_string())
+    .bind(cutoff.unix_timestamp())
+    .execute(pool)
+    .await?;
+    Ok(res.rows_affected())
+}
+
+/// Every imported grab of an item, marked missing or not.
+///
+/// Unlike [`imported_present`] this does **not** filter on
+/// `file_missing_at`: the per-item check runs in both directions, and an
+/// already-marked row is exactly the one that has to be looked at again
+/// to notice the operator put the file back.
+///
+/// # Errors
+///
+/// Returns [`AppError::Database`] on SQL failure.
+pub async fn imported_for_item(pool: &Pool, item_id: Uuid) -> Result<Vec<Grab>, AppError> {
+    let rows = sqlx::query(&format!(
+        "SELECT {GRAB_COLUMNS} FROM grabs \
+         WHERE item_id = ? AND status = 'imported' AND imported_path IS NOT NULL \
+         ORDER BY grabbed_at DESC"
+    ))
+    .bind(item_id.to_string())
+    .fetch_all(pool)
+    .await?;
+    rows.iter().map(row_to_grab).collect()
+}
+
+/// Every grab of an item that still counts as coverage.
+///
+/// The set [`blocking_for`] would return for *some* target, read once,
+/// so a preview of 120 episodes asks one question instead of 120. The
+/// per-target predicate runs in Rust as [`covers`].
+///
+/// # Errors
+///
+/// Returns [`AppError::Database`] on SQL failure.
+pub async fn live_for_item(pool: &Pool, item_id: Uuid) -> Result<Vec<Grab>, AppError> {
+    let rows = sqlx::query(&format!(
+        "SELECT {GRAB_COLUMNS} FROM grabs \
+         WHERE item_id = ? AND status NOT IN ('failed', 'rejected') \
+           AND file_missing_at IS NULL \
+         ORDER BY grabbed_at DESC"
+    ))
+    .bind(item_id.to_string())
+    .fetch_all(pool)
+    .await?;
+    rows.iter().map(row_to_grab).collect()
+}
+
+/// A file that came back. Clears [`Grab::file_missing_at`], so the row
+/// covers its item again and resumes its barrier key.
+///
+/// `UPDATE OR IGNORE` because resuming the key can legitimately fail:
+/// while the file was gone the sweep may have acquired a replacement
+/// that now holds it. Losing that race leaves this row marked missing,
+/// which is the right answer — the operator has two copies and the newer
+/// grab owns the slot.
+///
+/// `OR IGNORE` is otherwise forbidden in this module, which chooses
+/// `ON CONFLICT DO NOTHING` precisely because it does not swallow CHECK
+/// and FK violations. It is safe here and the reason is written down:
+/// the statement touches only `file_missing_at` and `updated_at`,
+/// neither of which takes part in a CHECK or a foreign key, so the only
+/// violation possible is uniqueness — which is exactly the one to
+/// swallow.
+///
+/// # Errors
+///
+/// Returns [`AppError::Database`] on SQL failure.
+pub async fn clear_file_missing(pool: &Pool, id: Uuid) -> Result<bool, AppError> {
+    let now = OffsetDateTime::now_utc().unix_timestamp();
+    let res = sqlx::query(
+        "UPDATE OR IGNORE grabs SET file_missing_at = NULL, updated_at = ? \
+         WHERE id = ? AND file_missing_at IS NOT NULL",
+    )
+    .bind(now)
+    .bind(id.to_string())
+    .execute(pool)
+    .await?;
+    Ok(res.rows_affected() > 0)
+}
+
 /// Fetch one grab by primary key.
 ///
 /// # Errors
@@ -506,6 +725,29 @@ impl GrabTarget {
             season_number: Some(season_number),
         }
     }
+}
+
+/// The predicate [`blocking_for`] applies in SQL, in Rust.
+///
+/// A direct translation of
+/// `episode_id IS ? OR (episode_id IS NULL AND (season_number IS NULL OR
+/// season_number IS ?))`. SQLite's `IS` is null-safe equality, which is
+/// exactly `Option::eq` — so the translation is the comparison, not a
+/// hand-written case analysis. Writing the cases out by hand is what
+/// makes a version like this disagree with the SQL for a season pack
+/// asked with [`GrabTarget::item`]: there the first disjunct is
+/// `NULL IS NULL`, true, and the query returns the row.
+///
+/// A test confronts the two over a matrix of fixtures, the same way
+/// `ProviderScope` and `Protocol::matches_kind` are kept in agreement.
+#[must_use]
+pub fn covers(grab: &Grab, target: GrabTarget) -> bool {
+    if !grab.status.blocks_search() || grab.file_missing_at.is_some() {
+        return false;
+    }
+    grab.episode_id == target.episode_id
+        || (grab.episode_id.is_none()
+            && (grab.season_number.is_none() || grab.season_number == target.season_number))
 }
 
 /// Record a successful hand-off: the client accepted the release.
@@ -1442,5 +1684,316 @@ mod tests {
         library::delete(&pool, item_id).await.unwrap();
 
         assert!(recent(&pool, 10).await.unwrap().is_empty());
+    }
+
+    fn local(item_id: Uuid, path: &str) -> LocalGrab<'_> {
+        LocalGrab {
+            item_id,
+            episode_id: None,
+            source_path: path,
+            release_name: "Matrix.1999.1080p.BluRay.PT-BR.mkv",
+        }
+    }
+
+    #[tokio::test]
+    async fn a_local_file_is_reserved_once_per_item_and_path() {
+        let pool = open_memory().await.unwrap();
+        let (item_id, _) = fixture(&pool).await;
+        let first = reserve_local(&pool, &local(item_id, "/midias/Filmes/x.mkv"))
+            .await
+            .unwrap();
+        let first = first.expect("first adoption wins");
+        assert_eq!(first.protocol, Protocol::Local);
+        assert_eq!(first.provider_name, LOCAL_PROVIDER_NAME);
+        assert!(first.provider_id.is_none(), "adoption has no provider");
+        assert!(
+            reserve_local(&pool, &local(item_id, "/midias/Filmes/x.mkv"))
+                .await
+                .unwrap()
+                .is_none(),
+            "the same path must not be adopted twice for one item"
+        );
+    }
+
+    /// The episode is deliberately outside the key. An operator fixing a
+    /// wrong match by adopting again — instead of undoing first — would
+    /// otherwise get the same file covering two episodes at once.
+    #[tokio::test]
+    async fn the_local_key_ignores_the_episode() {
+        let pool = open_memory().await.unwrap();
+        let series = library::upsert(
+            &pool,
+            &NewLibraryItem {
+                media_type: Some(MediaType::Tv),
+                tmdb_id: 76479,
+                title: "The Boys".to_owned(),
+                ..NewLibraryItem::default()
+            },
+        )
+        .await
+        .unwrap();
+        library::sync_seasons(
+            &pool,
+            series.id,
+            &[NewSeason {
+                season_number: 4,
+                episode_count: 2,
+                air_date: None,
+                episodes: vec![
+                    NewEpisode {
+                        episode_number: 1,
+                        title: None,
+                        air_date: None,
+                    },
+                    NewEpisode {
+                        episode_number: 2,
+                        title: None,
+                        air_date: None,
+                    },
+                ],
+            }],
+        )
+        .await
+        .unwrap();
+        let eps = library::episodes(&pool, series.id).await.unwrap();
+
+        let mut first = local(series.id, "/midias/Series/The Boys/s04e01.mkv");
+        first.episode_id = Some(eps[0].id);
+        let mut again = local(series.id, "/midias/Series/The Boys/s04e01.mkv");
+        again.episode_id = Some(eps[1].id);
+
+        assert!(reserve_local(&pool, &first).await.unwrap().is_some());
+        assert!(
+            reserve_local(&pool, &again).await.unwrap().is_none(),
+            "one file cannot cover two episodes by adopting it twice"
+        );
+    }
+
+    /// A local row carries `provider_id = NULL`, which puts it outside
+    /// both tracker indexes. It must not weaken them.
+    #[tokio::test]
+    async fn a_local_grab_does_not_disturb_the_tracker_barrier() {
+        let pool = open_memory().await.unwrap();
+        let (item_id, provider_id) = fixture(&pool).await;
+        assert!(
+            reserve_local(&pool, &local(item_id, "/midias/Filmes/x.mkv"))
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            reserve(&pool, &new_grab(item_id, provider_id, "abc"))
+                .await
+                .unwrap()
+                .is_some(),
+            "an adoption must not block a tracker acquisition"
+        );
+        assert!(
+            reserve(&pool, &new_grab(item_id, provider_id, "abc"))
+                .await
+                .unwrap()
+                .is_none(),
+            "and the tracker key still holds"
+        );
+    }
+
+    /// `covers` is the SQL predicate rewritten in Rust so a 120-episode
+    /// preview asks one question instead of 120. The two must not drift.
+    #[tokio::test]
+    async fn covers_agrees_with_blocking_for() {
+        let pool = open_memory().await.unwrap();
+        let (_, provider_id) = fixture(&pool).await;
+        let series = library::upsert(
+            &pool,
+            &NewLibraryItem {
+                media_type: Some(MediaType::Tv),
+                tmdb_id: 76479,
+                title: "The Boys".to_owned(),
+                ..NewLibraryItem::default()
+            },
+        )
+        .await
+        .unwrap();
+        library::sync_seasons(
+            &pool,
+            series.id,
+            &[
+                NewSeason {
+                    season_number: 4,
+                    episode_count: 1,
+                    air_date: None,
+                    episodes: vec![NewEpisode {
+                        episode_number: 1,
+                        title: None,
+                        air_date: None,
+                    }],
+                },
+                NewSeason {
+                    season_number: 5,
+                    episode_count: 1,
+                    air_date: None,
+                    episodes: vec![NewEpisode {
+                        episode_number: 1,
+                        title: None,
+                        air_date: None,
+                    }],
+                },
+            ],
+        )
+        .await
+        .unwrap();
+        let eps = library::episodes(&pool, series.id).await.unwrap();
+        let (e4, e5) = (&eps[0], &eps[1]);
+
+        // One grab of each shape the barrier can see.
+        let mut per_episode = new_grab(series.id, provider_id, "ep");
+        per_episode.episode_id = Some(e4.id);
+        reserve(&pool, &per_episode).await.unwrap();
+
+        let whole = new_grab(series.id, provider_id, "whole");
+        reserve(&pool, &whole).await.unwrap();
+
+        let mut pack = new_grab(series.id, provider_id, "pack");
+        pack.season_number = Some(4);
+        reserve(&pool, &pack).await.unwrap();
+
+        reserve_local(&pool, &local(series.id, "/midias/x.mkv"))
+            .await
+            .unwrap();
+
+        let all = for_item(&pool, series.id).await.unwrap();
+        for target in [
+            GrabTarget::item(),
+            GrabTarget::episode(e4.id, 4),
+            GrabTarget::episode(e5.id, 5),
+        ] {
+            let from_sql: Vec<Uuid> = blocking_for(&pool, series.id, target)
+                .await
+                .unwrap()
+                .iter()
+                .map(|g| g.id)
+                .collect();
+            for grab in &all {
+                assert_eq!(
+                    covers(grab, target),
+                    from_sql.contains(&grab.id),
+                    "covers disagreed with blocking_for for grab {} ({:?}) on target {target:?}",
+                    grab.release_id_remote,
+                    grab.episode_id,
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn in_place_is_told_apart_from_a_link() {
+        let pool = open_memory().await.unwrap();
+        let (item_id, _) = fixture(&pool).await;
+        let path = "/midias/Filmes/Matrix (1999)/Matrix (1999).mkv";
+
+        let adopted = reserve_local(&pool, &local(item_id, path))
+            .await
+            .unwrap()
+            .unwrap();
+        mark_imported(&pool, adopted.id, path).await.unwrap();
+        assert!(is_in_place(&get_by_id(&pool, adopted.id).await.unwrap()));
+
+        let linked = reserve_local(&pool, &local(item_id, "/data/torrents/y.mkv"))
+            .await
+            .unwrap()
+            .unwrap();
+        mark_imported(&pool, linked.id, "/midias/Filmes/y/y.mkv")
+            .await
+            .unwrap();
+        assert!(
+            !is_in_place(&get_by_id(&pool, linked.id).await.unwrap()),
+            "a link wrote a file, so undo has something to remove"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_adopted_refuses_a_tracker_grab() {
+        let pool = open_memory().await.unwrap();
+        let (item_id, provider_id) = fixture(&pool).await;
+        let tracker = reserve(&pool, &new_grab(item_id, provider_id, "abc"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            delete_adopted(&pool, tracker.id).await.is_err(),
+            "acquisition history is never deleted from the UI"
+        );
+        assert!(get_by_id(&pool, tracker.id).await.is_ok());
+
+        let adopted = reserve_local(&pool, &local(item_id, "/midias/x.mkv"))
+            .await
+            .unwrap()
+            .unwrap();
+        let removed = delete_adopted(&pool, adopted.id).await.unwrap();
+        assert_eq!(removed.id, adopted.id);
+        assert!(get_by_id(&pool, adopted.id).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn stale_local_reservations_are_cleared_and_fresh_ones_are_not() {
+        let pool = open_memory().await.unwrap();
+        let (item_id, _) = fixture(&pool).await;
+        let old = reserve_local(&pool, &local(item_id, "/midias/old.mkv"))
+            .await
+            .unwrap()
+            .unwrap();
+        let fresh = reserve_local(&pool, &local(item_id, "/midias/fresh.mkv"))
+            .await
+            .unwrap()
+            .unwrap();
+        // Age the first one past the cutoff.
+        sqlx::query("UPDATE grabs SET updated_at = ? WHERE id = ?")
+            .bind(OffsetDateTime::now_utc().unix_timestamp() - 7200)
+            .bind(old.id.to_string())
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let cutoff = OffsetDateTime::now_utc() - time::Duration::hours(1);
+        let cleared = clear_stale_local_reservations(&pool, item_id, cutoff)
+            .await
+            .unwrap();
+        assert_eq!(cleared, 1);
+        assert!(get_by_id(&pool, old.id).await.is_err());
+        assert!(get_by_id(&pool, fresh.id).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_file_that_came_back_covers_its_item_again() {
+        let pool = open_memory().await.unwrap();
+        let (item_id, _) = fixture(&pool).await;
+        let path = "/midias/Filmes/Matrix (1999)/Matrix (1999).mkv";
+        let adopted = reserve_local(&pool, &local(item_id, path))
+            .await
+            .unwrap()
+            .unwrap();
+        mark_imported(&pool, adopted.id, path).await.unwrap();
+        mark_file_missing(&pool, adopted.id).await.unwrap();
+
+        assert!(
+            blocking_for(&pool, item_id, GrabTarget::item())
+                .await
+                .unwrap()
+                .is_empty(),
+            "a missing file frees the key"
+        );
+        assert!(clear_file_missing(&pool, adopted.id).await.unwrap());
+        assert_eq!(
+            blocking_for(&pool, item_id, GrabTarget::item())
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "and putting it back resumes coverage"
+        );
+        assert!(
+            !clear_file_missing(&pool, adopted.id).await.unwrap(),
+            "clearing a row that is not marked changes nothing"
+        );
     }
 }
