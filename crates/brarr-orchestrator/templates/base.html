@@ -153,6 +153,11 @@
        confirmation dialogs). modal.js auto-opens any <dialog> that
        lands here and clears the slot once the dialog closes. #}
     <div id="modal-target"></div>
+    {# Second slot, for a dialog opened from inside another one — the
+       import screen's title and episode pickers. Sharing one slot would
+       mean closing the picker empties the importer underneath it, and
+       with it every assignment already made. #}
+    <div id="modal-target-2"></div>
     <script src="/static/modal.js" defer></script>
 
 </body>

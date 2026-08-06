@@ -576,6 +576,126 @@ pub async fn plan(
     })
 }
 
+/// Rebuild one row after the operator assigned a target by hand.
+///
+/// Cheaper than re-planning the folder — it stats one file instead of
+/// walking hundreds — and it is also the authorisation boundary for the
+/// pickers: the path **must** live under the folder being imported, so
+/// the endpoint cannot be turned into "adopt any path on this machine".
+///
+/// # Errors
+///
+/// [`AppError::InvalidInput`] when the path is outside the folder or
+/// gone, [`AppError::NotFound`] when the target does not belong to the
+/// item, [`AppError::Database`] on SQL failure.
+pub async fn plan_one(
+    state: &AppState,
+    folder: &Path,
+    path: &Path,
+    item_id: Option<Uuid>,
+    episode_id: Option<Uuid>,
+) -> Result<PlannedFile, AppError> {
+    validate_folder(folder)?;
+    if !real(path).starts_with(real(folder)) {
+        return Err(AppError::InvalidInput(format!(
+            "{} está fora da pasta que está sendo importada",
+            path.display()
+        )));
+    }
+    let size = std::fs::metadata(path)
+        .map_err(|e| AppError::InvalidInput(format!("não consegui ler {}: {e}", path.display())))?
+        .len();
+
+    let pool = state.pool();
+    let item = match item_id {
+        Some(id) => Some(library::get_by_id(pool, id).await?),
+        None => None,
+    };
+    let found = FoundFile {
+        marker: path.file_name().map_or(Err(MarkerError::Absent), |n| {
+            parse_marker(&n.to_string_lossy())
+        }),
+        path: path.to_path_buf(),
+        size,
+    };
+    let roots = root_folders::list_all(pool).await?;
+    let mut row = build_row(state, &found, item.as_ref(), folder, &roots).await?;
+
+    let Some(item) = item else { return Ok(row) };
+    let episodes = library::episodes(pool, item.id).await?;
+    // A hand-picked episode wins over whatever the file name claimed —
+    // that is the whole point of the picker — but it still has to belong
+    // to this item, or the barrier key would name a target the catalogue
+    // does not have.
+    if let Some(chosen) = episode_id {
+        let Some(ep) = episodes.iter().find(|e| e.id == chosen) else {
+            return Err(AppError::NotFound(format!(
+                "episódio {chosen} não pertence a {}",
+                item.title
+            )));
+        };
+        row.season = u16::try_from(ep.season_number).ok();
+        row.episode = u16::try_from(ep.episode_number).ok();
+        row.marker_error = None;
+    }
+    let mut by_item = HashMap::new();
+    by_item.insert(item.id, episodes);
+    let mut live = HashMap::new();
+    live.insert(item.id, grabs::live_for_item(pool, item.id).await?);
+    Ok(resolve_target(row, Some(&item), &by_item, &live))
+}
+
+/// One episode the picker offers.
+#[derive(Debug, Clone)]
+pub struct EpisodeSlot {
+    /// Catalogue id, which the picker posts back.
+    pub id: Uuid,
+    /// Season it belongs to.
+    pub season: i32,
+    /// Number within the season.
+    pub number: i32,
+    /// Episode title, when TMDB has one.
+    pub title: Option<String>,
+    /// A live grab already covers it.
+    ///
+    /// Shown rather than hidden: the plan's `<select>` listed only free
+    /// slots, which answers "where can this go" but not "why is E01
+    /// missing from the list". Seeing both halves is also what stops the
+    /// operator pointing two files at one episode.
+    pub taken: bool,
+}
+
+/// Every episode of one season, with what already covers it.
+///
+/// # Errors
+///
+/// Returns [`AppError::Database`] on SQL failure.
+pub async fn episode_slots(
+    state: &AppState,
+    item_id: Uuid,
+    season: Option<i32>,
+) -> Result<Vec<EpisodeSlot>, AppError> {
+    let pool = state.pool();
+    let live = grabs::live_for_item(pool, item_id).await?;
+    Ok(library::episodes(pool, item_id)
+        .await?
+        .into_iter()
+        // Season 0 is TMDB's specials bucket, excluded here exactly as
+        // the sweep excludes it.
+        .filter(|e| e.season_number > 0)
+        .filter(|e| season.is_none_or(|s| e.season_number == s))
+        .map(|e| EpisodeSlot {
+            taken: live
+                .iter()
+                .any(|g| grabs::covers(g, GrabTarget::episode(e.id, e.season_number))),
+            id: e.id,
+            season: e.season_number,
+            number: e.episode_number,
+            title: e.title,
+        })
+        .collect())
+}
+
 /// The half of a row that does not depend on the catalogue lookups.
 async fn build_row(
     state: &AppState,

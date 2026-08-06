@@ -122,51 +122,7 @@
             </p>
             {% endif %}
             {% for row in rows %}
-            <div class="flex items-center gap-3 px-6 py-2.5 border-b border-border-default {% if row.covered %}bg-bg-canvas{% endif %}">
-                <div class="w-4 shrink-0">
-                    <input type="checkbox" name="sel" value="{{ row.path }}"{% if row.token.is_some() %} checked{% endif %}
-                           class="w-4 h-4 rounded border-border-strong">
-                </div>
-                {% if let Some(token) = row.token %}
-                <input type="hidden" name="fp" value="{{ token }}">
-                {% endif %}
-                <div class="flex-1 min-w-0">
-                    <div class="text-sm font-mono {% if row.covered %}text-fg-muted{% else %}text-fg-primary{% endif %} truncate" title="{{ row.path }}">{{ row.name }}</div>
-                    {% if let Some(reason) = row.reason %}
-                    <div class="text-[11px] {% if row.covered %}text-fg-muted{% else %}text-warning-soft-fg{% endif %} truncate">{{ reason }}</div>
-                    {% endif %}
-                </div>
-                <div class="w-52 shrink-0">
-                    {% if let Some(title) = row.title %}
-                    <div class="flex items-center gap-1.5 min-w-0">
-                        <span class="text-sm text-fg-primary truncate">{{ title }}</span>
-                        <span class="shrink-0 inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium {% if row.is_series %}bg-secondary-soft text-secondary-soft-fg{% else %}bg-accent-soft text-accent-soft-fg{% endif %}">{% if row.is_series %}série{% else %}filme{% endif %}</span>
-                    </div>
-                    {% else %}
-                    <span class="import-pick inline-flex items-center px-2.5 py-1 rounded-md text-xs text-danger-soft-fg">escolher título</span>
-                    {% endif %}
-                </div>
-                <div class="w-16 shrink-0 text-sm text-fg-secondary">
-                    {% if let Some(season) = row.season %}{{ season }}{% else %}—{% endif %}
-                </div>
-                <div class="w-44 shrink-0">
-                    {% if let Some(label) = row.episode_label %}
-                    <span class="text-sm text-fg-secondary truncate">{{ label }}</span>
-                    {% else if row.is_series %}
-                    <span class="import-pick inline-flex items-center px-2.5 py-1 rounded-md text-xs text-danger-soft-fg">escolher episódio</span>
-                    {% else %}
-                    <span class="text-sm text-fg-muted">—</span>
-                    {% endif %}
-                </div>
-                <div class="w-20 shrink-0 text-[11px] font-mono text-fg-muted">{{ row.size }}</div>
-                <div class="w-44 shrink-0">
-                    {% if row.covered %}
-                    <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium bg-bg-muted text-fg-muted">já na biblioteca</span>
-                    {% else if let Some(effect) = row.effect %}
-                    <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium bg-accent-soft text-accent-soft-fg truncate" title="{{ effect }}">{{ effect }}</span>
-                    {% endif %}
-                </div>
-            </div>
+            {% include "partials/import_row.html" %}
             {% endfor %}
 
             {% if over_cap > 0 %}

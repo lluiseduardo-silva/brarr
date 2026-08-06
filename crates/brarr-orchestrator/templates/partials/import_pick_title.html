@@ -1,0 +1,88 @@
+{# Title picker — a dialog on top of the import dialog.
+
+   It lands in #modal-target-2, not #modal-target, so closing it leaves
+   the importer underneath untouched. Sharing one slot would empty the
+   dialog below and take every assignment the operator had made.
+
+   The list is the library and only the library, the way Sonarr's series
+   picker works: adding a title is a different decision, with a root
+   folder, a profile and a monitoring scope attached to it, and burying
+   that inside an import is how those become invisible defaults. #}
+<dialog class="bg-transparent p-0 max-w-full max-h-full backdrop:bg-[rgba(10,6,18,0.7)]"
+        aria-label="Selecionar título">
+    <div class="w-[760px] max-w-full card-hairline bg-bg-surface border border-border-default rounded-2xl overflow-hidden"
+         style="box-shadow: 0 24px 60px var(--color-glow);">
+
+    <header class="flex items-center justify-between gap-3 px-6 py-5">
+        <div class="min-w-0">
+            <h2 class="text-[22px] font-semibold leading-tight text-fg-primary">Selecionar título</h2>
+            <p class="text-xs font-mono text-fg-muted truncate" title="{{ path }}">{{ file_name }}</p>
+        </div>
+        <button type="button"
+                onclick="this.closest('dialog').close()"
+                class="btn btn-md btn-icon btn-secondary"
+                aria-label="Fechar">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
+    </header>
+
+    <div class="h-px bg-border-default"></div>
+
+    <form hx-get="/library/import/pick-title"
+          hx-target="#modal-target-2"
+          hx-swap="innerHTML"
+          class="flex items-center gap-2.5 px-6 py-3 border-b border-border-default">
+        <input type="hidden" name="folder" value="{{ folder }}">
+        <input type="hidden" name="path" value="{{ path }}">
+        <input type="hidden" name="idx" value="{{ idx }}">
+        {% if let Some(id) = item_id %}<input type="hidden" name="item" value="{{ id }}">{% endif %}
+        <input type="text" name="q" value="{{ query }}" autofocus placeholder="filtrar biblioteca…"
+               class="flex-1 px-3 h-9 rounded-md bg-bg-canvas border border-border-strong text-sm text-fg-primary placeholder:text-fg-muted focus:outline-none focus:border-accent-solid">
+        <button type="submit" class="btn btn-sm btn-secondary">filtrar</button>
+    </form>
+
+    <div class="max-h-[420px] overflow-y-auto">
+        {% if titles.is_empty() %}
+        <p class="px-6 py-8 text-center text-sm text-fg-muted">
+            {% if total == 0 %}
+            A biblioteca está vazia. Adicione o título primeiro — o import só oferece o que já está no catálogo.
+            {% else %}
+            Nenhum dos {{ total }} títulos da biblioteca casa com “{{ query }}”.
+            {% endif %}
+        </p>
+        {% endif %}
+        {% for t in titles %}
+        <button type="button"
+                hx-get="/library/import/row?folder={{ folder|urlencode_strict }}&amp;path={{ path|urlencode_strict }}&amp;idx={{ idx }}&amp;target={{ t.id }}{% if let Some(id) = item_id %}&amp;item={{ id }}{% endif %}"
+                hx-target="#import-row-{{ idx }}"
+                hx-swap="outerHTML"
+                onclick="this.closest('dialog').close()"
+                class="w-full flex items-center gap-3 px-6 py-2.5 border-b border-border-default cursor-pointer text-left hover:bg-bg-muted">
+            <div class="min-w-0 flex-1 flex items-center gap-2">
+                <span class="text-sm font-medium text-fg-primary truncate">{{ t.title }}</span>
+                {% if let Some(y) = t.year %}<span class="shrink-0 text-xs text-fg-muted">{{ y }}</span>{% endif %}
+                <span class="shrink-0 inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium {% if t.is_series %}bg-secondary-soft text-secondary-soft-fg{% else %}bg-accent-soft text-accent-soft-fg{% endif %}">{% if t.is_series %}série{% else %}filme{% endif %}</span>
+            </div>
+            <span class="shrink-0 text-xs text-fg-muted truncate max-w-[240px]">{{ t.meta }}</span>
+        </button>
+        {% endfor %}
+    </div>
+
+    <div class="h-px bg-border-default"></div>
+
+    <footer class="flex items-center gap-3 px-6 py-4">
+        <div class="min-w-0">
+            <p class="text-sm font-medium text-fg-primary">{{ total }} título(s) na biblioteca</p>
+            <p class="text-xs text-fg-muted">
+                Só o que já está no catálogo aparece aqui. Faltando um, adicione o título e importe depois.
+            </p>
+        </div>
+        <div class="flex-1"></div>
+        <button type="button"
+                onclick="this.closest('dialog').close()"
+                class="btn btn-md btn-secondary">
+            Cancelar
+        </button>
+    </footer>
+    </div>
+</dialog>

@@ -56,11 +56,12 @@ use crate::web::templates::{
     DownloadClientsListPartial, DownloadClientsTemplate, EditArrInstanceModalPartial,
     EditDownloadClientModalPartial, EditProviderModalPartial, EndpointHealthView,
     EndpointRequestView, EpisodeView, ErrorTemplate, GrabView, HealthTemplate, ImportIgnoredView,
-    ImportModalPartial, ImportOutcomeView, ImportReportPartial, ImportRowView,
-    InteractiveReleaseView, InteractiveResultsPartial, LibraryAddOptionsModalPartial,
-    LibraryAddTemplate, LibraryDetailTemplate, LibraryDetailView, LibraryItemView,
-    LibrarySeasonPartial, LibraryTemplate, LoginTemplate, NewProfileModalPartial,
-    NewSearchModalPartial, PathMappingClientOption, PathMappingView, PathMappingsPartial,
+    ImportModalPartial, ImportOutcomeView, ImportPickEpisodePartial, ImportPickTitlePartial,
+    ImportReportPartial, ImportRowPartial, ImportRowView, InteractiveReleaseView,
+    InteractiveResultsPartial, LibraryAddOptionsModalPartial, LibraryAddTemplate,
+    LibraryDetailTemplate, LibraryDetailView, LibraryItemView, LibrarySeasonPartial,
+    LibraryTemplate, LoginTemplate, NewProfileModalPartial, NewSearchModalPartial,
+    PathMappingClientOption, PathMappingView, PathMappingsPartial, PickEpisodeView, PickTitleView,
     ProfileEditorTemplate, ProfileView, ProfilesTemplate, ProviderHealthView, ProviderView,
     ProvidersListPartial, ProvidersTemplate, PushGroupView, PushHistoryView, PushesFilterView,
     PushesTemplate, RecentSearchView, ReleasesTemplate, RootFolderView, RootFoldersListPartial,
@@ -126,11 +127,7 @@ pub fn router(state: AppState, static_dir: &std::path::Path) -> Router {
         .route("/library/add", get(library_add).post(library_add_submit))
         .route("/library/add/options", get(library_add_options))
         .route("/library/verify", post(library_verify))
-        .route(
-            "/library/import",
-            get(library_import).post(library_import_submit),
-        )
-        .route("/library/import/unignore", post(library_import_unignore))
+        .merge(import_routes())
         .route("/library/{id}/monitor", post(library_toggle_monitor))
         .route("/library/{id}/profile", post(library_set_profile))
         .route("/library/{id}/refresh", post(library_refresh))
@@ -193,6 +190,27 @@ pub fn router(state: AppState, static_dir: &std::path::Path) -> Router {
 /// Download-client admin routes, merged into the protected router (and
 /// so covered by the same auth layer). Split out to keep [`router`]
 /// itself readable as one screen.
+/// The import-from-disk surface, kept together so `router` stays under
+/// the line limit and so this block reads as one flow.
+///
+/// All five sit under `/library/import`, which is a *literal* sibling of
+/// `/library/{id}` — and that catch-all is registered last precisely so
+/// literals win.
+fn import_routes() -> Router<AppState> {
+    Router::new()
+        .route(
+            "/library/import",
+            get(library_import).post(library_import_submit),
+        )
+        .route("/library/import/unignore", post(library_import_unignore))
+        .route("/library/import/pick-title", get(library_import_pick_title))
+        .route(
+            "/library/import/pick-episode",
+            get(library_import_pick_episode),
+        )
+        .route("/library/import/row", get(library_import_row))
+}
+
 fn download_client_routes() -> Router<AppState> {
     Router::new()
         .route(
@@ -2138,7 +2156,12 @@ async fn import_modal(
             view.covered = plan.covered();
             view.over_cap = plan.over_cap;
             view.ignored_here = plan.ignored;
-            view.rows = plan.files.into_iter().map(import_row).collect();
+            view.rows = plan
+                .files
+                .into_iter()
+                .enumerate()
+                .map(|(idx, file)| import_row(idx, file))
+                .collect();
         }
         // A folder that cannot be read is a form error, not a 500: the
         // operator retypes the path in the field that is already there.
@@ -2148,12 +2171,14 @@ async fn import_modal(
     Ok(view)
 }
 
-fn import_row(file: crate::adopt::PlannedFile) -> ImportRowView {
+fn import_row(idx: usize, file: crate::adopt::PlannedFile) -> ImportRowView {
     ImportRowView {
+        idx,
         token: file.token,
         path: file.path.to_string_lossy().to_string(),
         name: file.name,
         size: humanize_bytes(file.size),
+        item: file.item_id.map(|i| i.to_string()).unwrap_or_default(),
         title: file.title,
         is_series: file.is_series,
         season: file.season,
@@ -2244,6 +2269,161 @@ fn import_report(report: &crate::adopt::Report) -> ImportReportPartial {
             })
             .collect(),
     }
+}
+
+/// Query shared by the pickers and the single-row render.
+#[derive(Debug, Deserialize)]
+struct PickQuery {
+    /// Folder being imported — the authorisation boundary for `path`.
+    folder: String,
+    /// File the choice applies to.
+    path: String,
+    /// Row to swap when the operator picks.
+    idx: usize,
+    /// Item the whole dialog is pinned to, carried through so the
+    /// re-rendered row keeps its links.
+    item: Option<Uuid>,
+    /// Catalogue entry chosen for *this file*.
+    target: Option<Uuid>,
+    /// Episode chosen for this file.
+    episode: Option<Uuid>,
+    /// Season shown by the episode picker.
+    season: Option<i32>,
+    /// Filter text in the title picker.
+    q: Option<String>,
+}
+
+/// `GET /library/import/pick-title` — the library, to choose from.
+///
+/// Only the library: adding a title is a different decision, with a root
+/// folder, a profile and a monitoring scope attached, and burying that
+/// inside an import is how those become invisible defaults.
+async fn library_import_pick_title(
+    State(state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<PickQuery>,
+) -> Result<Response, AppError> {
+    let all = library::list(state.pool()).await?;
+    let total = all.len();
+    let query = q.q.unwrap_or_default();
+    let needle = query.trim().to_lowercase();
+
+    let mut titles = Vec::new();
+    for item in all {
+        if !needle.is_empty() && !item.title.to_lowercase().contains(&needle) {
+            continue;
+        }
+        let is_series = item.media_type == crate::db::library::MediaType::Tv;
+        // What tells two similar entries apart: a series is described by
+        // its tree, a movie by where it would land.
+        let meta = if is_series {
+            let episodes = library::episodes(state.pool(), item.id).await?;
+            let seasons: std::collections::HashSet<i32> = episodes
+                .iter()
+                .filter(|e| e.season_number > 0)
+                .map(|e| e.season_number)
+                .collect();
+            let aired = episodes.iter().filter(|e| e.season_number > 0).count();
+            format!("{} temporada(s) · {aired} episódio(s)", seasons.len())
+        } else {
+            item.root_folder.clone().unwrap_or_default()
+        };
+        titles.push(PickTitleView {
+            id: item.id.to_string(),
+            title: item.title,
+            year: item.year,
+            is_series,
+            meta,
+        });
+    }
+
+    html(&ImportPickTitlePartial {
+        file_name: file_name_of(&q.path),
+        path: q.path,
+        idx: q.idx,
+        folder: q.folder,
+        item_id: q.item.map(|i| i.to_string()),
+        query,
+        titles,
+        total,
+    })
+}
+
+/// `GET /library/import/pick-episode` — the season's slots, free and
+/// taken alike.
+async fn library_import_pick_episode(
+    State(state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<PickQuery>,
+) -> Result<Response, AppError> {
+    let target = q
+        .target
+        .ok_or_else(|| AppError::InvalidInput("escolha o título primeiro".to_owned()))?;
+    let item = library::get_by_id(state.pool(), target).await?;
+    let all = crate::adopt::episode_slots(&state, target, None).await?;
+    let mut seasons: Vec<i32> = all.iter().map(|s| s.season).collect();
+    seasons.sort_unstable();
+    seasons.dedup();
+    // Default to the first season rather than to everything: a long
+    // series would otherwise open on a list of hundreds.
+    let season = q.season.or_else(|| seasons.first().copied());
+
+    let shown: Vec<&crate::adopt::EpisodeSlot> = all
+        .iter()
+        .filter(|s| season.is_none_or(|want| s.season == want))
+        .collect();
+    let free = shown.iter().filter(|s| !s.taken).count();
+
+    html(&ImportPickEpisodePartial {
+        file_name: file_name_of(&q.path),
+        path: q.path,
+        idx: q.idx,
+        folder: q.folder,
+        item_id: q.item.map(|i| i.to_string()),
+        target_item: target.to_string(),
+        target_title: item.title,
+        seasons,
+        season,
+        slots: shown
+            .iter()
+            .map(|s| PickEpisodeView {
+                id: s.id.to_string(),
+                code: format!("S{:02}E{:02}", s.season, s.number),
+                title: s.title.clone().unwrap_or_else(|| "—".to_owned()),
+                taken: s.taken,
+            })
+            .collect(),
+        free,
+    })
+}
+
+/// `GET /library/import/row` — one row, rebuilt after a picker assigned
+/// a target.
+///
+/// Swapping a single row is what keeps the rest of the operator's work:
+/// re-rendering the whole dialog would reset every checkbox and every
+/// assignment already made.
+async fn library_import_row(
+    State(state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<PickQuery>,
+) -> Result<Response, AppError> {
+    let file = crate::adopt::plan_one(
+        &state,
+        std::path::Path::new(&q.folder),
+        std::path::Path::new(&q.path),
+        q.target,
+        q.episode,
+    )
+    .await?;
+    html(&ImportRowPartial {
+        row: import_row(q.idx, file),
+        folder: q.folder,
+        item_id: q.item.map(|i| i.to_string()),
+    })
+}
+
+fn file_name_of(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_name()
+        .map_or_else(|| path.to_owned(), |n| n.to_string_lossy().to_string())
 }
 
 /// Form for `POST /library/import/unignore`.

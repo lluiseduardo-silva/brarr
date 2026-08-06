@@ -1349,8 +1349,15 @@ pub struct ImportModalPartial {
 }
 
 /// One file in the import dialog.
+///
+/// Rendered both inside the dialog's loop and on its own, when a picker
+/// swaps a single row back in. `partials/import_row.html` is shared by
+/// the two, which is why the index travels on the row rather than coming
+/// from `loop.index0`: the standalone render has no loop.
 #[derive(Debug)]
 pub struct ImportRowView {
+    /// Position in the list, so a picker can aim at `#import-row-N`.
+    pub idx: usize,
     /// Round-trip token; `None` means the row cannot be confirmed yet.
     pub token: Option<String>,
     /// Absolute path, submitted when ignoring.
@@ -1361,6 +1368,9 @@ pub struct ImportRowView {
     pub size: String,
     /// Assigned title, when one was matched.
     pub title: Option<String>,
+    /// Its catalogue id, which the episode picker needs. Empty when no
+    /// title is assigned yet.
+    pub item: String,
     /// Drives the type chip and whether season/episode mean anything.
     pub is_series: bool,
     /// Season the name claims.
@@ -1382,6 +1392,99 @@ pub struct ImportIgnoredView {
     pub path: String,
     /// File name, for the row.
     pub name: String,
+}
+
+/// One import row on its own, swapped in after a picker assigns a
+/// target. Same template the dialog's loop includes.
+#[derive(Debug, Template)]
+#[template(path = "partials/import_row.html")]
+pub struct ImportRowPartial {
+    /// The row itself.
+    pub row: ImportRowView,
+    /// Folder being imported, so the row's pickers can carry it.
+    pub folder: String,
+    /// Item the dialog is pinned to, when it is.
+    pub item_id: Option<String>,
+}
+
+/// The title picker — a dialog on top of the import dialog.
+#[derive(Debug, Template)]
+#[template(path = "partials/import_pick_title.html")]
+pub struct ImportPickTitlePartial {
+    /// File the choice applies to.
+    pub file_name: String,
+    /// Its absolute path, posted back.
+    pub path: String,
+    /// Row to swap when the operator picks.
+    pub idx: usize,
+    /// Folder being imported.
+    pub folder: String,
+    /// Item the dialog is pinned to, when it is.
+    pub item_id: Option<String>,
+    /// Current filter text.
+    pub query: String,
+    /// Matching catalogue entries.
+    pub titles: Vec<PickTitleView>,
+    /// How many entries the library has in total, so an empty filter
+    /// result reads as "nothing matched" and not as "empty library".
+    pub total: usize,
+}
+
+/// One catalogue entry in the title picker.
+#[derive(Debug)]
+pub struct PickTitleView {
+    /// Catalogue id.
+    pub id: String,
+    /// Localised title.
+    pub title: String,
+    /// Release year.
+    pub year: Option<i32>,
+    /// Drives the type chip.
+    pub is_series: bool,
+    /// `4 temporadas · 32 episódios` for a series, the root folder for a
+    /// movie — what tells two similar entries apart.
+    pub meta: String,
+}
+
+/// The episode picker — a dialog on top of the import dialog.
+#[derive(Debug, Template)]
+#[template(path = "partials/import_pick_episode.html")]
+pub struct ImportPickEpisodePartial {
+    /// File the choice applies to.
+    pub file_name: String,
+    /// Its absolute path, posted back.
+    pub path: String,
+    /// Row to swap when the operator picks.
+    pub idx: usize,
+    /// Folder being imported.
+    pub folder: String,
+    /// Item the dialog is pinned to, when it is.
+    pub item_id: Option<String>,
+    /// Catalogue entry the episodes belong to.
+    pub target_item: String,
+    /// Its title, for the header.
+    pub target_title: String,
+    /// Seasons to offer as chips.
+    pub seasons: Vec<i32>,
+    /// Season currently shown.
+    pub season: Option<i32>,
+    /// Episodes of that season.
+    pub slots: Vec<PickEpisodeView>,
+    /// How many of them nothing covers yet.
+    pub free: usize,
+}
+
+/// One episode slot in the picker.
+#[derive(Debug)]
+pub struct PickEpisodeView {
+    /// Catalogue id.
+    pub id: String,
+    /// `S04E07`.
+    pub code: String,
+    /// Episode title, when TMDB has one.
+    pub title: String,
+    /// A live grab already covers it.
+    pub taken: bool,
 }
 
 /// The report the confirmation renders, in the same dialog shell.

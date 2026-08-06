@@ -1,0 +1,88 @@
+{# Episode picker — a dialog on top of the import dialog.
+
+   Both halves are shown: what is free and what a live grab already
+   covers. The plan this grew from offered only the free slots, which
+   answers "where can this go" but never "why is E01 missing from the
+   list" — and it is the covered half that stops the operator pointing
+   two files at the same episode without noticing.
+
+   Season 0 is TMDB's specials bucket and is excluded here exactly as the
+   sweep excludes it. #}
+<dialog class="bg-transparent p-0 max-w-full max-h-full backdrop:bg-[rgba(10,6,18,0.7)]"
+        aria-label="Selecionar episódio">
+    <div class="w-[760px] max-w-full card-hairline bg-bg-surface border border-border-default rounded-2xl overflow-hidden"
+         style="box-shadow: 0 24px 60px var(--color-glow);">
+
+    <header class="flex items-center justify-between gap-3 px-6 py-5">
+        <div class="min-w-0">
+            <h2 class="text-[22px] font-semibold leading-tight text-fg-primary">Selecionar episódio</h2>
+            <p class="text-xs text-fg-muted truncate" title="{{ path }}">
+                {{ target_title }} · <span class="font-mono">{{ file_name }}</span>
+            </p>
+        </div>
+        <button type="button"
+                onclick="this.closest('dialog').close()"
+                class="btn btn-md btn-icon btn-secondary"
+                aria-label="Fechar">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
+    </header>
+
+    <div class="h-px bg-border-default"></div>
+
+    <div class="flex items-center gap-2 flex-wrap px-6 py-3 border-b border-border-default">
+        <span class="text-xs text-fg-muted">temporada</span>
+        {% for s in seasons %}
+        <a href="#"
+           hx-get="/library/import/pick-episode?folder={{ folder|urlencode_strict }}&amp;path={{ path|urlencode_strict }}&amp;idx={{ idx }}&amp;target={{ target_item }}&amp;season={{ s }}{% if let Some(id) = item_id %}&amp;item={{ id }}{% endif %}"
+           hx-target="#modal-target-2"
+           hx-swap="innerHTML"
+           class="inline-flex items-center px-3 h-7 rounded-full text-sm font-medium {% if season == Some(s.clone()) %}bg-accent-solid text-on-accent-solid{% else %}bg-bg-surface border border-border-default text-fg-secondary hover:text-fg-primary{% endif %}">T{{ s }}</a>
+        {% endfor %}
+        <div class="flex-1"></div>
+        <span class="text-xs text-fg-muted">{{ slots.len() }} episódio(s) · {{ free }} sem arquivo</span>
+    </div>
+
+    <div class="max-h-[420px] overflow-y-auto">
+        {% if slots.is_empty() %}
+        <p class="px-6 py-8 text-center text-sm text-fg-muted">
+            Esta série ainda não tem episódios no catálogo. Use “atualizar metadados” na tela dela.
+        </p>
+        {% endif %}
+        {% for slot in slots %}
+        <button type="button"
+                hx-get="/library/import/row?folder={{ folder|urlencode_strict }}&amp;path={{ path|urlencode_strict }}&amp;idx={{ idx }}&amp;target={{ target_item }}&amp;episode={{ slot.id }}{% if let Some(id) = item_id %}&amp;item={{ id }}{% endif %}"
+                hx-target="#import-row-{{ idx }}"
+                hx-swap="outerHTML"
+                onclick="this.closest('dialog').close()"
+                class="w-full flex items-center gap-3 px-6 py-2.5 border-b border-border-default cursor-pointer text-left hover:bg-bg-muted {% if slot.taken %}bg-bg-canvas{% endif %}">
+            <span class="w-20 shrink-0 text-sm font-mono {% if slot.taken %}text-fg-muted{% else %}text-fg-primary{% endif %}">{{ slot.code }}</span>
+            <span class="flex-1 min-w-0 text-sm {% if slot.taken %}text-fg-muted{% else %}text-fg-secondary{% endif %} truncate">{{ slot.title }}</span>
+            {% if slot.taken %}
+            <span class="shrink-0 inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium bg-bg-muted text-fg-muted">coberto por outro arquivo</span>
+            {% else %}
+            <span class="shrink-0 inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium bg-success-soft text-success-soft-fg">sem arquivo</span>
+            {% endif %}
+        </button>
+        {% endfor %}
+    </div>
+
+    <div class="h-px bg-border-default"></div>
+
+    <footer class="flex items-center gap-3 px-6 py-4">
+        <div class="min-w-0 w-[380px]">
+            <p class="text-sm font-medium text-fg-primary">Escolher aqui vale só para este arquivo</p>
+            <p class="text-xs text-fg-muted">
+                Escolher um episódio já coberto não sobrescreve nada: a barreira recusa a segunda adoção
+                e a linha volta com o motivo.
+            </p>
+        </div>
+        <div class="flex-1"></div>
+        <button type="button"
+                onclick="this.closest('dialog').close()"
+                class="btn btn-md btn-secondary">
+            Cancelar
+        </button>
+    </footer>
+    </div>
+</dialog>

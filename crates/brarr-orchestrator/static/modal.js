@@ -9,7 +9,12 @@
 (function () {
     'use strict';
 
-    var SLOT_ID = 'modal-target';
+    // Two slots, because the import dialog opens a picker on top of
+    // itself. They are separate elements on purpose: emptying the slot
+    // on close is what keeps a re-open fresh, and with one shared slot
+    // closing the picker would empty the importer underneath it —
+    // taking every assignment the operator had already made.
+    var SLOT_IDS = ['modal-target', 'modal-target-2'];
 
     function openDialogIfPresent(slot) {
         if (!slot) return;
@@ -31,19 +36,23 @@
     }
 
     document.addEventListener('htmx:afterSwap', function (evt) {
-        if (evt.target && evt.target.id === SLOT_ID) {
+        if (evt.target && SLOT_IDS.indexOf(evt.target.id) !== -1) {
             openDialogIfPresent(evt.target);
         }
     });
 
-    // Initial page load — if the slot already has a dialog (e.g.
+    function openAll() {
+        for (var i = 0; i < SLOT_IDS.length; i++) {
+            openDialogIfPresent(document.getElementById(SLOT_IDS[i]));
+        }
+    }
+
+    // Initial page load — if a slot already has a dialog (e.g.
     // server-rendered modal on a flow we add later) honour the same
     // contract.
     if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', function () {
-            openDialogIfPresent(document.getElementById(SLOT_ID));
-        });
+        document.addEventListener('DOMContentLoaded', openAll);
     } else {
-        openDialogIfPresent(document.getElementById(SLOT_ID));
+        openAll();
     }
 })();

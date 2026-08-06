@@ -313,6 +313,168 @@ async fn ignoring_a_file_survives_reopening_and_can_be_undone() {
     assert!(restored.contains("Ignorados 0"));
 }
 
+/// The picker assigns a title to a file brarr could not match, and the
+/// row comes back importable. Swapping one row rather than re-rendering
+/// the dialog is what keeps every other assignment the operator made.
+#[tokio::test]
+async fn picking_a_title_makes_an_unmatched_file_importable() {
+    let h = spawn("picktitle").await;
+    let item = add_series(&h.state).await;
+    let folder = h.base.join("torrents");
+    // Nothing in this name says "The Boys", so the matcher declines.
+    let file = folder.join("bagunca.S04E05.1080p.mkv");
+    std::fs::write(&file, b"x").unwrap();
+
+    let client = reqwest::Client::new();
+    let dir = folder.to_string_lossy().to_string();
+    let body = client
+        .get(format!("http://{}/library/import", h.addr))
+        .query(&[("folder", dir.clone())])
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(body.contains("escolher título"), "{body}");
+    assert!(
+        fingerprints(&body).is_empty(),
+        "a file with no title cannot be imported"
+    );
+
+    // The picker lists the library.
+    let picker = client
+        .get(format!("http://{}/library/import/pick-title", h.addr))
+        .query(&[
+            ("folder", dir.clone()),
+            ("path", file.to_string_lossy().to_string()),
+            ("idx", "0".to_owned()),
+        ])
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(picker.contains("Selecionar título"));
+    assert!(picker.contains("The Boys"));
+    assert!(
+        picker.contains("modal-target-2") || picker.contains("import-row-0"),
+        "the picker aims at the second slot and swaps one row"
+    );
+
+    // Choosing it rebuilds just that row, now with a target.
+    let row = client
+        .get(format!("http://{}/library/import/row", h.addr))
+        .query(&[
+            ("folder", dir.clone()),
+            ("path", file.to_string_lossy().to_string()),
+            ("idx", "0".to_owned()),
+            ("target", item.to_string()),
+        ])
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(row.contains("id=\"import-row-0\""), "{row}");
+    assert!(row.contains("The Boys"));
+    assert_eq!(
+        fingerprints(&row).len(),
+        1,
+        "the row is now importable: the marker gave S04E05"
+    );
+}
+
+/// The folder is the authorisation boundary. Without this the row
+/// endpoint would be "record any path on this machine as my library".
+#[tokio::test]
+async fn a_path_outside_the_folder_is_refused() {
+    let h = spawn("outside").await;
+    let item = add_series(&h.state).await;
+    let outside = h.base.join("midias").join("The Boys.S04E01.mkv");
+    std::fs::write(&outside, b"x").unwrap();
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("http://{}/library/import/row", h.addr))
+        .query(&[
+            (
+                "folder",
+                h.base.join("torrents").to_string_lossy().to_string(),
+            ),
+            ("path", outside.to_string_lossy().to_string()),
+            ("idx", "0".to_owned()),
+            ("target", item.to_string()),
+        ])
+        .send()
+        .await
+        .unwrap();
+    assert_ne!(resp.status(), 200, "a path outside the folder is not a row");
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("fora da pasta"), "{body}");
+}
+
+/// The episode picker shows both halves — free and already covered.
+/// Offering only the free ones answers "where can this go" but never
+/// "why is E01 missing from the list", and it is the covered half that
+/// stops two files being pointed at one episode.
+#[tokio::test]
+async fn the_episode_picker_shows_taken_slots_too() {
+    let h = spawn("pickep").await;
+    let item = add_series(&h.state).await;
+    let folder = h.base.join("torrents");
+    let file = folder.join("bagunca-sem-marcador.mkv");
+    std::fs::write(&file, b"x").unwrap();
+
+    // Adopt one episode first, so a slot is taken.
+    let episodes = library::episodes(h.state.pool(), item).await.unwrap();
+    let taken = episodes.iter().find(|e| e.episode_number == 1).unwrap();
+    let already = h.base.join("midias").join("ja-tenho.mkv");
+    std::fs::write(&already, b"y").unwrap();
+    let grab = grabs::reserve_local(
+        h.state.pool(),
+        &grabs::LocalGrab {
+            item_id: item,
+            episode_id: Some(taken.id),
+            source_path: &already.to_string_lossy(),
+            release_name: "ja-tenho.mkv",
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    grabs::mark_imported(h.state.pool(), grab.id, &already.to_string_lossy())
+        .await
+        .unwrap();
+
+    let client = reqwest::Client::new();
+    let picker = client
+        .get(format!("http://{}/library/import/pick-episode", h.addr))
+        .query(&[
+            ("folder", folder.to_string_lossy().to_string()),
+            ("path", file.to_string_lossy().to_string()),
+            ("idx", "0".to_owned()),
+            ("target", item.to_string()),
+        ])
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+
+    assert!(picker.contains("Selecionar episódio"), "{picker}");
+    assert!(picker.contains("S04E01"));
+    assert!(
+        picker.contains("coberto por outro arquivo"),
+        "the taken slot is shown, not hidden"
+    );
+    assert!(picker.contains("sem arquivo"), "and so are the free ones");
+    assert!(picker.contains("7 sem arquivo"), "8 episodes, 1 taken");
+}
+
 /// A folder brarr cannot read is a form error inside the dialog, not a
 /// 500 — the operator retypes the path in the field that is already
 /// there. In Docker a wrong path is the single most likely mistake.
