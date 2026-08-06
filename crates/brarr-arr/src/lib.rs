@@ -221,6 +221,159 @@ pub struct WantedMovie {
     pub has_file: bool,
 }
 
+/// One catalogued movie from Radarr `/api/v3/movie`, with everything a
+/// migration into brarr's own library needs.
+///
+/// Separate from [`WantedMovie`] on purpose: that one is the poller's
+/// slice, and widening it would make every poll deserialise fields it
+/// never reads. Radarr answers ~60 fields per movie and the full list
+/// is over a megabyte on a real collection.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArrMovie {
+    /// Radarr-side numeric id.
+    pub id: u64,
+    /// Title as Radarr shows it.
+    pub title: String,
+    /// Release year. `0` when Radarr has none.
+    #[serde(default)]
+    pub year: i32,
+    /// `TMDb` id — brarr's library key. `0` means "not linked".
+    #[serde(default)]
+    pub tmdb_id: u32,
+    /// `IMDb` id with the `tt` prefix, empty when unresolved.
+    #[serde(default)]
+    pub imdb_id: String,
+    /// Whether Radarr is chasing this title.
+    #[serde(default)]
+    pub monitored: bool,
+    /// `true` when Radarr has a file for it.
+    #[serde(default)]
+    pub has_file: bool,
+    /// Folder Radarr keeps it in, **in Radarr's namespace**. On the
+    /// operator's stack that is `/data/Filmes/…` while brarr mounts the
+    /// same share at `/midias/Filmes` — every path from here has to be
+    /// translated before it means anything locally.
+    #[serde(default)]
+    pub path: String,
+    /// The root folder that path sits under, same namespace caveat.
+    #[serde(default)]
+    pub root_folder_path: String,
+    /// The file itself, when there is one.
+    #[serde(default)]
+    pub movie_file: Option<ArrFile>,
+}
+
+/// A file as an \*arr reports it. Only the path matters here — brarr
+/// stats it itself once translated.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArrFile {
+    /// \*arr-side file id.
+    #[serde(default)]
+    pub id: u64,
+    /// Absolute path in the \*arr's namespace.
+    #[serde(default)]
+    pub path: String,
+    /// Size in bytes, as the \*arr recorded it.
+    #[serde(default)]
+    pub size: u64,
+}
+
+/// One catalogued series from Sonarr `/api/v3/series`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArrSeries {
+    /// Sonarr-side numeric id, needed to fetch its episodes.
+    pub id: u64,
+    /// Title as Sonarr shows it.
+    pub title: String,
+    /// First-air year. `0` when Sonarr has none.
+    #[serde(default)]
+    pub year: i32,
+    /// `TVDb` id — Sonarr's own axis.
+    #[serde(default)]
+    pub tvdb_id: u32,
+    /// `TMDb` id. Sonarr v3+ carries it, which spares brarr a
+    /// `find_by_tvdb` round trip per series; `0` when absent, and the
+    /// caller then has to bridge through TMDB's find endpoint.
+    #[serde(default)]
+    pub tmdb_id: u32,
+    /// `IMDb` id with the `tt` prefix, empty when unresolved.
+    #[serde(default)]
+    pub imdb_id: String,
+    /// Whether Sonarr is chasing this series at all.
+    #[serde(default)]
+    pub monitored: bool,
+    /// Series folder, in Sonarr's namespace.
+    #[serde(default)]
+    pub path: String,
+    /// Its root folder, same namespace caveat.
+    #[serde(default)]
+    pub root_folder_path: String,
+    /// Per-season monitoring, which is the flag brarr's sweep reads.
+    #[serde(default)]
+    pub seasons: Vec<ArrSeason>,
+}
+
+/// One season's monitoring state.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArrSeason {
+    /// Season number. `0` is the specials bucket, which brarr excludes
+    /// everywhere else and excludes here too.
+    #[serde(default)]
+    pub season_number: i32,
+    /// Whether Sonarr chases this season.
+    #[serde(default)]
+    pub monitored: bool,
+}
+
+/// One root folder an \*arr manages, in its own namespace.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArrRootFolder {
+    /// \*arr-side id.
+    #[serde(default)]
+    pub id: u64,
+    /// Absolute path as the \*arr sees it — `/data/Series` on the
+    /// operator's stack, against brarr's `/midias/Series`.
+    #[serde(default)]
+    pub path: String,
+}
+
+/// One episode from Sonarr `/api/v3/episode?seriesId=N`.
+///
+/// Fetched **without** `includeEpisodeFile`: that flag inlines the whole
+/// file object with its media info and turns one series into 300 KB of
+/// JSON. The id is enough — [`ArrClient::episode_files`] resolves it in
+/// one small second call.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArrEpisode {
+    /// Sonarr-side episode id.
+    pub id: u64,
+    /// Season it belongs to.
+    #[serde(default)]
+    pub season_number: i32,
+    /// Number within the season.
+    #[serde(default)]
+    pub episode_number: i32,
+    /// Whether Sonarr chases this episode.
+    #[serde(default)]
+    pub monitored: bool,
+    /// `true` when Sonarr has a file for it.
+    #[serde(default)]
+    pub has_file: bool,
+    /// The file covering it. `0` means none.
+    ///
+    /// **This is the whole reason to import from Sonarr rather than from
+    /// disk.** Sonarr already resolved which file is which episode —
+    /// including absolute-numbered anime that no marker regex reads.
+    #[serde(default)]
+    pub episode_file_id: u64,
+}
+
 /// One wanted-missing episode row from Sonarr `/api/v3/wanted/missing`.
 /// Brarr's poller iterates this to drive per-episode TV searches.
 ///
@@ -615,6 +768,102 @@ impl ArrClient {
             kind: self.instance.kind,
             source,
         })
+    }
+
+    /// One GET against this instance, decoded.
+    ///
+    /// Every catalogue call has the same shape and the same three
+    /// failure modes; writing it once keeps them from drifting apart.
+    async fn get_json<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, ArrError> {
+        let url = self.endpoint(path)?;
+        let resp = self
+            .http
+            .get(url)
+            .header("X-Api-Key", &self.instance.api_key)
+            .send()
+            .await
+            .map_err(|source| ArrError::Transport {
+                kind: self.instance.kind,
+                source,
+            })?;
+        let status = resp.status();
+        let body = resp.text().await.map_err(|source| ArrError::Transport {
+            kind: self.instance.kind,
+            source,
+        })?;
+        if !status.is_success() {
+            return Err(ArrError::Http {
+                kind: self.instance.kind,
+                status: status.as_u16(),
+                body: truncate_body(&body),
+            });
+        }
+        serde_json::from_str(&body).map_err(|source| ArrError::Decode {
+            kind: self.instance.kind,
+            source,
+        })
+    }
+
+    /// `GET /api/v3/movie` — the whole Radarr catalogue, with paths.
+    ///
+    /// The migration read, as opposed to [`Self::monitored_movies`]
+    /// which is the poller's narrower slice.
+    ///
+    /// # Errors
+    ///
+    /// [`ArrError::Transport`] when the instance is unreachable,
+    /// [`ArrError::Http`] on a non-2xx (a Sonarr answers 404 here),
+    /// [`ArrError::Decode`] when the payload does not parse.
+    pub async fn catalogue_movies(&self) -> Result<Vec<ArrMovie>, ArrError> {
+        self.get_json("movie").await
+    }
+
+    /// `GET /api/v3/series` — the whole Sonarr catalogue, with paths and
+    /// per-season monitoring.
+    ///
+    /// # Errors
+    ///
+    /// Same shape as [`Self::catalogue_movies`].
+    pub async fn catalogue_series(&self) -> Result<Vec<ArrSeries>, ArrError> {
+        self.get_json("series").await
+    }
+
+    /// `GET /api/v3/episode?seriesId=N` — one series' episodes.
+    ///
+    /// Deliberately without `includeEpisodeFile`: that inlines the file
+    /// object with its media info and takes one series from a handful of
+    /// KB to ~300 KB. Pair it with [`Self::episode_files`].
+    ///
+    /// # Errors
+    ///
+    /// Same shape as [`Self::catalogue_movies`].
+    pub async fn episodes(&self, series_id: u64) -> Result<Vec<ArrEpisode>, ArrError> {
+        self.get_json(&format!("episode?seriesId={series_id}"))
+            .await
+    }
+
+    /// `GET /api/v3/episodefile?seriesId=N` — id → path for one series.
+    ///
+    /// # Errors
+    ///
+    /// Same shape as [`Self::catalogue_movies`].
+    pub async fn episode_files(&self, series_id: u64) -> Result<Vec<ArrFile>, ArrError> {
+        self.get_json(&format!("episodefile?seriesId={series_id}"))
+            .await
+    }
+
+    /// `GET /api/v3/rootfolder` — the roots this instance manages.
+    ///
+    /// What the import screen maps onto brarr's own root folders. The
+    /// payload also carries `unmappedFolders`, which is ignored: those
+    /// are directories with no catalogue entry, and importing is about
+    /// what the \*arr *knows*, not what happens to be on the disk.
+    ///
+    /// # Errors
+    ///
+    /// Same shape as [`Self::catalogue_movies`].
+    pub async fn root_folders(&self) -> Result<Vec<ArrRootFolder>, ArrError> {
+        self.get_json("rootfolder").await
     }
 
     /// `POST /api/v3/release/push` — inject a release for *arr to

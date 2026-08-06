@@ -322,3 +322,211 @@ async fn push_release_supports_usenet_protocol_value() {
     payload.protocol = ArrProtocol::Usenet;
     c.push_release(&payload).await.unwrap();
 }
+
+// ---------------------------------------------------------------------
+// Catalogue reads — the migration path.
+//
+// The payloads below mirror what the operator's own stack answers,
+// captured live: Sonarr v3 does carry `tmdbId` on the series (so no
+// TVDB bridge is needed), and every path comes back in the *arr's own
+// namespace — `/data/Series/…` against brarr's `/midias/Series`. The
+// tests pin that the client hands the raw path through untranslated,
+// because translating is the caller's decision and doing it here would
+// bury it.
+// ---------------------------------------------------------------------
+
+#[tokio::test]
+async fn catalogue_series_carries_paths_seasons_and_the_tmdb_id() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v3/series"))
+        .and(header("X-Api-Key", API_KEY))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            {
+                "id": 12,
+                "title": "9-1-1",
+                "year": 2018,
+                "tvdbId": 328_724,
+                "tmdbId": 75_219,
+                "imdbId": "tt7908628",
+                "monitored": true,
+                "path": "/data/Series/9-1-1",
+                "rootFolderPath": "/data/Series",
+                "qualityProfileId": 4,
+                "seasons": [
+                    { "seasonNumber": 0, "monitored": false },
+                    { "seasonNumber": 1, "monitored": true },
+                    { "seasonNumber": 2, "monitored": false }
+                ]
+            }
+        ])))
+        .mount(&server)
+        .await;
+
+    let c = client(&server, ArrKind::Sonarr);
+    let series = c.catalogue_series().await.unwrap();
+    assert_eq!(series.len(), 1);
+    let s = &series[0];
+    assert_eq!(s.title, "9-1-1");
+    assert_eq!(s.year, 2018);
+    assert_eq!(s.tmdb_id, 75_219, "Sonarr v3 carries the TMDb id itself");
+    assert_eq!(s.tvdb_id, 328_724);
+    assert_eq!(
+        s.path, "/data/Series/9-1-1",
+        "the path stays in the *arr's namespace — translating is the caller's call"
+    );
+    assert_eq!(s.root_folder_path, "/data/Series");
+    assert_eq!(s.seasons.len(), 3);
+    assert!(!s.seasons[0].monitored, "season 0 is the specials bucket");
+    assert!(s.seasons[1].monitored);
+    assert!(!s.seasons[2].monitored);
+}
+
+/// A Sonarr that predates `tmdbId` on the series object leaves it at
+/// zero rather than failing to parse — the caller then bridges through
+/// TMDB's find-by-TVDB endpoint.
+#[tokio::test]
+async fn a_series_without_a_tmdb_id_still_parses() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v3/series"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            { "id": 1, "title": "Bofuri", "tvdbId": 368_128 }
+        ])))
+        .mount(&server)
+        .await;
+
+    let c = client(&server, ArrKind::Sonarr);
+    let series = c.catalogue_series().await.unwrap();
+    assert_eq!(series[0].tmdb_id, 0, "absent means unlinked, not an error");
+    assert_eq!(series[0].tvdb_id, 368_128);
+    assert!(series[0].seasons.is_empty());
+    assert!(series[0].path.is_empty());
+}
+
+/// The episode list is fetched *without* `includeEpisodeFile`, so it
+/// carries the file id and not the file. This is what keeps one series
+/// at a few KB instead of the ~300 KB the inlined form costs.
+#[tokio::test]
+async fn episodes_carry_the_file_id_and_files_resolve_it() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v3/episode"))
+        .and(header("X-Api-Key", API_KEY))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            {
+                "id": 100,
+                "seasonNumber": 1,
+                "episodeNumber": 1,
+                "monitored": true,
+                "hasFile": true,
+                "episodeFileId": 900
+            },
+            {
+                "id": 101,
+                "seasonNumber": 1,
+                "episodeNumber": 2,
+                "monitored": true,
+                "hasFile": false,
+                "episodeFileId": 0
+            }
+        ])))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v3/episodefile"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            {
+                "id": 900,
+                "path": "/data/Series/9-1-1/Season 1/9-1-1.S01E01.1080p.DUAL-Eri.mkv",
+                "size": 2_147_483_648_u64
+            }
+        ])))
+        .mount(&server)
+        .await;
+
+    let c = client(&server, ArrKind::Sonarr);
+    let eps = c.episodes(12).await.unwrap();
+    assert_eq!(eps.len(), 2);
+    assert_eq!(eps[0].episode_file_id, 900);
+    assert!(eps[0].has_file);
+    assert_eq!(
+        eps[1].episode_file_id, 0,
+        "no file is zero, which is how Sonarr spells absent"
+    );
+
+    let files = c.episode_files(12).await.unwrap();
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].id, 900);
+    assert!(files[0].path.ends_with("S01E01.1080p.DUAL-Eri.mkv"));
+}
+
+#[tokio::test]
+async fn catalogue_movies_carries_the_file_path() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v3/movie"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            {
+                "id": 7,
+                "title": "Scary Movie",
+                "year": 2000,
+                "tmdbId": 4_247,
+                "imdbId": "tt0175142",
+                "monitored": true,
+                "hasFile": true,
+                "path": "/data/Filmes/Scary Movie (2000)",
+                "rootFolderPath": "/data/Filmes",
+                "movieFile": {
+                    "id": 55,
+                    "path": "/data/Filmes/Scary Movie (2000)/Scary.Movie.2000.1080p.mkv",
+                    "size": 9_000_000_000_u64
+                }
+            },
+            {
+                "id": 8,
+                "title": "Duna",
+                "year": 2021,
+                "tmdbId": 438_631,
+                "monitored": true,
+                "hasFile": false,
+                "path": "/data/Filmes/Duna (2021)",
+                "rootFolderPath": "/data/Filmes"
+            }
+        ])))
+        .mount(&server)
+        .await;
+
+    let c = client(&server, ArrKind::Radarr);
+    let movies = c.catalogue_movies().await.unwrap();
+    assert_eq!(movies.len(), 2);
+    let file = movies[0].movie_file.as_ref().expect("has a file");
+    assert!(file.path.ends_with("Scary.Movie.2000.1080p.mkv"));
+    assert!(
+        movies[1].movie_file.is_none(),
+        "a monitored movie with no file is the migration's whole point: \
+         it enters the catalogue and brarr starts looking for it"
+    );
+}
+
+#[tokio::test]
+async fn root_folders_are_read_in_the_arrs_own_namespace() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v3/rootfolder"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            {
+                "id": 1,
+                "path": "/data/Series",
+                "accessible": true,
+                "unmappedFolders": [ { "name": "Scorpion", "path": "/data/Series/Scorpion" } ]
+            }
+        ])))
+        .mount(&server)
+        .await;
+
+    let c = client(&server, ArrKind::Sonarr);
+    let roots = c.root_folders().await.unwrap();
+    assert_eq!(roots.len(), 1);
+    assert_eq!(roots[0].path, "/data/Series");
+}
