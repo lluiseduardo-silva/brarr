@@ -515,13 +515,42 @@ fn protocol_of(decision: &DecisionRow) -> Protocol {
 /// which is every one of the 24 unmatched `Series` files the operator has
 /// — and matched `1920x1080` as season 1920, episode 1080.
 pub(crate) fn title_matches_episode(title: &str, season: u16, episode: u16) -> bool {
+    episode_markers(title)
+        .iter()
+        .any(|m| m.season == season && m.episode == episode)
+}
+
+/// One episode marker read out of a name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Marker {
+    /// Season it names.
+    pub season: u16,
+    /// Episode it names.
+    pub episode: u16,
+    /// A second episode group followed immediately — `S01E01E02`.
+    ///
+    /// Only the first is reported, which is what the sweep has always
+    /// done. [`crate::adopt`] refuses such a file outright: recording a
+    /// two-episode file against one episode leaves the other looking
+    /// unacquired, and against both would need one file to hold two
+    /// barrier keys.
+    pub chained: bool,
+}
+
+/// Every episode marker the name carries, in order.
+///
+/// Extraction lives here, next to the verification built on it, so the
+/// two can never disagree about what a marker is.
+pub(crate) fn episode_markers(title: &str) -> Vec<Marker> {
     let lowered = title.to_ascii_lowercase();
     let bytes = lowered.as_bytes();
-    (0..bytes.len()).any(|at| marker_at(bytes, at) == Some((season, episode)))
+    (0..bytes.len())
+        .filter_map(|at| marker_at(bytes, at))
+        .collect()
 }
 
 /// The episode marker starting at `at`, in either spelling.
-fn marker_at(bytes: &[u8], at: usize) -> Option<(u16, u16)> {
+fn marker_at(bytes: &[u8], at: usize) -> Option<Marker> {
     if bytes[at] == b's' {
         return season_episode_marker(bytes, at);
     }
@@ -529,7 +558,7 @@ fn marker_at(bytes: &[u8], at: usize) -> Option<(u16, u16)> {
 }
 
 /// `s<digits>e<digits>`, any padding.
-fn season_episode_marker(bytes: &[u8], at: usize) -> Option<(u16, u16)> {
+fn season_episode_marker(bytes: &[u8], at: usize) -> Option<Marker> {
     // Glued to a word, it is part of that word: `Seasons01e02` is not a
     // marker, and reading it as one would adopt a file against an episode
     // nobody named.
@@ -540,8 +569,13 @@ fn season_episode_marker(bytes: &[u8], at: usize) -> Option<(u16, u16)> {
     if bytes.get(after_season) != Some(&b'e') {
         return None;
     }
-    let (episode, _) = digits(bytes, after_season + 1, usize::MAX)?;
-    Some((season, episode))
+    let (episode, end) = digits(bytes, after_season + 1, usize::MAX)?;
+    let chained = bytes.get(end) == Some(&b'e') && digits(bytes, end + 1, usize::MAX).is_some();
+    Some(Marker {
+        season,
+        episode,
+        chained,
+    })
 }
 
 /// `<digits>x<digits>`, the spelling `1x02` uses.
@@ -551,7 +585,7 @@ fn season_episode_marker(bytes: &[u8], at: usize) -> Option<(u16, u16)> {
 /// not season 19 episode 20, and `4x070p` is not episode 7. Season 0 is
 /// refused outright — it is TMDB's specials bucket, it never appears in a
 /// release name as `0x10`, and accepting it would invent an episode.
-fn cross_marker(bytes: &[u8], at: usize) -> Option<(u16, u16)> {
+fn cross_marker(bytes: &[u8], at: usize) -> Option<Marker> {
     if !bytes[at].is_ascii_digit() {
         return None;
     }
@@ -566,7 +600,11 @@ fn cross_marker(bytes: &[u8], at: usize) -> Option<(u16, u16)> {
     if bytes.get(end).is_some_and(u8::is_ascii_alphanumeric) {
         return None;
     }
-    Some((season, episode))
+    Some(Marker {
+        season,
+        episode,
+        chained: false,
+    })
 }
 
 /// The run of ASCII digits at `from`: its value and the index just past

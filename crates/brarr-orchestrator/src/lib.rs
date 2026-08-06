@@ -50,6 +50,7 @@
     reason = "TMDb/IMDb/SQLite appear too often in user-facing module docs to be worth backticking each time"
 )]
 
+pub mod adopt;
 pub mod auth;
 pub mod db;
 pub mod deliver;
