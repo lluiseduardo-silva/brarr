@@ -211,6 +211,7 @@ fn import_routes() -> Router<AppState> {
         )
         .route("/library/import/row", get(library_import_row))
         .route("/library/import/bulk", post(library_import_bulk))
+        .route("/library/adoption/{grab_id}", delete(library_adopt_undo))
 }
 
 fn download_client_routes() -> Router<AppState> {
@@ -1460,6 +1461,9 @@ async fn library_detail(
         .await?
         .into_iter()
         .map(|g| GrabView {
+            id: g.id.to_string(),
+            is_local: g.protocol == grabs::Protocol::Local,
+            in_place: grabs::is_in_place(&g),
             release_name: g.release_name,
             provider_name: g.provider_name,
             protocol: g.protocol.label().to_owned(),
@@ -2511,6 +2515,20 @@ async fn library_import_bulk(
         body.push_str(&partial.render()?);
     }
     Ok(html_string(body))
+}
+
+/// `DELETE /library/adoption/{grab_id}` — take an adoption back.
+///
+/// The page reloads afterwards because undoing changes the grab
+/// history, the coverage and the file check at once, and re-rendering
+/// one row would leave the other two stale.
+async fn library_adopt_undo(
+    State(state): State<AppState>,
+    Path(grab_id): Path<Uuid>,
+) -> Result<Response, AppError> {
+    let outcome = crate::adopt::undo(&state, grab_id).await?;
+    info!(target: "brarr_orchestrator::web", grab = %grab_id, outcome = %outcome, "adoption undone");
+    Ok(hx_refresh())
 }
 
 /// Form for `POST /library/import/unignore`.

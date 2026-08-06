@@ -1290,6 +1290,15 @@ pub struct InteractiveReleaseView {
 /// One acquisition row on the detail page.
 #[derive(Debug)]
 pub struct GrabView {
+    /// Stringified UUID, for the undo button.
+    pub id: String,
+    /// `protocol == "local"`. Not derived in the template: `protocol`
+    /// there is a display string, and comparing it to a literal in the
+    /// markup hides a rule where nobody looks for one.
+    pub is_local: bool,
+    /// Adopted where it stood, so undo has nothing to remove from disk.
+    /// Changes what the confirmation says.
+    pub in_place: bool,
     /// Release title snapshot.
     pub release_name: String,
     /// Provider name snapshot.

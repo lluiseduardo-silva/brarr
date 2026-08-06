@@ -822,6 +822,95 @@ fn resolve_target(
     row
 }
 
+/// Undo one adoption.
+///
+/// In place: delete the row. **Nothing on disk is touched** — brarr
+/// wrote nothing, so deleting the row is the complete undo. That is the
+/// strongest practical argument for the adopt-where-it-stands rule.
+///
+/// Linked: the link brarr created is at `imported_path`. Before removing
+/// it, the destination's inode and device are compared against the
+/// source's. Different means someone replaced that path between the
+/// adoption and the undo, and deleting it would destroy a file that is
+/// not brarr's. On platforms without inodes the removal is refused and
+/// the path is named, so the operator can do it by hand.
+///
+/// Leaving the link instead of removing it would be worse: the next
+/// import would find it *inside* the root and adopt it in place,
+/// resurrecting the match the operator just rejected.
+///
+/// # Errors
+///
+/// [`AppError::NotFound`] when the grab is not an adoption,
+/// [`AppError::InvalidInput`] when the link cannot be safely removed,
+/// [`AppError::Database`] on SQL failure.
+pub async fn undo(state: &AppState, grab_id: Uuid) -> Result<String, AppError> {
+    let grab = grabs::get_by_id(state.pool(), grab_id).await?;
+    if grab.protocol != crate::db::grabs::Protocol::Local {
+        return Err(AppError::NotFound(format!("adoção {grab_id}")));
+    }
+    if grabs::is_in_place(&grab) {
+        grabs::delete_adopted(state.pool(), grab_id).await?;
+        return Ok("esquecido — o arquivo continua no disco, intacto".to_owned());
+    }
+    let Some(link) = grab.imported_path.clone() else {
+        grabs::delete_adopted(state.pool(), grab_id).await?;
+        return Ok("esquecido — nada tinha sido gravado".to_owned());
+    };
+    let source = grab.release_id_remote.clone();
+    let removed = tokio::task::spawn_blocking(move || remove_link(&source, &link))
+        .await
+        .map_err(|e| AppError::InvalidInput(format!("remoção falhou: {e}")))?;
+    match removed {
+        Ok(message) => {
+            grabs::delete_adopted(state.pool(), grab_id).await?;
+            Ok(message)
+        }
+        Err(why) => Err(AppError::InvalidInput(why)),
+    }
+}
+
+/// Remove the hardlink brarr created, and only that.
+fn remove_link(source: &str, link: &str) -> Result<String, String> {
+    let link_path = Path::new(link);
+    if !link_path.exists() {
+        return Ok("o vínculo já não existia".to_owned());
+    }
+    if !same_file(Path::new(source), link_path)? {
+        return Err(format!(
+            "{link} não é mais o vínculo que o brarr criou — alguém substituiu esse caminho. \
+             Remova à mão se for o caso."
+        ));
+    }
+    std::fs::remove_file(link_path)
+        .map(|()| format!("vínculo removido de {link}"))
+        .map_err(|e| format!("não consegui remover {link}: {e}"))
+}
+
+/// Are these two paths the same bytes — the same inode on the same
+/// device?
+#[cfg(unix)]
+fn same_file(source: &Path, link: &Path) -> Result<bool, String> {
+    use std::os::unix::fs::MetadataExt as _;
+    let a = std::fs::metadata(source)
+        .map_err(|e| format!("não consegui ler {}: {e}", source.display()))?;
+    let b =
+        std::fs::metadata(link).map_err(|e| format!("não consegui ler {}: {e}", link.display()))?;
+    Ok(a.ino() == b.ino() && a.dev() == b.dev())
+}
+
+/// Windows has no cheap inode. Refusing is the honest answer: the whole
+/// point of the check is to avoid deleting a file that is not the link
+/// brarr made, and "probably" is not good enough for `remove_file`.
+#[cfg(not(unix))]
+fn same_file(_source: &Path, link: &Path) -> Result<bool, String> {
+    Err(format!(
+        "nesta plataforma o brarr não consegue confirmar que {} ainda é o vínculo que criou; \
+         remova à mão e depois desfaça",
+        link.display()
+    ))
+}
+
 /// How one confirmed file ended up.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommitStatus {
@@ -1321,6 +1410,55 @@ mod tests {
 
         let stored = grabs::for_item(state.pool(), item.id).await.unwrap();
         assert!(!grabs::is_in_place(&stored[0]));
+
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// Undoing an in-place adoption is a row deletion and nothing else.
+    /// That is the strongest practical argument for the
+    /// adopt-where-it-stands rule: there is no file to unmake.
+    #[tokio::test]
+    async fn undoing_an_in_place_adoption_leaves_the_disk_alone() {
+        let base = std::env::temp_dir().join(format!("brarr-undo-{}", uuid::Uuid::new_v4()));
+        let root = base.join("midias");
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("Matrix 1999 1080p.mkv");
+        std::fs::write(&file, b"video").unwrap();
+
+        let state = state_with_root(&root, MediaType::Movie).await;
+        let item = library::upsert(
+            state.pool(),
+            &library::NewLibraryItem {
+                media_type: Some(MediaType::Movie),
+                tmdb_id: 603,
+                title: "Matrix".to_owned(),
+                year: Some(1999),
+                ..library::NewLibraryItem::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let preview = plan(&state, &root, None).await.unwrap();
+        let pick = Pick::decode(preview.files[0].token.as_ref().unwrap()).unwrap();
+        commit(&state, &root, None, &[pick]).await.unwrap();
+
+        let before = tree(&base);
+        let grab = grabs::for_item(state.pool(), item.id).await.unwrap()[0].id;
+        let message = undo(&state, grab).await.unwrap();
+
+        assert!(message.contains("continua no disco"), "{message}");
+        assert_eq!(tree(&base), before, "undo touched the filesystem");
+        assert!(
+            grabs::for_item(state.pool(), item.id)
+                .await
+                .unwrap()
+                .is_empty(),
+            "the row is gone, which frees the key to adopt again"
+        );
+        // And the same file can be adopted again afterwards.
+        let again = plan(&state, &root, None).await.unwrap();
+        assert_eq!(again.ready(), 1);
 
         std::fs::remove_dir_all(&base).unwrap();
     }

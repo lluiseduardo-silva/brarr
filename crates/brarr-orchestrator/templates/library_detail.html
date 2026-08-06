@@ -244,6 +244,10 @@
         <div class="px-4 w-28 text-[10px] font-medium uppercase tracking-[0.06em] text-fg-muted">Protocolo</div>
         <div class="px-4 w-28 text-[10px] font-medium uppercase tracking-[0.06em] text-fg-muted">Status</div>
         <div class="px-4 w-28 text-[10px] font-medium uppercase tracking-[0.06em] text-fg-muted">Quando</div>
+        {# The header needs this cell too. Without it the body's extra
+           column steals width from the flex-1 Release cell and every
+           label above shifts out of line. #}
+        <div class="px-4 w-24"></div>
     </div>
     {% for g in grabs %}
     <div class="flex items-center border-t border-border-default">
@@ -270,6 +274,17 @@
             {% endif %}
         </div>
         <div class="px-4 w-28 text-[11px] font-mono text-fg-secondary">{{ g.grabbed_at }}</div>
+        <div class="px-4 w-24 text-right">
+            {# Only an adoption can be undone. A tracker grab is
+               acquisition history and is never deleted from here. #}
+            {% if g.is_local %}
+            <button hx-delete="/library/adoption/{{ g.id }}"
+                    hx-confirm="{% if g.in_place %}Esquecer este arquivo? Ele continua no disco, intacto.{% else %}Remover o vínculo que o brarr criou? O arquivo de origem continua no lugar.{% endif %}"
+                    class="btn btn-sm btn-ghost">
+                remover
+            </button>
+            {% endif %}
+        </div>
     </div>
     {% endfor %}
 </div>
