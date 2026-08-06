@@ -1311,6 +1311,110 @@ pub struct GrabView {
     pub file_missing: bool,
 }
 
+/// The import-from-disk dialog, returned by `GET /library/import`.
+///
+/// One flat list — movies and series together, the identified and the
+/// undecided side by side. The four collapsible groups an earlier design
+/// had are gone: what was a group is now a state on the row, which is
+/// what makes bulk editing across the whole list possible.
+#[derive(Debug, Template)]
+#[template(path = "partials/import_modal.html")]
+pub struct ImportModalPartial {
+    /// Folder that was scanned, as typed.
+    pub folder: String,
+    /// Item the dialog is pinned to, when opened from a title's page.
+    pub item_id: Option<String>,
+    /// Title of that item, for the header.
+    pub item_title: Option<String>,
+    /// Rows, in scan order.
+    pub rows: Vec<ImportRowView>,
+    /// Rows that would be written on confirm.
+    pub ready: usize,
+    /// Rows still waiting on a decision.
+    pub undecided: usize,
+    /// Rows a live grab already covers.
+    pub covered: usize,
+    /// Videos found beyond the preview ceiling.
+    pub over_cap: usize,
+    /// Ceiling itself, so the message can name it.
+    pub max_files: usize,
+    /// How many videos in this folder the operator has set aside.
+    pub ignored_here: usize,
+    /// Every path currently ignored, for the `Ignorados` filter.
+    pub ignored: Vec<ImportIgnoredView>,
+    /// `true` when the operator asked to see the ignored list.
+    pub showing_ignored: bool,
+    /// Validation message — a folder that is not readable, say.
+    pub error: Option<String>,
+}
+
+/// One file in the import dialog.
+#[derive(Debug)]
+pub struct ImportRowView {
+    /// Round-trip token; `None` means the row cannot be confirmed yet.
+    pub token: Option<String>,
+    /// Absolute path, submitted when ignoring.
+    pub path: String,
+    /// File name, which is what the row shows.
+    pub name: String,
+    /// Human-friendly size.
+    pub size: String,
+    /// Assigned title, when one was matched.
+    pub title: Option<String>,
+    /// Drives the type chip and whether season/episode mean anything.
+    pub is_series: bool,
+    /// Season the name claims.
+    pub season: Option<u16>,
+    /// `7 — The Insider`.
+    pub episode_label: Option<String>,
+    /// Why this row still needs a human.
+    pub reason: Option<String>,
+    /// What would happen on confirm.
+    pub effect: Option<String>,
+    /// A live grab already covers this target.
+    pub covered: bool,
+}
+
+/// One path on the ignored list.
+#[derive(Debug)]
+pub struct ImportIgnoredView {
+    /// Absolute path.
+    pub path: String,
+    /// File name, for the row.
+    pub name: String,
+}
+
+/// The report the confirmation renders, in the same dialog shell.
+#[derive(Debug, Template)]
+#[template(path = "partials/import_report.html")]
+pub struct ImportReportPartial {
+    /// Files recorded where they already were.
+    pub in_place: usize,
+    /// Files hardlinked into the library.
+    pub linked: usize,
+    /// Files nothing was written for.
+    pub skipped: usize,
+    /// Files that appeared in the folder between preview and confirm.
+    pub appeared: usize,
+    /// One line per submitted file.
+    pub outcomes: Vec<ImportOutcomeView>,
+}
+
+/// One line of the import report.
+#[derive(Debug)]
+pub struct ImportOutcomeView {
+    /// File name.
+    pub name: String,
+    /// `adotado no lugar` / `vinculado` / `pulado`.
+    pub label: String,
+    /// Where it landed, or why it did not.
+    pub detail: String,
+    /// Drives the row's colour.
+    pub skipped: bool,
+    /// A link was created, as opposed to a path being recorded.
+    pub linked: bool,
+}
+
 /// HTML-escapes a fragment for safe interpolation. Askama auto-escapes
 /// `{{ x }}` by default; this helper is for when we build a string in
 /// Rust before passing it to a template.

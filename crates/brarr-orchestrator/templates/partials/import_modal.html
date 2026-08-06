@@ -1,0 +1,219 @@
+{# Import-from-disk dialog. Same contract as the other modals: the
+   handler returns this partial into #modal-target and modal.js opens it.
+
+   One flat table, movies and series together. What an earlier design
+   split into four collapsible groups is a state on the row here — which
+   is what lets one action reach across the whole list, and what stops
+   the operator from having to learn four boxes before importing a file.
+
+   A cell the operator still has to fill is drawn with a dashed danger
+   outline, the way Radarr marks an unassigned movie.
+
+   Each row submits two things: a checkbox carrying its path (what to act
+   on) and, when the row has a target, a hidden `fp` carrying
+   `item|episode|size|path`. The size in there is the fingerprint — the
+   server re-plans from scratch on confirm and refuses a row whose file
+   changed in between. It travels per row, not as one digest of the whole
+   plan, so a single file still being written cannot veto the rest. #}
+<dialog class="bg-transparent p-0 max-w-full max-h-full backdrop:bg-[rgba(10,6,18,0.7)]"
+        aria-label="Importar do disco">
+    <div class="w-[1120px] max-w-full card-hairline bg-bg-surface border border-border-default rounded-2xl overflow-hidden"
+         style="box-shadow: 0 24px 60px var(--color-glow);">
+
+    <header class="flex items-center justify-between gap-3 px-6 py-5">
+        <div class="min-w-0">
+            <h2 class="text-[22px] font-semibold leading-tight text-fg-primary">
+                Importar do disco{% if let Some(t) = item_title %} — {{ t }}{% endif %}
+            </h2>
+            <p class="text-xs text-fg-secondary">
+                {{ rows.len() }} arquivo(s) de vídeo · {{ ready }} pronto(s) · {{ undecided }} esperando você{% if covered > 0 %} · {{ covered }} já na biblioteca{% endif %}
+            </p>
+            <p class="text-xs text-fg-muted mt-0.5">
+                O seletor de título lista só o que já está na biblioteca — o que faltar, adicione antes e importe depois.
+            </p>
+        </div>
+        {# Outside the form: a nested <form> is dropped by the parser and
+           its button becomes a submit of the outer one. #}
+        <button type="button"
+                onclick="this.closest('dialog').close()"
+                class="btn btn-md btn-icon btn-secondary"
+                aria-label="Fechar">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
+    </header>
+
+    <div class="h-px bg-border-default"></div>
+
+    <div class="flex items-center gap-2.5 flex-wrap px-6 py-3 border-b border-border-default">
+        <span class="text-xs text-fg-muted">pasta</span>
+        <input type="text" name="folder" value="{{ folder }}" form="import-rescan"
+               class="flex-1 min-w-[280px] px-3 h-9 rounded-md bg-bg-canvas border border-border-strong text-sm font-mono text-fg-primary focus:outline-none focus:border-accent-solid">
+        <form id="import-rescan"
+              hx-get="/library/import"
+              hx-target="#modal-target"
+              hx-swap="innerHTML"
+              class="contents">
+            {% if let Some(id) = item_id %}<input type="hidden" name="item" value="{{ id }}">{% endif %}
+            <button type="submit" class="btn btn-sm btn-secondary">reler</button>
+            <button type="submit" name="ignored" value="1" class="btn btn-sm {% if showing_ignored %}btn-toggle-on{% else %}btn-secondary{% endif %}">
+                Ignorados {{ ignored.len() }}
+            </button>
+        </form>
+    </div>
+
+    {% if let Some(err) = error %}
+    <div class="px-6 py-3">
+        <div class="px-3 py-2 rounded-md bg-danger-soft text-danger-soft-fg text-xs">{{ err }}</div>
+    </div>
+    {% endif %}
+
+    {% if showing_ignored %}
+    {# The way back. Ignoring is remembered — unlike Sonarr and Radarr,
+       where it lasts as long as the dialog — so it needs an undo that is
+       not "remember which file you dismissed last month". #}
+    <div class="max-h-[420px] overflow-y-auto">
+        {% if ignored.is_empty() %}
+        <p class="px-6 py-8 text-center text-sm text-fg-muted">
+            Nada ignorado. O que você dispensar aqui deixa de aparecer nas próximas importações.
+        </p>
+        {% else %}
+        {% for row in ignored %}
+        <div class="flex items-center gap-3 px-6 py-2.5 border-b border-border-default">
+            <div class="min-w-0 flex-1">
+                <div class="text-sm font-mono text-fg-primary truncate">{{ row.name }}</div>
+                <div class="text-[11px] text-fg-muted truncate">{{ row.path }}</div>
+            </div>
+            <form hx-post="/library/import/unignore"
+                  hx-target="#modal-target"
+                  hx-swap="innerHTML"
+                  class="contents">
+                <input type="hidden" name="path" value="{{ row.path }}">
+                <input type="hidden" name="folder" value="{{ folder }}">
+                {% if let Some(id) = item_id %}<input type="hidden" name="item" value="{{ id }}">{% endif %}
+                <button type="submit" class="btn btn-sm btn-secondary">voltar a oferecer</button>
+            </form>
+        </div>
+        {% endfor %}
+        {% endif %}
+    </div>
+
+    {% else %}
+
+    <form hx-post="/library/import"
+          hx-target="#modal-target"
+          hx-swap="innerHTML">
+        <input type="hidden" name="folder" value="{{ folder }}">
+        {% if let Some(id) = item_id %}<input type="hidden" name="item" value="{{ id }}">{% endif %}
+
+        <div class="flex items-center gap-3 px-6 py-2.5 bg-bg-muted">
+            <div class="w-4"></div>
+            <div class="flex-1 text-[10px] font-medium uppercase tracking-[0.06em] text-fg-muted">Arquivo</div>
+            <div class="w-52 text-[10px] font-medium uppercase tracking-[0.06em] text-fg-muted">Título</div>
+            <div class="w-16 text-[10px] font-medium uppercase tracking-[0.06em] text-fg-muted">Temp.</div>
+            <div class="w-44 text-[10px] font-medium uppercase tracking-[0.06em] text-fg-muted">Episódio</div>
+            <div class="w-20 text-[10px] font-medium uppercase tracking-[0.06em] text-fg-muted">Tamanho</div>
+            <div class="w-44 text-[10px] font-medium uppercase tracking-[0.06em] text-fg-muted">Efeito</div>
+        </div>
+
+        <div class="max-h-[420px] overflow-y-auto">
+            {% if rows.is_empty() %}
+            <p class="px-6 py-10 text-center text-sm text-fg-muted">
+                Nenhum vídeo nesta pasta. Confira o caminho — em Docker é o de dentro do contêiner do brarr.
+            </p>
+            {% endif %}
+            {% for row in rows %}
+            <div class="flex items-center gap-3 px-6 py-2.5 border-b border-border-default {% if row.covered %}bg-bg-canvas{% endif %}">
+                <div class="w-4 shrink-0">
+                    <input type="checkbox" name="sel" value="{{ row.path }}"{% if row.token.is_some() %} checked{% endif %}
+                           class="w-4 h-4 rounded border-border-strong">
+                </div>
+                {% if let Some(token) = row.token %}
+                <input type="hidden" name="fp" value="{{ token }}">
+                {% endif %}
+                <div class="flex-1 min-w-0">
+                    <div class="text-sm font-mono {% if row.covered %}text-fg-muted{% else %}text-fg-primary{% endif %} truncate" title="{{ row.path }}">{{ row.name }}</div>
+                    {% if let Some(reason) = row.reason %}
+                    <div class="text-[11px] {% if row.covered %}text-fg-muted{% else %}text-warning-soft-fg{% endif %} truncate">{{ reason }}</div>
+                    {% endif %}
+                </div>
+                <div class="w-52 shrink-0">
+                    {% if let Some(title) = row.title %}
+                    <div class="flex items-center gap-1.5 min-w-0">
+                        <span class="text-sm text-fg-primary truncate">{{ title }}</span>
+                        <span class="shrink-0 inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium {% if row.is_series %}bg-secondary-soft text-secondary-soft-fg{% else %}bg-accent-soft text-accent-soft-fg{% endif %}">{% if row.is_series %}série{% else %}filme{% endif %}</span>
+                    </div>
+                    {% else %}
+                    <span class="import-pick inline-flex items-center px-2.5 py-1 rounded-md text-xs text-danger-soft-fg">escolher título</span>
+                    {% endif %}
+                </div>
+                <div class="w-16 shrink-0 text-sm text-fg-secondary">
+                    {% if let Some(season) = row.season %}{{ season }}{% else %}—{% endif %}
+                </div>
+                <div class="w-44 shrink-0">
+                    {% if let Some(label) = row.episode_label %}
+                    <span class="text-sm text-fg-secondary truncate">{{ label }}</span>
+                    {% else if row.is_series %}
+                    <span class="import-pick inline-flex items-center px-2.5 py-1 rounded-md text-xs text-danger-soft-fg">escolher episódio</span>
+                    {% else %}
+                    <span class="text-sm text-fg-muted">—</span>
+                    {% endif %}
+                </div>
+                <div class="w-20 shrink-0 text-[11px] font-mono text-fg-muted">{{ row.size }}</div>
+                <div class="w-44 shrink-0">
+                    {% if row.covered %}
+                    <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium bg-bg-muted text-fg-muted">já na biblioteca</span>
+                    {% else if let Some(effect) = row.effect %}
+                    <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium bg-accent-soft text-accent-soft-fg truncate" title="{{ effect }}">{{ effect }}</span>
+                    {% endif %}
+                </div>
+            </div>
+            {% endfor %}
+
+            {% if over_cap > 0 %}
+            <p class="px-6 py-3 text-xs text-warning-soft-fg">
+                Mais {{ over_cap }} vídeo(s) nesta pasta não couberam nesta prévia (o teto é {{ max_files }}).
+                Aponte para uma subpasta e importe em partes — nada foi descartado.
+            </p>
+            {% endif %}
+            {% if ignored_here > 0 %}
+            <p class="px-6 py-3 text-xs text-fg-muted">
+                {{ ignored_here }} arquivo(s) desta pasta estão na sua lista de ignorados.
+            </p>
+            {% endif %}
+        </div>
+
+        <div class="h-px bg-border-default"></div>
+
+        <footer class="flex items-center gap-3 px-6 py-4">
+            <div class="min-w-0">
+                <p class="text-sm font-medium text-fg-primary">
+                    {{ ready }} pronto(s) para importar · {{ undecided }} esperando você
+                </p>
+                <p class="text-xs text-fg-muted">
+                    Arquivo que já está sob a pasta raiz do título é registrado no lugar. Fora dela, é
+                    hardlink — nunca cópia, nunca movido, e nunca sobrescreve.
+                </p>
+            </div>
+            <div class="flex-1"></div>
+            {# Two submits on one form, so both act on the same selection.
+               A second <form> could not: the checkboxes belong to this
+               one, and duplicating them is how you ship a button that
+               ignores nothing. #}
+            <button type="submit" name="action" value="ignore"
+                    class="btn btn-md btn-secondary"
+                    title="Marcados deixam de ser oferecidos nas próximas importações">
+                ignorar marcados
+            </button>
+            <button type="button"
+                    onclick="this.closest('dialog').close()"
+                    class="btn btn-md btn-secondary">
+                Cancelar
+            </button>
+            <button type="submit" name="action" value="import" class="btn btn-md btn-brand"{% if ready == 0 %} disabled{% endif %}>
+                Importar {{ ready }} arquivo(s)
+            </button>
+        </footer>
+    </form>
+    {% endif %}
+    </div>
+</dialog>

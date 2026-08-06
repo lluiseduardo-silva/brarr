@@ -109,6 +109,17 @@
                 </button>
                 <span id="scan-{{ item.id }}" class="text-xs italic text-fg-muted"></span>
 
+                {# Same dialog as the library-wide button, opened pinned
+                   to this title: every row comes assigned to it, so the
+                   only question left per file is the episode. #}
+                <button hx-get="/library/import?item={{ item.id }}"
+                        hx-target="#modal-target"
+                        hx-swap="innerHTML"
+                        title="Procura arquivos deste título no disco e mostra o que seria importado antes de gravar"
+                        class="btn btn-md btn-secondary">
+                    importar do disco
+                </button>
+
                 <div class="flex-1"></div>
 
                 <form hx-get="/library/{{ item.id }}/interactive"
@@ -244,7 +255,10 @@
         </div>
         <div class="px-4 w-40 text-xs text-fg-secondary truncate">{{ g.provider_name }}</div>
         <div class="px-4 w-28">
-            <span class="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium {% if g.protocol == "usenet" %}bg-secondary-soft text-secondary-soft-fg{% else %}bg-accent-soft text-accent-soft-fg{% endif %}">{{ g.protocol }}</span>
+            {# Three branches, not two: an adopted file is neither
+               torrent nor usenet, and with an if/else it would render in
+               the torrent colour and read as something brarr downloaded. #}
+            <span class="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium {% if g.protocol == "usenet" %}bg-secondary-soft text-secondary-soft-fg{% else if g.protocol == "local" %}bg-bg-muted text-fg-secondary{% else %}bg-accent-soft text-accent-soft-fg{% endif %}">{{ g.protocol }}</span>
         </div>
         <div class="px-4 w-28">
             {# O status continua `imported` porque ele foi — o que mudou

@@ -55,7 +55,8 @@ use crate::web::templates::{
     ArrInstancesTemplate, DashboardTemplate, DecisionView, DownloadClientView,
     DownloadClientsListPartial, DownloadClientsTemplate, EditArrInstanceModalPartial,
     EditDownloadClientModalPartial, EditProviderModalPartial, EndpointHealthView,
-    EndpointRequestView, EpisodeView, ErrorTemplate, GrabView, HealthTemplate,
+    EndpointRequestView, EpisodeView, ErrorTemplate, GrabView, HealthTemplate, ImportIgnoredView,
+    ImportModalPartial, ImportOutcomeView, ImportReportPartial, ImportRowView,
     InteractiveReleaseView, InteractiveResultsPartial, LibraryAddOptionsModalPartial,
     LibraryAddTemplate, LibraryDetailTemplate, LibraryDetailView, LibraryItemView,
     LibrarySeasonPartial, LibraryTemplate, LoginTemplate, NewProfileModalPartial,
@@ -125,6 +126,11 @@ pub fn router(state: AppState, static_dir: &std::path::Path) -> Router {
         .route("/library/add", get(library_add).post(library_add_submit))
         .route("/library/add/options", get(library_add_options))
         .route("/library/verify", post(library_verify))
+        .route(
+            "/library/import",
+            get(library_import).post(library_import_submit),
+        )
+        .route("/library/import/unignore", post(library_import_unignore))
         .route("/library/{id}/monitor", post(library_toggle_monitor))
         .route("/library/{id}/profile", post(library_set_profile))
         .route("/library/{id}/refresh", post(library_refresh))
@@ -2028,6 +2034,235 @@ async fn library_scan_now(
 /// deleted something, notice" button. It is `stat` per imported file, so
 /// it answers inline rather than needing the spawn-and-wait dance the
 /// search button does.
+/// Query for `GET /library/import`.
+#[derive(Debug, Deserialize)]
+struct ImportQuery {
+    /// Folder to scan. Absent on the first open, when the handler falls
+    /// back to a registered root.
+    folder: Option<String>,
+    /// Pin every row to one catalogue entry — how the dialog opens from
+    /// a title's own page.
+    item: Option<Uuid>,
+    /// Show the ignored list instead of the folder.
+    ignored: Option<String>,
+}
+
+/// `GET /library/import` — what importing this folder would do.
+///
+/// Writes nothing. The plan is rebuilt on every open and again on
+/// confirm, so this is a report and never a promise.
+async fn library_import(
+    State(state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<ImportQuery>,
+) -> Result<Response, AppError> {
+    let folder = match q.folder.filter(|f| !f.trim().is_empty()) {
+        Some(f) => f,
+        None => default_import_folder(&state, q.item).await?,
+    };
+    html(&import_modal(&state, &folder, q.item, q.ignored.is_some(), None).await?)
+}
+
+/// Where the dialog points before the operator says otherwise: the
+/// item's own root folder, else the first registered one. Empty when
+/// none exists, which the dialog turns into a form error rather than a
+/// scan of `/`.
+async fn default_import_folder(state: &AppState, item: Option<Uuid>) -> Result<String, AppError> {
+    if let Some(id) = item {
+        let entry = library::get_by_id(state.pool(), id).await?;
+        if let Some(root) = crate::import::resolve_root(state, &entry).await? {
+            return Ok(root.path.to_string_lossy().to_string());
+        }
+    }
+    let roots = root_folders::list_all(state.pool()).await?;
+    Ok(roots
+        .first()
+        .map(|r| r.path.to_string_lossy().to_string())
+        .unwrap_or_default())
+}
+
+/// Build the dialog. Shared by the open, the rescan and every action
+/// that re-renders it.
+async fn import_modal(
+    state: &AppState,
+    folder: &str,
+    item: Option<Uuid>,
+    showing_ignored: bool,
+    error: Option<String>,
+) -> Result<ImportModalPartial, AppError> {
+    let ignored = crate::db::ignored_paths::list(state.pool())
+        .await?
+        .into_iter()
+        .map(|row| ImportIgnoredView {
+            name: std::path::Path::new(&row.path)
+                .file_name()
+                .map_or_else(|| row.path.clone(), |n| n.to_string_lossy().to_string()),
+            path: row.path,
+        })
+        .collect();
+    let item_title = match item {
+        Some(id) => Some(library::get_by_id(state.pool(), id).await?.title),
+        None => None,
+    };
+
+    let mut view = ImportModalPartial {
+        folder: folder.to_owned(),
+        item_id: item.map(|i| i.to_string()),
+        item_title,
+        rows: Vec::new(),
+        ready: 0,
+        undecided: 0,
+        covered: 0,
+        over_cap: 0,
+        max_files: crate::adopt::MAX_PREVIEW_FILES,
+        ignored_here: 0,
+        ignored,
+        showing_ignored,
+        error,
+    };
+    if folder.trim().is_empty() {
+        view.error = Some(
+            "Nenhuma pasta raiz cadastrada. Informe o caminho da pasta a importar — em Docker, \
+             o de dentro do contêiner do brarr."
+                .to_owned(),
+        );
+        return Ok(view);
+    }
+    if showing_ignored {
+        return Ok(view);
+    }
+
+    match crate::adopt::plan(state, std::path::Path::new(folder), item).await {
+        Ok(plan) => {
+            view.ready = plan.ready();
+            view.undecided = plan.undecided();
+            view.covered = plan.covered();
+            view.over_cap = plan.over_cap;
+            view.ignored_here = plan.ignored;
+            view.rows = plan.files.into_iter().map(import_row).collect();
+        }
+        // A folder that cannot be read is a form error, not a 500: the
+        // operator retypes the path in the field that is already there.
+        Err(AppError::InvalidInput(why)) => view.error = Some(why),
+        Err(other) => return Err(other),
+    }
+    Ok(view)
+}
+
+fn import_row(file: crate::adopt::PlannedFile) -> ImportRowView {
+    ImportRowView {
+        token: file.token,
+        path: file.path.to_string_lossy().to_string(),
+        name: file.name,
+        size: humanize_bytes(file.size),
+        title: file.title,
+        is_series: file.is_series,
+        season: file.season,
+        episode_label: file.episode_label,
+        reason: file.reason,
+        effect: file.effect,
+        covered: file.covered,
+    }
+}
+
+/// `POST /library/import` — confirm the selection, or set it aside.
+///
+/// Two submit buttons share one form so both act on the same checkboxes;
+/// `action` says which was pressed. Repeated `sel` and `fp` fields are
+/// why this takes the raw pair list: `serde_urlencoded` hands every
+/// repetition over, in order.
+async fn library_import_submit(
+    State(state): State<AppState>,
+    Form(fields): Form<Vec<(String, String)>>,
+) -> Result<Response, AppError> {
+    let value = |key: &str| {
+        fields
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.clone())
+    };
+    let folder = value("folder").unwrap_or_default();
+    let item = value("item").and_then(|raw| Uuid::parse_str(&raw).ok());
+    let selected: std::collections::HashSet<&str> = fields
+        .iter()
+        .filter(|(k, _)| k == "sel")
+        .map(|(_, v)| v.as_str())
+        .collect();
+
+    if value("action").as_deref() == Some("ignore") {
+        let paths: Vec<String> = selected.iter().map(|p| (*p).to_owned()).collect();
+        crate::db::ignored_paths::ignore(state.pool(), &paths).await?;
+        return html(&import_modal(&state, &folder, item, false, None).await?);
+    }
+
+    // Only rows the operator kept ticked, and only those that carried a
+    // target. The fingerprint inside each token is what the re-plan
+    // compares against, so a file that changed since the preview is
+    // skipped rather than adopted under stale numbers.
+    let picks: Vec<crate::adopt::Pick> = fields
+        .iter()
+        .filter(|(k, _)| k == "fp")
+        .filter_map(|(_, v)| crate::adopt::Pick::decode(v))
+        .filter(|pick| selected.contains(pick.path.as_str()))
+        .collect();
+    if picks.is_empty() {
+        return html(
+            &import_modal(
+                &state,
+                &folder,
+                item,
+                false,
+                Some("Nada marcado para importar.".to_owned()),
+            )
+            .await?,
+        );
+    }
+
+    let report = crate::adopt::commit(&state, std::path::Path::new(&folder), item, &picks).await?;
+    html(&import_report(&report))
+}
+
+fn import_report(report: &crate::adopt::Report) -> ImportReportPartial {
+    use crate::adopt::CommitStatus;
+    ImportReportPartial {
+        in_place: report.count(CommitStatus::InPlace),
+        linked: report.count(CommitStatus::Linked),
+        skipped: report.count(CommitStatus::Skipped),
+        appeared: report.appeared,
+        outcomes: report
+            .outcomes
+            .iter()
+            .map(|o| ImportOutcomeView {
+                name: o.name.clone(),
+                label: match o.status {
+                    CommitStatus::InPlace => "adotado no lugar".to_owned(),
+                    CommitStatus::Linked => "vinculado".to_owned(),
+                    CommitStatus::Skipped => "pulado".to_owned(),
+                },
+                detail: o.detail.clone(),
+                skipped: o.status == CommitStatus::Skipped,
+                linked: o.status == CommitStatus::Linked,
+            })
+            .collect(),
+    }
+}
+
+/// Form for `POST /library/import/unignore`.
+#[derive(Debug, Deserialize)]
+struct UnignoreForm {
+    path: String,
+    folder: String,
+    item: Option<Uuid>,
+}
+
+/// `POST /library/import/unignore` — offer a path again.
+async fn library_import_unignore(
+    State(state): State<AppState>,
+    Form(form): Form<UnignoreForm>,
+) -> Result<Response, AppError> {
+    crate::db::ignored_paths::unignore(state.pool(), &form.path).await?;
+    html(&import_modal(&state, &form.folder, form.item, true, None).await?)
+}
+
 async fn library_verify(State(state): State<AppState>) -> Result<Response, AppError> {
     let summary = crate::verify::run_once(&state).await?;
     let badge = if summary.checked == 0 {

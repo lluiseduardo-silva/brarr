@@ -804,6 +804,10 @@ body, body * {
 .h-\[18px\] { height: 18px; }
 .h-\[26px\] { height: 26px; }
 .max-h-full { max-height: 100%; }
+/* The import dialog lists up to a few hundred files; the list scrolls,
+   the dialog does not, so the header and the footer with the counters
+   and the confirm button stay put. */
+.max-h-\[420px\] { max-height: 420px; }
 .min-h-screen { min-height: 100vh; }
 
 .w-1    { width: 0.25rem; }
@@ -821,6 +825,7 @@ body, body * {
 .w-28   { width: 7rem; }
 .w-40   { width: 10rem; }
 .w-44   { width: 11rem; }
+.w-52   { width: 13rem; }
 .w-56   { width: 14rem; }
 .w-full { width: 100%; }
 .w-\[18px\]  { width: 18px; }
@@ -828,6 +833,11 @@ body, body * {
 .w-\[440px\] { width: 440px; }
 .w-\[520px\] { width: 520px; }
 .w-\[560px\] { width: 560px; }
+.w-\[880px\] { width: 880px; }
+/* Wider than every other dialog on purpose: the import table carries a
+   title, a season, an episode and an effect per row, and squeezing those
+   into 560px is what turns a decision into a guess. */
+.w-\[1120px\] { width: 1120px; }
 .w-\[640px\] { width: 640px; }
 
 .max-w-full { max-width: 100%; }
@@ -982,6 +992,18 @@ body, body * {
 /* --- effects --- */
 .overflow-hidden { overflow: hidden; }
 .overflow-x-auto { overflow-x: auto; }
+.overflow-y-auto { overflow-y: auto; }
+
+/* A cell the operator still has to fill in. Dashed and in the danger
+   colour, which is how Radarr marks an unassigned movie — the point is
+   that an empty cell reads as an unfinished decision rather than as a
+   value that happens to be blank. */
+.import-pick {
+    border: 1px dashed var(--color-danger-solid);
+    background: transparent;
+    cursor: pointer;
+}
+.import-pick:hover { background: var(--color-danger-soft); }
 .object-cover { object-fit: cover; }
 .cursor-pointer  { cursor: pointer; }
 .opacity-50 { opacity: 0.5; }

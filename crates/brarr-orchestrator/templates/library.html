@@ -22,6 +22,16 @@
             class="btn btn-lg btn-secondary">
         verificar arquivos
     </button>
+    {# Takes ownership of files that were already on disk. General on
+       purpose: the operator points at a downloads folder or at a root,
+       and assigns a title per file — movies and series in one list. #}
+    <button hx-get="/library/import"
+            hx-target="#modal-target"
+            hx-swap="innerHTML"
+            title="Lê uma pasta e mostra o que seria importado antes de gravar"
+            class="btn btn-lg btn-secondary">
+        importar do disco
+    </button>
     <a href="/library/add"
        class="btn btn-lg btn-brand">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round">

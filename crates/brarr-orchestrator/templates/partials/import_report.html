@@ -1,0 +1,60 @@
+{# What the confirmation did, in the same dialog shell.
+
+   One line per submitted file, because the operator needs to be able to
+   tell "recorded where it was" from "hardlinked" from "skipped, and
+   here is the errno" — those three ask for different next actions.
+
+   Closing reloads: adoption changes the grab history, the coverage and
+   the file check, all of which sit behind this dialog. A 3xx from inside
+   a <dialog> would swap the whole page into the modal slot, so nothing
+   here redirects. #}
+<dialog class="bg-transparent p-0 max-w-full max-h-full backdrop:bg-[rgba(10,6,18,0.7)]"
+        aria-label="Importação concluída">
+    <div class="w-[880px] max-w-full card-hairline bg-bg-surface border border-border-default rounded-2xl overflow-hidden"
+         style="box-shadow: 0 24px 60px var(--color-glow);">
+
+    <header class="px-6 py-5">
+        <h2 class="text-[22px] font-semibold leading-tight text-fg-primary">Importação concluída</h2>
+        <p class="text-xs text-fg-secondary">
+            {{ in_place }} registrado(s) no lugar · {{ linked }} vinculado(s) · 0 copiados{% if skipped > 0 %} · {{ skipped }} pulado(s){% endif %}
+        </p>
+    </header>
+
+    <div class="h-px bg-border-default"></div>
+
+    <div class="px-6 py-3 bg-success-soft">
+        <p class="text-xs text-success-soft-fg">
+            Nenhum arquivo foi copiado nem movido. O que estava sob a pasta raiz não teve um byte tocado —
+            o brarr só gravou uma linha apontando para onde ele já estava.
+        </p>
+    </div>
+
+    <div class="max-h-[420px] overflow-y-auto">
+        {% for row in outcomes %}
+        <div class="flex items-center gap-3 px-6 py-2.5 border-b border-border-default">
+            <div class="min-w-0 flex-1">
+                <div class="text-sm font-mono text-fg-primary truncate">{{ row.name }}</div>
+                <div class="text-[11px] {% if row.skipped %}text-danger-soft-fg{% else %}text-fg-muted{% endif %} truncate" title="{{ row.detail }}">{{ row.detail }}</div>
+            </div>
+            <span class="shrink-0 inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium {% if row.skipped %}bg-danger-soft text-danger-soft-fg{% else if row.linked %}bg-accent-soft text-accent-soft-fg{% else %}bg-success-soft text-success-soft-fg{% endif %}">{{ row.label }}</span>
+        </div>
+        {% endfor %}
+    </div>
+
+    {% if appeared > 0 %}
+    <p class="px-6 py-3 text-xs text-warning-soft-fg">
+        {{ appeared }} arquivo(s) novo(s) apareceram na pasta durante a confirmação — importe de novo para vê-los.
+    </p>
+    {% endif %}
+
+    <div class="h-px bg-border-default"></div>
+
+    <footer class="flex items-center justify-end gap-2 px-6 py-4">
+        <button type="button"
+                onclick="window.location.reload()"
+                class="btn btn-md btn-brand">
+            Fechar
+        </button>
+    </footer>
+    </div>
+</dialog>
