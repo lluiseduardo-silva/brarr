@@ -507,14 +507,81 @@ fn protocol_of(decision: &DecisionRow) -> Protocol {
 /// **not** accepted: it is most likely a season pack, and grabbing one
 /// while recording it against a single episode would leave the rest of
 /// the season looking acquired when it is not.
+///
+/// Padding is a spelling, not a meaning: `S01E02`, `S1E2` and `S001E002`
+/// name the same episode, so the marker is **parsed**, never rendered and
+/// compared. Building `format!("s{season:02}e{episode:02}")` and asking
+/// whether the title contains it missed `S011E09` — a three-digit season,
+/// which is every one of the 24 unmatched `Series` files the operator has
+/// — and matched `1920x1080` as season 1920, episode 1080.
 pub(crate) fn title_matches_episode(title: &str, season: u16, episode: u16) -> bool {
     let lowered = title.to_ascii_lowercase();
-    let s_e = format!("s{season:02}e{episode:02}");
-    if lowered.contains(&s_e) {
-        return true;
+    let bytes = lowered.as_bytes();
+    (0..bytes.len()).any(|at| marker_at(bytes, at) == Some((season, episode)))
+}
+
+/// The episode marker starting at `at`, in either spelling.
+fn marker_at(bytes: &[u8], at: usize) -> Option<(u16, u16)> {
+    if bytes[at] == b's' {
+        return season_episode_marker(bytes, at);
     }
-    let cross = format!("{season}x{episode:02}");
-    lowered.contains(&cross)
+    cross_marker(bytes, at)
+}
+
+/// `s<digits>e<digits>`, any padding.
+fn season_episode_marker(bytes: &[u8], at: usize) -> Option<(u16, u16)> {
+    // Glued to a word, it is part of that word: `Seasons01e02` is not a
+    // marker, and reading it as one would adopt a file against an episode
+    // nobody named.
+    if at > 0 && bytes[at - 1].is_ascii_alphanumeric() {
+        return None;
+    }
+    let (season, after_season) = digits(bytes, at + 1, usize::MAX)?;
+    if bytes.get(after_season) != Some(&b'e') {
+        return None;
+    }
+    let (episode, _) = digits(bytes, after_season + 1, usize::MAX)?;
+    Some((season, episode))
+}
+
+/// `<digits>x<digits>`, the spelling `1x02` uses.
+///
+/// Both runs are capped at two digits and the marker must end on a
+/// boundary, because the same shape spells a resolution: `1920x1080` is
+/// not season 19 episode 20, and `4x070p` is not episode 7. Season 0 is
+/// refused outright — it is TMDB's specials bucket, it never appears in a
+/// release name as `0x10`, and accepting it would invent an episode.
+fn cross_marker(bytes: &[u8], at: usize) -> Option<(u16, u16)> {
+    if !bytes[at].is_ascii_digit() {
+        return None;
+    }
+    if at > 0 && bytes[at - 1].is_ascii_alphanumeric() {
+        return None;
+    }
+    let (season, after_season) = digits(bytes, at, 2)?;
+    if season == 0 || bytes.get(after_season) != Some(&b'x') {
+        return None;
+    }
+    let (episode, end) = digits(bytes, after_season + 1, 2)?;
+    if bytes.get(end).is_some_and(u8::is_ascii_alphanumeric) {
+        return None;
+    }
+    Some((season, episode))
+}
+
+/// The run of ASCII digits at `from`: its value and the index just past
+/// it. `None` when there are none, when the run is longer than `max_len`,
+/// or when it does not fit a `u16`.
+fn digits(bytes: &[u8], from: usize, max_len: usize) -> Option<(u16, usize)> {
+    let mut end = from;
+    while end < bytes.len() && bytes[end].is_ascii_digit() {
+        end += 1;
+    }
+    if end == from || end - from > max_len {
+        return None;
+    }
+    let value = std::str::from_utf8(&bytes[from..end]).ok()?.parse().ok()?;
+    Some((value, end))
 }
 
 #[cfg(test)]
@@ -730,6 +797,42 @@ mod tests {
         assert!(title_matches_episode("The Boys 4x07 WEB", 4, 7));
         assert!(!title_matches_episode("The Boys S04E70 WEB", 4, 7));
         assert!(!title_matches_episode("The Boys Season 4 WEB", 4, 7));
+    }
+
+    /// Padding is a spelling, not a meaning. Measured over the operator's
+    /// 7 215 files: every one of the 24 `Series` misses was
+    /// `The Big Bang Theory - S011E09` — a three-digit season, which a
+    /// fixed `{:02}` cannot see. `S1E9` escapes the same way.
+    #[test]
+    fn episode_markers_accept_any_padding() {
+        assert!(title_matches_episode(
+            "The Big Bang Theory - S011E09",
+            11,
+            9
+        ));
+        assert!(title_matches_episode("Show.S1E9.1080p", 1, 9));
+        assert!(title_matches_episode("Show.s001e009.1080p", 1, 9));
+        assert!(title_matches_episode("Show 1x2 1080p", 1, 2));
+    }
+
+    /// Resolutions and codecs are digits next to letters, and a loose
+    /// reading of the cross form turns them into episodes.
+    #[test]
+    fn episode_markers_reject_resolutions_and_codecs() {
+        assert!(!title_matches_episode("Movie.1920x1080.x264", 19, 10));
+        assert!(!title_matches_episode("Movie.1920x1080.x264", 1920, 1080));
+        assert!(!title_matches_episode("Movie.2160p.x265", 21, 60));
+        // Season 0 is TMDB's specials bucket and never appears as `0x10`
+        // in the wild; reading it here would invent an episode.
+        assert!(!title_matches_episode("Some.Release.0x10.mkv", 0, 10));
+    }
+
+    /// A marker glued to a word is part of that word, not a marker.
+    #[test]
+    fn episode_markers_need_a_boundary() {
+        assert!(!title_matches_episode("Seasons01e02", 1, 2));
+        assert!(!title_matches_episode("Show.4x070p", 4, 7));
+        assert!(title_matches_episode("[Group] Show - S04E07 [1080p]", 4, 7));
     }
 
     #[test]
