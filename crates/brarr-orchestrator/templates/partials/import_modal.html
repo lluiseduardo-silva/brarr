@@ -54,7 +54,14 @@
               hx-swap="innerHTML"
               class="contents">
             {% if let Some(id) = item_id %}<input type="hidden" name="item" value="{{ id }}">{% endif %}
-            <button type="submit" class="btn btn-sm btn-secondary">reler</button>
+            {# Navigating is the default and reading is the explicit act.
+               Scanning on open meant every visit walked the whole tree —
+               thousands of files under a root — before the operator had
+               even said which folder they meant. #}
+            <button type="submit" class="btn btn-sm {% if browsing %}btn-secondary{% else %}btn-toggle-on{% endif %}">
+                {% if browsing %}navegar{% else %}trocar pasta{% endif %}
+            </button>
+            <button type="submit" name="scan" value="1" class="btn btn-sm btn-brand">ler esta pasta</button>
             <button type="submit" name="ignored" value="1" class="btn btn-sm {% if showing_ignored %}btn-toggle-on{% else %}btn-secondary{% endif %}">
                 Ignorados {{ ignored.len() }}
             </button>
@@ -67,7 +74,71 @@
     </div>
     {% endif %}
 
-    {% if showing_ignored %}
+    {% if browsing && !showing_ignored %}
+    {# Navigation. One `read_dir`, directories only, no recursion and no
+       per-file stat — the cost of looking is not the cost of reading. #}
+    <div class="max-h-[420px] overflow-y-auto">
+        {% if !shortcuts.is_empty() %}
+        <div class="flex items-center gap-2 flex-wrap px-6 py-3 bg-bg-muted">
+            <span class="text-xs text-fg-muted">pastas raiz</span>
+            {% for s in shortcuts %}
+            <a href="#"
+               hx-get="/library/import?folder={{ s.path|urlencode_strict }}{% if let Some(id) = item_id %}&amp;item={{ id }}{% endif %}"
+               hx-target="#modal-target"
+               hx-swap="innerHTML"
+               class="inline-flex items-center px-3 h-7 rounded-full text-sm font-medium bg-bg-surface border border-border-default text-fg-secondary hover:text-fg-primary">{{ s.name }}</a>
+            {% endfor %}
+        </div>
+        {% endif %}
+
+        {% if let Some(up) = parent %}
+        <a href="#"
+           hx-get="/library/import?folder={{ up|urlencode_strict }}{% if let Some(id) = item_id %}&amp;item={{ id }}{% endif %}"
+           hx-target="#modal-target"
+           hx-swap="innerHTML"
+           class="flex items-center gap-3 px-6 py-2.5 border-b border-border-default cursor-pointer hover:bg-bg-muted">
+            <span class="text-sm font-mono text-fg-secondary">..</span>
+            <span class="text-xs text-fg-muted truncate">{{ up }}</span>
+        </a>
+        {% endif %}
+
+        {% for e in entries %}
+        <a href="#"
+           hx-get="/library/import?folder={{ e.path|urlencode_strict }}{% if let Some(id) = item_id %}&amp;item={{ id }}{% endif %}"
+           hx-target="#modal-target"
+           hx-swap="innerHTML"
+           class="flex items-center gap-3 px-6 py-2.5 border-b border-border-default cursor-pointer hover:bg-bg-muted">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" class="shrink-0 text-fg-muted"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+            <span class="flex-1 min-w-0 text-sm text-fg-primary truncate">{{ e.name }}</span>
+        </a>
+        {% endfor %}
+
+        {% if entries.is_empty() %}
+        <p class="px-6 py-8 text-center text-sm text-fg-muted">
+            Nenhuma subpasta aqui. Se os vídeos estão nesta pasta, aperte <strong>ler esta pasta</strong>.
+        </p>
+        {% endif %}
+    </div>
+
+    <div class="h-px bg-border-default"></div>
+
+    <footer class="flex items-center gap-3 px-6 py-4">
+        <div class="min-w-0">
+            <p class="text-sm font-medium text-fg-primary">Nada foi lido ainda</p>
+            <p class="text-xs text-fg-muted">
+                Navegue até a pasta e aperte <strong>ler esta pasta</strong>. Só aí o brarr percorre os
+                arquivos — abrir o diálogo não custa uma varredura.
+            </p>
+        </div>
+        <div class="flex-1"></div>
+        <button type="button"
+                onclick="this.closest('dialog').close()"
+                class="btn btn-md btn-secondary">
+            Cancelar
+        </button>
+    </footer>
+
+    {% else if showing_ignored %}
     {# The way back. Ignoring is remembered — unlike Sonarr and Radarr,
        where it lasts as long as the dialog — so it needs an undo that is
        not "remember which file you dismissed last month". #}

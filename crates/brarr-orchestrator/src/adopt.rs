@@ -576,6 +576,48 @@ pub async fn plan(
     })
 }
 
+/// The immediate subdirectories of `folder`, for navigating to the
+/// folder *before* committing to a scan.
+///
+/// One `read_dir`, no recursion, no per-file `stat`. Opening the dialog
+/// used to walk the whole tree before the operator had even said which
+/// folder they meant — pointed at a root holding 3 982 files, that is
+/// thousands of syscalls to answer a question nobody asked yet.
+///
+/// # Errors
+///
+/// [`AppError::InvalidInput`] when the folder is not a readable
+/// directory.
+pub async fn list_dirs(folder: &Path) -> Result<Vec<(String, PathBuf)>, AppError> {
+    validate_folder(folder)?;
+    let owned = folder.to_path_buf();
+    let dirs = tokio::task::spawn_blocking(move || {
+        let mut out = Vec::new();
+        let Ok(entries) = std::fs::read_dir(&owned) else {
+            return out;
+        };
+        for entry in entries.flatten() {
+            // `file_type` comes from the dirent on every platform brarr
+            // targets, so this does not stat.
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if !kind.is_dir() {
+                continue;
+            }
+            out.push((
+                entry.file_name().to_string_lossy().to_string(),
+                entry.path(),
+            ));
+        }
+        out.sort_by_key(|(name, _)| name.to_lowercase());
+        out
+    })
+    .await
+    .map_err(|e| AppError::InvalidInput(format!("leitura da pasta falhou: {e}")))?;
+    Ok(dirs)
+}
+
 /// Rebuild one row after the operator assigned a target by hand.
 ///
 /// Cheaper than re-planning the folder — it stats one file instead of

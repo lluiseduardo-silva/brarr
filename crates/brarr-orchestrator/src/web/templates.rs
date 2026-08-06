@@ -1353,6 +1353,18 @@ pub struct ImportModalPartial {
     pub ignored: Vec<ImportIgnoredView>,
     /// `true` when the operator asked to see the ignored list.
     pub showing_ignored: bool,
+    /// `true` while navigating: the folder has not been read yet.
+    ///
+    /// The dialog opens here on purpose. Scanning on open meant every
+    /// visit walked the whole tree — thousands of files under a root —
+    /// to answer a question the operator had not asked yet.
+    pub browsing: bool,
+    /// Subfolders of the current path, to navigate into.
+    pub entries: Vec<ImportDirEntry>,
+    /// The folder above, when there is one.
+    pub parent: Option<String>,
+    /// Registered root folders, as one-click jumps.
+    pub shortcuts: Vec<ImportDirEntry>,
     /// Always false here. The shared row partial reads it, and Askama
     /// resolves an included template against the parent context — so
     /// the field has to exist on both. Only a bulk action sets it.
@@ -1396,6 +1408,15 @@ pub struct ImportRowView {
     pub effect: Option<String>,
     /// A live grab already covers this target.
     pub covered: bool,
+}
+
+/// One folder the operator can navigate into.
+#[derive(Debug)]
+pub struct ImportDirEntry {
+    /// Folder name, for the row.
+    pub name: String,
+    /// Absolute path, for the link.
+    pub path: String,
 }
 
 /// One path on the ignored list.

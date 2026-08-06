@@ -99,12 +99,32 @@ async fn add_series(state: &AppState) -> uuid::Uuid {
     item.id
 }
 
-/// Pull every `name="fp"` value out of the rendered dialog. This is the
-/// same string the browser would post back.
-fn fingerprints(html: &str) -> Vec<String> {
-    html.split("name=\"fp\" value=\"")
+/// Pull every value of a named form field out of the rendered dialog.
+///
+/// Reading these from the HTML rather than composing them in the test is
+/// the whole point. A test that hand-writes what it *thinks* the form
+/// carries asserts the handler against itself: when the checkbox value
+/// grew an index prefix for bulk editing, the handler stopped matching
+/// it and these tests kept passing, because they were still posting the
+/// old shape. Fifty ticked rows answered "nada marcado".
+fn field_values(html: &str, name: &str) -> Vec<String> {
+    let needle = format!("name=\"{name}\" value=\"");
+    html.split(&needle)
         .skip(1)
         .filter_map(|rest| rest.split('"').next().map(str::to_owned))
+        .collect()
+}
+
+fn fingerprints(html: &str) -> Vec<String> {
+    field_values(html, "fp")
+}
+
+/// The `sel` values the browser would post for the rows whose file name
+/// matches, exactly as rendered.
+fn selections(html: &str, matching: &str) -> Vec<String> {
+    field_values(html, "sel")
+        .into_iter()
+        .filter(|v| v.contains(matching))
         .collect()
 }
 
@@ -140,10 +160,13 @@ async fn the_dialog_offers_a_file_and_confirming_adopts_it_in_place() {
     let client = reqwest::Client::new();
     let body = client
         .get(format!("http://{}/library/import", h.addr))
-        .query(&[(
-            "folder",
-            h.base.join("midias").to_string_lossy().to_string(),
-        )])
+        .query(&[
+            (
+                "folder",
+                h.base.join("midias").to_string_lossy().to_string(),
+            ),
+            ("scan", "1".to_owned()),
+        ])
         .send()
         .await
         .unwrap()
@@ -159,6 +182,17 @@ async fn the_dialog_offers_a_file_and_confirming_adopts_it_in_place() {
     );
     let fps = fingerprints(&body);
     assert_eq!(fps.len(), 1, "one row carries a target");
+    let sels = selections(&body, "The.Boys.S04E07");
+    assert_eq!(sels.len(), 1);
+    // The shape, pinned: the row index rides in the checkbox value so a
+    // bulk action can aim its out-of-band swap. Every reader of `sel`
+    // has to decode it, and one that compared it raw is what made
+    // "Importar" answer "nada marcado" with every row ticked.
+    assert!(
+        sels[0].starts_with("0|"),
+        "checkbox value carries the row index: {}",
+        sels[0]
+    );
 
     let before = tree(&h.base);
     let resp = client
@@ -169,7 +203,7 @@ async fn the_dialog_offers_a_file_and_confirming_adopts_it_in_place() {
                 h.base.join("midias").to_string_lossy().to_string(),
             ),
             ("action", "import".to_owned()),
-            ("sel", file.to_string_lossy().to_string()),
+            ("sel", sels[0].clone()),
             ("fp", fps[0].clone()),
         ])
         .send()
@@ -205,7 +239,7 @@ async fn a_row_left_unticked_is_not_imported() {
     let root = h.base.join("midias").to_string_lossy().to_string();
     let body = client
         .get(format!("http://{}/library/import", h.addr))
-        .query(&[("folder", root.clone())])
+        .query(&[("folder", root.clone()), ("scan", "1".to_owned())])
         .send()
         .await
         .unwrap()
@@ -215,11 +249,12 @@ async fn a_row_left_unticked_is_not_imported() {
     let fps = fingerprints(&body);
     assert_eq!(fps.len(), 2);
 
-    // Post both fingerprints but tick only the first episode.
-    let keep = folder
-        .join("The.Boys.S04E01.mkv")
-        .to_string_lossy()
-        .to_string();
+    // Post both fingerprints but tick only the first episode, using the
+    // checkbox value exactly as the dialog rendered it.
+    let keep = selections(&body, "The.Boys.S04E01.mkv")
+        .first()
+        .cloned()
+        .expect("the first episode has a checkbox");
     let report = client
         .post(format!("http://{}/library/import", h.addr))
         .form(&[
@@ -256,7 +291,7 @@ async fn ignoring_a_file_survives_reopening_and_can_be_undone() {
 
     let body = client
         .get(&open)
-        .query(&[("folder", dir.clone())])
+        .query(&[("folder", dir.clone()), ("scan", "1".to_owned())])
         .send()
         .await
         .unwrap()
@@ -264,13 +299,15 @@ async fn ignoring_a_file_survives_reopening_and_can_be_undone() {
         .await
         .unwrap();
     assert!(body.contains("The.Boys.S04E03.mkv"));
+    let sels = selections(&body, "The.Boys.S04E03.mkv");
+    assert_eq!(sels.len(), 1);
 
     let after_ignore = client
         .post(format!("http://{}/library/import", h.addr))
         .form(&[
             ("folder", dir.clone()),
             ("action", "ignore".to_owned()),
-            ("sel", junk.to_string_lossy().to_string()),
+            ("sel", sels[0].clone()),
         ])
         .send()
         .await
@@ -288,7 +325,7 @@ async fn ignoring_a_file_survives_reopening_and_can_be_undone() {
     // from Sonarr and Radarr, where ignoring lasts one dialog.
     let reopened = client
         .get(&open)
-        .query(&[("folder", dir.clone())])
+        .query(&[("folder", dir.clone()), ("scan", "1".to_owned())])
         .send()
         .await
         .unwrap()
@@ -329,7 +366,7 @@ async fn picking_a_title_makes_an_unmatched_file_importable() {
     let dir = folder.to_string_lossy().to_string();
     let body = client
         .get(format!("http://{}/library/import", h.addr))
-        .query(&[("folder", dir.clone())])
+        .query(&[("folder", dir.clone()), ("scan", "1".to_owned())])
         .send()
         .await
         .unwrap()
@@ -496,7 +533,7 @@ async fn numbering_in_sequence_assigns_consecutive_episodes() {
 
     let body = client
         .get(format!("http://{}/library/import", h.addr))
-        .query(&[("folder", dir.clone())])
+        .query(&[("folder", dir.clone()), ("scan", "1".to_owned())])
         .send()
         .await
         .unwrap()
@@ -559,6 +596,66 @@ async fn numbering_in_sequence_assigns_consecutive_episodes() {
     }
 }
 
+/// Opening the dialog navigates; it does not read the folder.
+///
+/// Pointed at a root holding thousands of files, scanning on open meant
+/// every visit walked the whole tree to answer a question the operator
+/// had not asked yet. Reading is now an explicit act.
+#[tokio::test]
+async fn opening_navigates_and_only_scans_when_asked() {
+    let h = spawn("browse").await;
+    add_series(&h.state).await;
+    let root = h.base.join("midias");
+    let series = root.join("The Boys");
+    std::fs::create_dir_all(&series).unwrap();
+    std::fs::write(series.join("The.Boys.S04E01.mkv"), b"a").unwrap();
+
+    let client = reqwest::Client::new();
+    let browse = client
+        .get(format!("http://{}/library/import", h.addr))
+        .query(&[("folder", root.to_string_lossy().to_string())])
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+
+    assert!(browse.contains("Importar do disco"));
+    assert!(
+        browse.contains("ler esta pasta"),
+        "the read button is there"
+    );
+    assert!(
+        browse.contains("The Boys"),
+        "the subfolder is offered to navigate into"
+    );
+    assert!(
+        !browse.contains("The.Boys.S04E01.mkv"),
+        "no file was read: {browse}"
+    );
+    assert!(
+        fingerprints(&browse).is_empty(),
+        "nothing is importable until the folder is read"
+    );
+
+    // Same folder, asked for explicitly, and now the files are there.
+    let scanned = client
+        .get(format!("http://{}/library/import", h.addr))
+        .query(&[
+            ("folder", series.to_string_lossy().to_string()),
+            ("scan", "1".to_owned()),
+        ])
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(scanned.contains("The.Boys.S04E01.mkv"));
+    assert_eq!(fingerprints(&scanned).len(), 1);
+}
+
 /// A folder brarr cannot read is a form error inside the dialog, not a
 /// 500 — the operator retypes the path in the field that is already
 /// there. In Docker a wrong path is the single most likely mistake.
@@ -568,7 +665,7 @@ async fn an_unreadable_folder_is_a_form_error() {
     let client = reqwest::Client::new();
     let resp = client
         .get(format!("http://{}/library/import", h.addr))
-        .query(&[("folder", "/nao/existe/em/lugar/nenhum")])
+        .query(&[("folder", "/nao/existe/em/lugar/nenhum"), ("scan", "1")])
         .send()
         .await
         .unwrap();

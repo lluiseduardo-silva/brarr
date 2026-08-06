@@ -56,19 +56,19 @@ use crate::web::templates::{
     ArrInstancesTemplate, DashboardTemplate, DecisionView, DownloadClientView,
     DownloadClientsListPartial, DownloadClientsTemplate, EditArrInstanceModalPartial,
     EditDownloadClientModalPartial, EditProviderModalPartial, EndpointHealthView,
-    EndpointRequestView, EpisodeView, ErrorTemplate, GrabView, HealthTemplate, ImportIgnoredView,
-    ImportModalPartial, ImportOutcomeView, ImportPickEpisodePartial, ImportPickTitlePartial,
-    ImportReportPartial, ImportRowPartial, ImportRowView, InteractiveReleaseView,
-    InteractiveResultsPartial, LibraryAddOptionsModalPartial, LibraryAddTemplate,
-    LibraryDetailTemplate, LibraryDetailView, LibraryItemView, LibrarySeasonPartial,
-    LibraryTemplate, LoginTemplate, NewProfileModalPartial, NewSearchModalPartial,
-    PathMappingClientOption, PathMappingView, PathMappingsPartial, PickEpisodeView, PickTitleView,
-    ProfileEditorTemplate, ProfileView, ProfilesTemplate, ProviderHealthView, ProviderView,
-    ProvidersListPartial, ProvidersTemplate, PushGroupView, PushHistoryView, PushesFilterView,
-    PushesTemplate, RecentSearchView, ReleasesTemplate, RootFolderView, RootFoldersListPartial,
-    SearchDetailTemplate, SearchesFilterView, SearchesIndexTemplate, SeasonView, SettingsFlash,
-    SettingsTemplate, SettingsValues, StuckImportView, TmdbHitView, WebhookEventView,
-    WebhooksTemplate,
+    EndpointRequestView, EpisodeView, ErrorTemplate, GrabView, HealthTemplate, ImportDirEntry,
+    ImportIgnoredView, ImportModalPartial, ImportOutcomeView, ImportPickEpisodePartial,
+    ImportPickTitlePartial, ImportReportPartial, ImportRowPartial, ImportRowView,
+    InteractiveReleaseView, InteractiveResultsPartial, LibraryAddOptionsModalPartial,
+    LibraryAddTemplate, LibraryDetailTemplate, LibraryDetailView, LibraryItemView,
+    LibrarySeasonPartial, LibraryTemplate, LoginTemplate, NewProfileModalPartial,
+    NewSearchModalPartial, PathMappingClientOption, PathMappingView, PathMappingsPartial,
+    PickEpisodeView, PickTitleView, ProfileEditorTemplate, ProfileView, ProfilesTemplate,
+    ProviderHealthView, ProviderView, ProvidersListPartial, ProvidersTemplate, PushGroupView,
+    PushHistoryView, PushesFilterView, PushesTemplate, RecentSearchView, ReleasesTemplate,
+    RootFolderView, RootFoldersListPartial, SearchDetailTemplate, SearchesFilterView,
+    SearchesIndexTemplate, SeasonView, SettingsFlash, SettingsTemplate, SettingsValues,
+    StuckImportView, TmdbHitView, WebhookEventView, WebhooksTemplate,
 };
 use crate::{AppError, AppState};
 use brarr_core::TmdbId;
@@ -2069,6 +2069,9 @@ struct ImportQuery {
     item: Option<Uuid>,
     /// Show the ignored list instead of the folder.
     ignored: Option<String>,
+    /// Read the folder now. Absent means navigate: the dialog opens on
+    /// the browser so a visit costs one `read_dir`, not a full walk.
+    scan: Option<String>,
 }
 
 /// `GET /library/import` — what importing this folder would do.
@@ -2083,7 +2086,19 @@ async fn library_import(
         Some(f) => f,
         None => default_import_folder(&state, q.item).await?,
     };
-    html(&import_modal(&state, &folder, q.item, q.ignored.is_some(), None).await?)
+    html(
+        &import_modal(
+            &state,
+            ImportView {
+                folder,
+                item: q.item,
+                showing_ignored: q.ignored.is_some(),
+                scan: q.scan.is_some(),
+                error: None,
+            },
+        )
+        .await?,
+    )
 }
 
 /// Where the dialog points before the operator says otherwise: the
@@ -2106,13 +2121,27 @@ async fn default_import_folder(state: &AppState, item: Option<Uuid>) -> Result<S
 
 /// Build the dialog. Shared by the open, the rescan and every action
 /// that re-renders it.
-async fn import_modal(
-    state: &AppState,
-    folder: &str,
+/// What the dialog is being asked to show.
+struct ImportView {
+    /// Folder in the path field.
+    folder: String,
+    /// Item the dialog is pinned to.
     item: Option<Uuid>,
+    /// Show the ignored list instead of the folder.
     showing_ignored: bool,
+    /// Read the folder. `false` navigates instead — the dialog opens
+    /// this way so a visit does not walk thousands of files to answer a
+    /// question the operator has not asked yet.
+    scan: bool,
+    /// Message to show inside the dialog.
     error: Option<String>,
-) -> Result<ImportModalPartial, AppError> {
+}
+
+async fn import_modal(state: &AppState, ctx: ImportView) -> Result<ImportModalPartial, AppError> {
+    let folder = ctx.folder.as_str();
+    let item = ctx.item;
+    let showing_ignored = ctx.showing_ignored;
+    let error = ctx.error;
     let ignored = crate::db::ignored_paths::list(state.pool())
         .await?
         .into_iter()
@@ -2141,18 +2170,54 @@ async fn import_modal(
         ignored_here: 0,
         ignored,
         showing_ignored,
+        browsing: !ctx.scan,
+        entries: Vec::new(),
+        parent: None,
+        shortcuts: root_folders::list_all(state.pool())
+            .await?
+            .into_iter()
+            .map(|r| ImportDirEntry {
+                name: r.path.file_name().map_or_else(
+                    || r.path.to_string_lossy().to_string(),
+                    |n| n.to_string_lossy().to_string(),
+                ),
+                path: r.path.to_string_lossy().to_string(),
+            })
+            .collect(),
         oob: false,
         error,
     };
     if folder.trim().is_empty() {
         view.error = Some(
-            "Nenhuma pasta raiz cadastrada. Informe o caminho da pasta a importar — em Docker, \
-             o de dentro do contêiner do brarr."
+            "Informe o caminho da pasta a importar, ou escolha uma pasta raiz abaixo — em Docker, \
+             o caminho é o de dentro do contêiner do brarr."
                 .to_owned(),
         );
         return Ok(view);
     }
     if showing_ignored {
+        return Ok(view);
+    }
+
+    if !ctx.scan {
+        let here = std::path::Path::new(folder);
+        view.parent = here
+            .parent()
+            .map(|p| p.to_string_lossy().to_string())
+            .filter(|p| !p.is_empty());
+        match crate::adopt::list_dirs(here).await {
+            Ok(dirs) => {
+                view.entries = dirs
+                    .into_iter()
+                    .map(|(name, path)| ImportDirEntry {
+                        name,
+                        path: path.to_string_lossy().to_string(),
+                    })
+                    .collect();
+            }
+            Err(AppError::InvalidInput(why)) => view.error = Some(why),
+            Err(other) => return Err(other),
+        }
         return Ok(view);
     }
 
@@ -2214,16 +2279,26 @@ async fn library_import_submit(
     };
     let folder = value("folder").unwrap_or_default();
     let item = value("item").and_then(|raw| Uuid::parse_str(&raw).ok());
-    let selected: std::collections::HashSet<&str> = fields
-        .iter()
-        .filter(|(k, _)| k == "sel")
-        .map(|(_, v)| v.as_str())
-        .collect();
+    let ticked = selected_rows(&fields);
+    let selected: std::collections::HashSet<&str> =
+        ticked.iter().map(|(_, path)| path.as_str()).collect();
 
     if value("action").as_deref() == Some("ignore") {
-        let paths: Vec<String> = selected.iter().map(|p| (*p).to_owned()).collect();
+        let paths: Vec<String> = ticked.iter().map(|(_, path)| path.clone()).collect();
         crate::db::ignored_paths::ignore(state.pool(), &paths).await?;
-        return html(&import_modal(&state, &folder, item, false, None).await?);
+        return html(
+            &import_modal(
+                &state,
+                ImportView {
+                    folder,
+                    item,
+                    showing_ignored: false,
+                    scan: true,
+                    error: None,
+                },
+            )
+            .await?,
+        );
     }
 
     // Only rows the operator kept ticked, and only those that carried a
@@ -2240,10 +2315,13 @@ async fn library_import_submit(
         return html(
             &import_modal(
                 &state,
-                &folder,
-                item,
-                false,
-                Some("Nada marcado para importar.".to_owned()),
+                ImportView {
+                    folder,
+                    item,
+                    showing_ignored: false,
+                    scan: true,
+                    error: Some("Nada marcado para importar.".to_owned()),
+                },
             )
             .await?,
         );
@@ -2276,6 +2354,30 @@ fn import_report(report: &crate::adopt::Report) -> ImportReportPartial {
             })
             .collect(),
     }
+}
+
+/// Rows the operator ticked, as `(index, path)`, in DOM order.
+///
+/// The checkbox value is `{idx}|{path}`: the index rides along so a bulk
+/// action can aim its out-of-band swap at the right row. `splitn(2, '|')`
+/// because a path may legitimately contain a pipe.
+///
+/// **Every** reader of `sel` goes through here. Having one caller decode
+/// the value and another compare it raw is exactly the bug that made
+/// "Importar" answer "nada marcado" with fifty rows ticked, and would
+/// have written `12|/midias/…` into `ignored_paths` — a row that matches
+/// no file, so ignoring would have looked like it worked and done
+/// nothing, forever.
+fn selected_rows(fields: &[(String, String)]) -> Vec<(usize, String)> {
+    fields
+        .iter()
+        .filter(|(k, _)| k == "sel")
+        .filter_map(|(_, v)| {
+            let mut parts = v.splitn(2, '|');
+            let idx = parts.next()?.parse().ok()?;
+            Some((idx, parts.next()?.to_owned()))
+        })
+        .collect()
 }
 
 /// Query shared by the pickers and the single-row render.
@@ -2467,15 +2569,7 @@ async fn library_import_bulk(
 
     // Selected rows, in the order the form sent them — which is DOM
     // order, which is scan order. The sequence action depends on it.
-    let selected: Vec<(usize, String)> = fields
-        .iter()
-        .filter(|(k, _)| k == "sel")
-        .filter_map(|(_, v)| {
-            let mut parts = v.splitn(2, '|');
-            let idx = parts.next()?.parse().ok()?;
-            Some((idx, parts.next()?.to_owned()))
-        })
-        .collect();
+    let selected = selected_rows(&fields);
 
     // For "sequence", walk the season's slots from the chosen one and
     // hand them out in order. Anything past the end of the season simply
@@ -2545,7 +2639,19 @@ async fn library_import_unignore(
     Form(form): Form<UnignoreForm>,
 ) -> Result<Response, AppError> {
     crate::db::ignored_paths::unignore(state.pool(), &form.path).await?;
-    html(&import_modal(&state, &form.folder, form.item, true, None).await?)
+    html(
+        &import_modal(
+            &state,
+            ImportView {
+                folder: form.folder,
+                item: form.item,
+                showing_ignored: true,
+                scan: true,
+                error: None,
+            },
+        )
+        .await?,
+    )
 }
 
 async fn library_verify(State(state): State<AppState>) -> Result<Response, AppError> {
