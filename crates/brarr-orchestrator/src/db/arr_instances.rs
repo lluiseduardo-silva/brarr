@@ -44,6 +44,17 @@ pub struct ArrInstanceRow {
     /// scheduled poller skips it (the manual "rodar agora" button still
     /// works). Default `false`.
     pub webhook_driven: bool,
+    /// `true` ⇒ brarr reads this instance's catalogue into its own
+    /// library. A **different axis from [`Self::enabled`]**, which
+    /// governs the deprecated push/poll path: an instance can be a
+    /// passive source while disabled for everything else, and all three
+    /// of the operator's instances are in exactly that state.
+    ///
+    /// The passive path never enables monitoring — see the migration.
+    pub sync_source: bool,
+    /// When the passive sweep last read this instance. `None` until it
+    /// runs once.
+    pub synced_at: Option<OffsetDateTime>,
     /// Row creation timestamp.
     pub created_at: OffsetDateTime,
 }
@@ -62,6 +73,11 @@ impl ArrInstanceRow {
         }
     }
 }
+
+/// Every column the row struct reads, in one place so a new field can
+/// only ever be forgotten once.
+const COLUMNS: &str = "id, name, kind, base_url, api_key, push_threshold, profile_id, enabled, \
+     webhook_driven, sync_source, synced_at, created_at";
 
 /// Bundle of values used to create a new *arr instance row.
 #[derive(Debug, Clone)]
@@ -136,6 +152,8 @@ pub async fn insert(pool: &Pool, new: NewArrInstance<'_>) -> Result<ArrInstanceR
         profile_id: new.profile_id,
         enabled,
         webhook_driven: false,
+        sync_source: false,
+        synced_at: None,
         created_at: now,
     })
 }
@@ -146,10 +164,9 @@ pub async fn insert(pool: &Pool, new: NewArrInstance<'_>) -> Result<ArrInstanceR
 ///
 /// Returns [`AppError::Database`] on SQL failure.
 pub async fn list_all(pool: &Pool) -> Result<Vec<ArrInstanceRow>, AppError> {
-    let rows = sqlx::query(
-        "SELECT id, name, kind, base_url, api_key, push_threshold, profile_id, enabled, webhook_driven, created_at \
-         FROM arr_instances ORDER BY name ASC",
-    )
+    let rows = sqlx::query(&format!(
+        "SELECT {COLUMNS} FROM arr_instances ORDER BY name ASC"
+    ))
     .fetch_all(pool)
     .await?;
     rows.iter().map(row_to_instance).collect()
@@ -162,10 +179,27 @@ pub async fn list_all(pool: &Pool) -> Result<Vec<ArrInstanceRow>, AppError> {
 ///
 /// Returns [`AppError::Database`] on SQL failure.
 pub async fn list_enabled(pool: &Pool) -> Result<Vec<ArrInstanceRow>, AppError> {
-    let rows = sqlx::query(
-        "SELECT id, name, kind, base_url, api_key, push_threshold, profile_id, enabled, webhook_driven, created_at \
-         FROM arr_instances WHERE enabled = 1 ORDER BY name ASC",
-    )
+    let rows = sqlx::query(&format!(
+        "SELECT {COLUMNS} FROM arr_instances WHERE enabled = 1 ORDER BY name ASC"
+    ))
+    .fetch_all(pool)
+    .await?;
+    rows.iter().map(row_to_instance).collect()
+}
+
+/// List the instances brarr reads catalogues from.
+///
+/// Deliberately **not** filtered on `enabled`: that flag governs the
+/// deprecated push/poll path, and the operator's three instances are
+/// disabled for it while still being the source of the library.
+///
+/// # Errors
+///
+/// Returns [`AppError::Database`] on SQL failure.
+pub async fn list_sync_sources(pool: &Pool) -> Result<Vec<ArrInstanceRow>, AppError> {
+    let rows = sqlx::query(&format!(
+        "SELECT {COLUMNS} FROM arr_instances WHERE sync_source = 1 ORDER BY name ASC"
+    ))
     .fetch_all(pool)
     .await?;
     rows.iter().map(row_to_instance).collect()
@@ -177,13 +211,10 @@ pub async fn list_enabled(pool: &Pool) -> Result<Vec<ArrInstanceRow>, AppError> 
 ///
 /// Returns [`AppError::NotFound`] if no row matches.
 pub async fn get_by_id(pool: &Pool, id: Uuid) -> Result<ArrInstanceRow, AppError> {
-    let row_opt = sqlx::query(
-        "SELECT id, name, kind, base_url, api_key, push_threshold, profile_id, enabled, webhook_driven, created_at \
-         FROM arr_instances WHERE id = ?",
-    )
-    .bind(id.to_string())
-    .fetch_optional(pool)
-    .await?;
+    let row_opt = sqlx::query(&format!("SELECT {COLUMNS} FROM arr_instances WHERE id = ?"))
+        .bind(id.to_string())
+        .fetch_optional(pool)
+        .await?;
     match row_opt {
         Some(row) => row_to_instance(&row),
         None => Err(AppError::NotFound(format!("arr_instance {id}"))),
@@ -275,6 +306,53 @@ pub async fn set_webhook_driven(
     get_by_id(pool, id).await
 }
 
+/// Flip the `sync_source` flag in place.
+///
+/// Separate from [`set_enabled`] because they are separate axes: this one
+/// says "read this catalogue into my library", that one says "push
+/// releases at it". Collapsing them would mean the operator cannot have
+/// the state all three of their instances are actually in.
+///
+/// # Errors
+///
+/// - [`AppError::NotFound`] when no row matches `id`.
+/// - [`AppError::Database`] on SQL failure.
+pub async fn set_sync_source(
+    pool: &Pool,
+    id: Uuid,
+    sync_source: bool,
+) -> Result<ArrInstanceRow, AppError> {
+    let res = sqlx::query("UPDATE arr_instances SET sync_source = ? WHERE id = ?")
+        .bind(i64::from(u8::from(sync_source)))
+        .bind(id.to_string())
+        .execute(pool)
+        .await?;
+    if res.rows_affected() == 0 {
+        return Err(AppError::NotFound(format!("arr_instance {id}")));
+    }
+    get_by_id(pool, id).await
+}
+
+/// Record that the passive sweep just read this instance.
+///
+/// A column rather than an inference over `library_items` timestamps: the
+/// question "is the wish list fresh?" is about the *instance*, and rows
+/// scattered across the library cannot answer it once a title stops
+/// changing.
+///
+/// # Errors
+///
+/// Returns [`AppError::Database`] on SQL failure. A row that vanished
+/// mid-sweep is not an error — there is simply nothing to stamp.
+pub async fn mark_synced(pool: &Pool, id: Uuid, at: OffsetDateTime) -> Result<(), AppError> {
+    sqlx::query("UPDATE arr_instances SET synced_at = ? WHERE id = ?")
+        .bind(at.unix_timestamp())
+        .bind(id.to_string())
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 /// Bundle of fields the edit form may overwrite.
 #[derive(Debug, Clone)]
 pub struct ArrInstanceUpdate<'a> {
@@ -364,6 +442,8 @@ fn row_to_instance(row: &SqliteRow) -> Result<ArrInstanceRow, AppError> {
         })?;
     let enabled_i64: i64 = row.try_get("enabled")?;
     let webhook_driven_i64: i64 = row.try_get("webhook_driven")?;
+    let sync_source_i64: i64 = row.try_get("sync_source")?;
+    let synced_unix: Option<i64> = row.try_get("synced_at")?;
     let created_unix: i64 = row.try_get("created_at")?;
     let created_at = OffsetDateTime::from_unix_timestamp(created_unix)
         .map_err(|e| AppError::InvalidInput(format!("invalid timestamp: {e}")))?;
@@ -377,6 +457,10 @@ fn row_to_instance(row: &SqliteRow) -> Result<ArrInstanceRow, AppError> {
         profile_id,
         enabled: enabled_i64 != 0,
         webhook_driven: webhook_driven_i64 != 0,
+        sync_source: sync_source_i64 != 0,
+        // A stored value outside the representable range is bad data, not
+        // a reason to fail the read — degrade to "never synced".
+        synced_at: synced_unix.and_then(|v| OffsetDateTime::from_unix_timestamp(v).ok()),
         created_at,
     })
 }
@@ -546,6 +630,51 @@ mod tests {
         assert!(get_by_id(&pool, row.id).await.unwrap().webhook_driven);
         let off = set_webhook_driven(&pool, row.id, false).await.unwrap();
         assert!(!off.webhook_driven);
+    }
+
+    #[tokio::test]
+    async fn sync_source_defaults_false_and_roundtrips() {
+        let pool = open_memory().await.unwrap();
+        let url = Url::parse("https://x/").unwrap();
+        let row = insert(&pool, ni("s", ArrKind::Sonarr, &url, "k"))
+            .await
+            .unwrap();
+        assert!(!row.sync_source);
+        assert_eq!(row.synced_at, None);
+        let on = set_sync_source(&pool, row.id, true).await.unwrap();
+        assert!(on.sync_source);
+        assert!(get_by_id(&pool, row.id).await.unwrap().sync_source);
+    }
+
+    /// The two flags are different questions, and the operator's three
+    /// instances answer them differently: disabled for push, on as a
+    /// source. `list_sync_sources` must not inherit `list_enabled`'s
+    /// filter.
+    #[tokio::test]
+    async fn a_disabled_instance_can_still_be_a_sync_source() {
+        let pool = open_memory().await.unwrap();
+        let url = Url::parse("https://x/").unwrap();
+        let mut off = ni("sonarr-animes", ArrKind::Sonarr, &url, "k");
+        off.enabled = Some(false);
+        let row = insert(&pool, off).await.unwrap();
+        set_sync_source(&pool, row.id, true).await.unwrap();
+
+        assert!(list_enabled(&pool).await.unwrap().is_empty());
+        let sources = list_sync_sources(&pool).await.unwrap();
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].name, "sonarr-animes");
+    }
+
+    #[tokio::test]
+    async fn mark_synced_stamps_the_instance() {
+        let pool = open_memory().await.unwrap();
+        let url = Url::parse("https://x/").unwrap();
+        let row = insert(&pool, ni("s", ArrKind::Sonarr, &url, "k"))
+            .await
+            .unwrap();
+        let at = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        mark_synced(&pool, row.id, at).await.unwrap();
+        assert_eq!(get_by_id(&pool, row.id).await.unwrap().synced_at, Some(at));
     }
 
     #[tokio::test]
