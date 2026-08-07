@@ -62,14 +62,15 @@ use crate::web::templates::{
     ImportPickEpisodePartial, ImportPickTitlePartial, ImportReportPartial, ImportRowPartial,
     ImportRowView, InteractiveReleaseView, InteractiveResultsPartial,
     LibraryAddOptionsModalPartial, LibraryAddTemplate, LibraryDetailTemplate, LibraryDetailView,
-    LibraryItemView, LibrarySeasonPartial, LibraryTemplate, LoginTemplate, NewProfileModalPartial,
-    NewSearchModalPartial, PathMappingClientOption, PathMappingView, PathMappingsPartial,
-    PickEpisodeView, PickTitleView, ProfileEditorTemplate, ProfileView, ProfilesTemplate,
-    ProviderHealthView, ProviderView, ProvidersListPartial, ProvidersTemplate, PushGroupView,
-    PushHistoryView, PushesFilterView, PushesTemplate, RecentSearchView, ReleasesTemplate,
-    RootFolderView, RootFoldersListPartial, SearchDetailTemplate, SearchesFilterView,
-    SearchesIndexTemplate, SeasonView, SettingsFlash, SettingsTemplate, SettingsValues,
-    StuckImportView, TmdbHitView, WebhookEventView, WebhooksTemplate,
+    LibraryGrabsModalPartial, LibraryItemView, LibrarySeasonPartial, LibraryTemplate,
+    LoginTemplate, NewProfileModalPartial, NewSearchModalPartial, PathMappingClientOption,
+    PathMappingView, PathMappingsPartial, PickEpisodeView, PickTitleView, ProfileEditorTemplate,
+    ProfileView, ProfilesTemplate, ProviderHealthView, ProviderView, ProvidersListPartial,
+    ProvidersTemplate, PushGroupView, PushHistoryView, PushesFilterView, PushesTemplate,
+    RecentSearchView, ReleasesTemplate, RootFolderView, RootFoldersListPartial,
+    SearchDetailTemplate, SearchesFilterView, SearchesIndexTemplate, SeasonMarkView, SeasonView,
+    SettingsFlash, SettingsTemplate, SettingsValues, StuckImportView, TmdbHitView,
+    WebhookEventView, WebhooksTemplate,
 };
 use crate::{AppError, AppState};
 use brarr_core::TmdbId;
@@ -117,6 +118,7 @@ pub fn router(state: AppState, static_dir: &std::path::Path) -> Router {
         .route("/library/{id}/scan", post(library_scan_now))
         .route("/library/{id}/interactive", get(library_interactive))
         .route("/library/{id}/grab/{decision_id}", post(library_grab))
+        .route("/library/{id}/grabs", get(library_grabs))
         .route("/library/{id}/season/{season_id}", get(library_season))
         .route(
             "/library/{id}/season/{season_id}/monitor",
@@ -1074,6 +1076,16 @@ async fn library_index(
     let counts = library::counts(state.pool()).await?;
     let all = library::list(state.pool()).await?;
 
+    // Four queries for the whole page, whatever its size. This used to
+    // be two per series — `seasons` and `episodes` — which is 720 round
+    // trips once the *arr migration lands 360 titles, to render a
+    // summary line.
+    let now = OffsetDateTime::now_utc();
+    let monitored_episodes = library::monitored_episodes(state.pool()).await?;
+    let coverage = grabs::live_coverage(state.pool()).await?;
+    let trees = library::tree_counts(state.pool()).await?;
+    let series_progress = crate::coverage::summarise(&monitored_episodes, &coverage, now);
+
     let mut items = Vec::with_capacity(all.len());
     for item in all {
         let keep = match filter.as_str() {
@@ -1086,29 +1098,28 @@ async fn library_index(
             continue;
         }
 
-        // Only series have a tree, and only series pay for the extra
-        // queries needed to summarise it.
+        // Only series have a tree. Season 0 is TMDB's specials bucket,
+        // and it is not small: The Boys carries 76 of them against 40
+        // real episodes. Both halves of the summary exclude it or the
+        // line reads "5 temporadas · 116 episódios", which is nonsense.
         let is_series = item.media_type == library::MediaType::Tv;
         let tree_summary = if is_series {
-            let seasons = library::seasons(state.pool(), item.id).await?;
-            let episodes = library::episodes(state.pool(), item.id).await?;
-            // Season 0 is TMDB's specials bucket, and it is not small:
-            // The Boys carries 76 of them against 40 real episodes.
-            // Both halves of the summary have to exclude it or the line
-            // reads "5 temporadas · 116 episódios", which is nonsense.
-            let real_seasons = seasons.iter().filter(|s| s.season_number > 0).count();
-            let real_episodes = episodes.iter().filter(|e| e.season_number > 0).count();
-            let specials = episodes.len() - real_episodes;
-            if specials > 0 {
+            let tree = trees.get(&item.id).copied().unwrap_or_default();
+            if tree.specials > 0 {
                 format!(
-                    "{real_seasons} temporadas · {real_episodes} episódios · {specials} especiais"
+                    "{} temporadas · {} episódios · {} especiais",
+                    tree.seasons, tree.episodes, tree.specials
                 )
             } else {
-                format!("{real_seasons} temporadas · {real_episodes} episódios")
+                format!("{} temporadas · {} episódios", tree.seasons, tree.episodes)
             }
         } else {
             String::new()
         };
+
+        let progress = crate::coverage::progress_of(&item, &series_progress, &coverage, now);
+        let status = crate::coverage::ItemStatus::of(item.monitored, progress);
+        let (missing, upcoming) = status.callout(progress);
 
         let profile = match item.profile_id {
             Some(pid) => quality_profiles::get_by_id(state.pool(), pid)
@@ -1130,6 +1141,13 @@ async fn library_index(
             imdb_id: item.imdb_id,
             tree_summary,
             added_at: short_date(item.added_at),
+            tone: status.tone().to_owned(),
+            status_label: status.label().to_owned(),
+            monitored_count: progress.total,
+            have: progress.have,
+            missing,
+            upcoming,
+            percent: progress.percent(),
         });
     }
 
@@ -1458,57 +1476,41 @@ async fn library_detail(
     let item = library::get_by_id(state.pool(), uuid).await?;
     let is_series = item.media_type == library::MediaType::Tv;
 
+    // Coverage for this one item — the same rule the index applies over
+    // the whole library, narrowed to one row.
+    let coverage = grabs::live_coverage_for_item(state.pool(), uuid).await?;
+    let now = OffsetDateTime::now_utc();
+    let episodes = if is_series {
+        library::episodes(state.pool(), uuid).await?
+    } else {
+        Vec::new()
+    };
+    let monitored: Vec<library::MonitoredEpisode> = episodes
+        .iter()
+        .filter(|e| e.monitored && e.season_number > 0)
+        .map(|e| library::MonitoredEpisode {
+            item_id: uuid,
+            id: e.id,
+            season_number: e.season_number,
+            air_date: e.air_date,
+        })
+        .collect();
+    let series_progress = crate::coverage::summarise(&monitored, &coverage, now);
+    let progress = crate::coverage::progress_of(&item, &series_progress, &coverage, now);
+    let status = crate::coverage::ItemStatus::of(item.monitored, progress);
+
     // Seasons carry only their header here; episodes load on expand.
     let seasons = if is_series {
         library::seasons(state.pool(), uuid)
             .await?
-            .into_iter()
-            .map(|s| SeasonView {
-                id: s.id.to_string(),
-                number: s.season_number,
-                label: if s.season_number == 0 {
-                    "Especiais".to_owned()
-                } else {
-                    format!("Temporada {}", s.season_number)
-                },
-                episode_count: s.episode_count,
-                monitored: s.monitored,
-            })
+            .iter()
+            .map(|s| season_view(s, &monitored, &coverage, now))
             .collect()
     } else {
         Vec::new()
     };
 
-    let grabs = grabs::for_item(state.pool(), uuid)
-        .await?
-        .into_iter()
-        .map(|g| GrabView {
-            id: g.id.to_string(),
-            is_local: g.protocol == grabs::Protocol::Local,
-            in_place: grabs::is_in_place(&g),
-            release_name: g.release_name,
-            provider_name: g.provider_name,
-            protocol: g.protocol.label().to_owned(),
-            status: g.status.label().to_owned(),
-            tone: match g.status {
-                grabs::GrabStatus::Imported | grabs::GrabStatus::Completed => "ok".to_owned(),
-                grabs::GrabStatus::Failed | grabs::GrabStatus::Rejected => "err".to_owned(),
-                grabs::GrabStatus::Reserved => "warn".to_owned(),
-                _ => "neutral".to_owned(),
-            },
-            grabbed_at: short_date(g.grabbed_at),
-            // A file that vanished after the import outranks the status
-            // as the thing the operator needs to see on this row.
-            error: match (&g.error, g.file_missing_at.is_some()) {
-                (_, true) => Some(format!(
-                    "arquivo não está mais em {}",
-                    g.imported_path.as_deref().unwrap_or("disco")
-                )),
-                (other, false) => other.clone(),
-            },
-            file_missing: g.file_missing_at.is_some(),
-        })
-        .collect();
+    let grab_count = grabs::for_item(state.pool(), uuid).await?.len();
 
     let profiles = quality_profiles::list_all(state.pool())
         .await?
@@ -1520,7 +1522,6 @@ async fn library_detail(
     let current_root = item.root_folder.clone().unwrap_or_default();
 
     // Only meaningful for movies, and only while the date is ahead of us.
-    let now = OffsetDateTime::now_utc();
     let in_theatrical_window = item.digital_release_at.is_some_and(|d| d > now);
 
     let original_title = item
@@ -1553,13 +1554,59 @@ async fn library_detail(
                 .physical_release_at
                 .map_or_else(String::new, short_date),
             in_theatrical_window,
+            tone: status.tone().to_owned(),
+            status_label: status.label().to_owned(),
+            monitored_count: progress.total,
+            have: progress.have,
+            missing: status.callout(progress).0,
+            percent: progress.percent(),
         },
         seasons,
-        grabs,
+        grab_count,
         profiles,
         root_folders: root_folder_options,
         root_folder: current_root,
     })
+}
+
+/// One season header, with its own progress.
+///
+/// Per-season progress runs the **same** summariser over just this
+/// season's monitored episodes, so a season chip can never disagree with
+/// the item chip above it — a second hand-rolled count is how they would.
+fn season_view(
+    season: &library::Season,
+    monitored: &[library::MonitoredEpisode],
+    coverage: &[grabs::Coverage],
+    now: OffsetDateTime,
+) -> SeasonView {
+    let mine: Vec<library::MonitoredEpisode> = monitored
+        .iter()
+        .filter(|e| e.season_number == season.season_number)
+        .copied()
+        .collect();
+    // Every row carries the same `item_id`, so the map has one entry.
+    let progress = crate::coverage::summarise(&mine, coverage, now)
+        .into_values()
+        .next()
+        .unwrap_or_default();
+    let status = crate::coverage::ItemStatus::of(season.monitored, progress);
+    SeasonView {
+        id: season.id.to_string(),
+        number: season.season_number,
+        label: if season.season_number == 0 {
+            "Especiais".to_owned()
+        } else {
+            format!("Temporada {}", season.season_number)
+        },
+        episode_count: season.episode_count,
+        monitored: season.monitored,
+        tone: status.tone().to_owned(),
+        status_label: status.label().to_owned(),
+        monitored_count: progress.total,
+        have: progress.have,
+        percent: progress.percent(),
+    }
 }
 
 /// Root folders an item of `media_type` could be pinned to, as
@@ -1611,17 +1658,39 @@ async fn validated_root_folder(state: &AppState, path: &str) -> Result<String, A
 
 /// Map episode rows into the shared partial. Used both by the season
 /// expand and by the single-row swap after an episode toggle.
-fn episode_views(episodes: &[library::Episode]) -> Vec<EpisodeView> {
+///
+/// `grabs` is the item's whole history, failed and vanished rows
+/// included — [`crate::coverage::episode_mark`] needs them to tell
+/// "never had it" from "had it and the file is gone", which are
+/// different problems with different fixes.
+fn episode_views(episodes: &[library::Episode], grabs: &[grabs::Grab]) -> Vec<EpisodeView> {
+    let now = OffsetDateTime::now_utc();
     episodes
         .iter()
-        .map(|e| EpisodeView {
-            id: e.id.to_string(),
-            code: format!("S{:02}E{:02}", e.season_number, e.episode_number),
-            title: e.title.clone().unwrap_or_else(|| "—".to_owned()),
-            air_date: e.air_date.map_or_else(String::new, short_date),
-            monitored: e.monitored,
+        .map(|e| {
+            let mark = crate::coverage::episode_mark(e.id, e.season_number, e.air_date, grabs, now);
+            EpisodeView {
+                id: e.id.to_string(),
+                code: format!("S{:02}E{:02}", e.season_number, e.episode_number),
+                title: e.title.clone().unwrap_or_else(|| "—".to_owned()),
+                air_date: e.air_date.map_or_else(String::new, short_date),
+                monitored: e.monitored,
+                state_tone: mark.state.tone().to_owned(),
+                state_label: mark.state.label().to_owned(),
+                file_name: base_name(&mark.detail),
+                detail: mark.detail,
+            }
         })
         .collect()
+}
+
+/// Last path component, for the inline hint next to a row. The full path
+/// stays in the tooltip — it is the half that answers "which mount?".
+fn base_name(path: &str) -> String {
+    if path.is_empty() {
+        return String::new();
+    }
+    path.rsplit(['/', '\\']).next().unwrap_or(path).to_owned()
 }
 
 /// `GET /library/{id}/season/{season_id}` — episode rows, fetched when
@@ -1646,10 +1715,12 @@ async fn library_season(
         .into_iter()
         .filter(|e| e.season_number == season.season_number)
         .collect();
+    let history = grabs::for_item(state.pool(), item_uuid).await?;
 
     html(&LibrarySeasonPartial {
         item_id: id,
-        episodes: episode_views(&episodes),
+        episodes: episode_views(&episodes, &history),
+        oob: None,
     })
 }
 
@@ -1668,10 +1739,57 @@ async fn library_season_monitor(
         .into_iter()
         .find(|s| s.id == season_uuid)
         .ok_or_else(|| AppError::NotFound(format!("library_season {season_id}")))?;
-    library::set_season_monitored(state.pool(), season_uuid, !current.monitored).await?;
-    // The cascade rewrote every episode of the season, so the open
-    // accordion body is stale — a refresh is the honest answer.
-    Ok(hx_refresh())
+    let now_monitored = !current.monitored;
+    library::set_season_monitored(state.pool(), season_uuid, now_monitored).await?;
+
+    // The cascade rewrote every episode of the season, so answering with
+    // the season's rows is what makes it believable: the operator sees
+    // every bookmark move rather than being told it happened. The
+    // season's own bookmark lives in the `<summary>`, outside this swap
+    // target, so it rides along out-of-band.
+    //
+    // This used to be an `HX-Refresh`, which was correct and closed the
+    // accordion the operator had just opened.
+    let episodes: Vec<library::Episode> = library::episodes(state.pool(), item_uuid)
+        .await?
+        .into_iter()
+        .filter(|e| e.season_number == current.season_number)
+        .collect();
+    let history = grabs::for_item(state.pool(), item_uuid).await?;
+
+    // Re-read the season the same way the page built it, so the chip
+    // that rides out-of-band agrees with the rows below it.
+    let coverage = grabs::live_coverage_for_item(state.pool(), item_uuid).await?;
+    let now = OffsetDateTime::now_utc();
+    let monitored: Vec<library::MonitoredEpisode> = episodes
+        .iter()
+        .filter(|e| e.monitored && e.season_number > 0)
+        .map(|e| library::MonitoredEpisode {
+            item_id: item_uuid,
+            id: e.id,
+            season_number: e.season_number,
+            air_date: e.air_date,
+        })
+        .collect();
+    let fresh = library::Season {
+        monitored: now_monitored,
+        ..current
+    };
+    let view = season_view(&fresh, &monitored, &coverage, now);
+
+    html(&LibrarySeasonPartial {
+        item_id: id,
+        episodes: episode_views(&episodes, &history),
+        oob: Some(SeasonMarkView {
+            season_id,
+            monitored: now_monitored,
+            tone: view.tone,
+            status_label: view.status_label,
+            monitored_count: view.monitored_count,
+            have: view.have,
+            percent: view.percent,
+        }),
+    })
 }
 
 /// `POST /library/{id}/episode/{episode_id}/monitor` — flip one
@@ -1698,10 +1816,58 @@ async fn library_episode_monitor(
         .into_iter()
         .find(|e| e.id == episode_uuid)
         .ok_or_else(|| AppError::NotFound(format!("library_episode {episode_id}")))?;
+    let history = grabs::for_item(state.pool(), item_uuid).await?;
     html(&LibrarySeasonPartial {
         item_id: id,
-        episodes: episode_views(&[updated]),
+        episodes: episode_views(&[updated], &history),
+        oob: None,
     })
+}
+
+/// `GET /library/{id}/grabs` — the acquisition history, in a dialog.
+async fn library_grabs(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, AppError> {
+    let uuid = Uuid::parse_str(&id)
+        .map_err(|e| AppError::InvalidInput(format!("invalid library id: {e}")))?;
+    let item = library::get_by_id(state.pool(), uuid).await?;
+    html(&LibraryGrabsModalPartial {
+        title: item.title,
+        grabs: grab_views(grabs::for_item(state.pool(), uuid).await?),
+    })
+}
+
+/// Map acquisition rows for the history dialog.
+fn grab_views(rows: Vec<grabs::Grab>) -> Vec<GrabView> {
+    rows.into_iter()
+        .map(|g| GrabView {
+            id: g.id.to_string(),
+            is_local: g.protocol == grabs::Protocol::Local,
+            in_place: grabs::is_in_place(&g),
+            release_name: g.release_name,
+            provider_name: g.provider_name,
+            protocol: g.protocol.label().to_owned(),
+            status: g.status.label().to_owned(),
+            tone: match g.status {
+                grabs::GrabStatus::Imported | grabs::GrabStatus::Completed => "ok".to_owned(),
+                grabs::GrabStatus::Failed | grabs::GrabStatus::Rejected => "err".to_owned(),
+                grabs::GrabStatus::Reserved => "warn".to_owned(),
+                _ => "neutral".to_owned(),
+            },
+            grabbed_at: short_date(g.grabbed_at),
+            // A file that vanished after the import outranks the status
+            // as the thing the operator needs to see on this row.
+            error: match (&g.error, g.file_missing_at.is_some()) {
+                (_, true) => Some(format!(
+                    "arquivo não está mais em {}",
+                    g.imported_path.as_deref().unwrap_or("disco")
+                )),
+                (other, false) => other.clone(),
+            },
+            file_missing: g.file_missing_at.is_some(),
+        })
+        .collect()
 }
 
 /// `POST /library/{id}/profile` — attach or detach a quality profile.

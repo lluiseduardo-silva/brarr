@@ -1263,6 +1263,23 @@ pub struct LibraryItemView {
     pub tree_summary: String,
     /// Localised `dd/mm/aaaa` of when it was added.
     pub added_at: String,
+    /// [`crate::coverage::ItemStatus::tone`] — drives the spine, the
+    /// chip and the bar, so one colour means one thing on the screen.
+    pub tone: String,
+    /// What the chip says.
+    pub status_label: String,
+    /// Monitored episodes (or `1` for a monitored movie). **This is the
+    /// denominator**, and it is never the series total — see
+    /// [`crate::coverage`].
+    pub monitored_count: usize,
+    /// Of those, how many are on disk.
+    pub have: usize,
+    /// Aired, monitored and absent — the number the operator can act on.
+    pub missing: usize,
+    /// Monitored and not aired yet. Not a gap.
+    pub upcoming: usize,
+    /// `have / monitored_count`, for the bar width.
+    pub percent: u8,
 }
 
 /// TMDB search page at `/library/add`.
@@ -1316,8 +1333,11 @@ pub struct LibraryDetailTemplate {
     pub item: LibraryDetailView,
     /// Seasons, ascending. Empty for movies.
     pub seasons: Vec<SeasonView>,
-    /// Acquisition history, newest first.
-    pub grabs: Vec<GrabView>,
+    /// How many acquisitions the dialog would show. The list itself is
+    /// loaded on demand — a series the *arr import brought in carries
+    /// hundreds of rows, and rendering them inline pushed the season
+    /// tree, which is what the page is for, below all of them.
+    pub grab_count: usize,
     /// Every quality profile, for the picker.
     pub profiles: Vec<(String, String)>,
     /// Registered root folders this item could live in, as
@@ -1371,6 +1391,18 @@ pub struct LibraryDetailView {
     /// `true` while the digital release date is still in the future —
     /// searching before it usually only turns up cams.
     pub in_theatrical_window: bool,
+    /// [`crate::coverage::ItemStatus::tone`].
+    pub tone: String,
+    /// What the chip says.
+    pub status_label: String,
+    /// Monitored episodes, or `1` for a monitored movie.
+    pub monitored_count: usize,
+    /// Of those, how many are on disk.
+    pub have: usize,
+    /// Aired, monitored and absent.
+    pub missing: usize,
+    /// `have / monitored_count`.
+    pub percent: u8,
 }
 
 /// One collapsed season header.
@@ -1386,6 +1418,16 @@ pub struct SeasonView {
     pub episode_count: i32,
     /// Whether the scanner chases the season.
     pub monitored: bool,
+    /// [`crate::coverage::ItemStatus::tone`], scoped to this season.
+    pub tone: String,
+    /// What the chip says.
+    pub status_label: String,
+    /// Monitored episodes of this season — the denominator.
+    pub monitored_count: usize,
+    /// Of those, how many are on disk.
+    pub have: usize,
+    /// `have / monitored_count`.
+    pub percent: u8,
 }
 
 /// Episode rows returned by the on-demand season expand.
@@ -1396,6 +1438,36 @@ pub struct LibrarySeasonPartial {
     pub item_id: String,
     /// Episodes of one season, ascending.
     pub episodes: Vec<EpisodeView>,
+    /// Set only when a *season* toggle produced this response: its
+    /// bookmark lives in the `<summary>`, outside the swap target, and
+    /// rides along out-of-band. A full-page refresh would be the other
+    /// option, and it closes the accordion the operator just opened.
+    pub oob: Option<SeasonMarkView>,
+}
+
+/// The out-of-band half of a season toggle: its bookmark and its status.
+///
+/// Both live in the `<summary>`, outside the swap target, and both are
+/// wrong the instant the cascade runs — a season whose every episode was
+/// just paused is no longer "faltando", it is "nada monitorado". Sending
+/// only the bookmark leaves a chip contradicting the row underneath it.
+#[derive(Debug)]
+pub struct SeasonMarkView {
+    /// Season whose fragments are being replaced.
+    pub season_id: String,
+    /// New state, which is also the bookmark's `aria-pressed`.
+    pub monitored: bool,
+    /// Recomputed tone.
+    pub tone: String,
+    /// Recomputed chip text.
+    pub status_label: String,
+    /// Monitored episodes after the cascade — `0` when it just paused
+    /// the season, which is what hides the bar.
+    pub monitored_count: usize,
+    /// Of those, how many are on disk.
+    pub have: usize,
+    /// `have / monitored_count`.
+    pub percent: u8,
 }
 
 /// One episode row.
@@ -1409,8 +1481,30 @@ pub struct EpisodeView {
     pub title: String,
     /// `dd/mm/aaaa`, or empty when unaired.
     pub air_date: String,
-    /// Whether the scanner chases it.
+    /// Whether the scanner chases it — the bookmark's state.
     pub monitored: bool,
+    /// [`crate::coverage::EpisodeState::tone`] — which icon to draw.
+    /// A different question from `monitored`: an episode can be chased
+    /// and absent, or paused and on disk.
+    pub state_tone: String,
+    /// Accessible name for the icon.
+    pub state_label: String,
+    /// Tooltip detail — the **mapped file path** for a downloaded
+    /// episode. Seeing which file brarr tied to an episode used to mean
+    /// reading the grab table row by row.
+    pub detail: String,
+    /// Just the file name from [`Self::detail`], for the inline hint.
+    pub file_name: String,
+}
+
+/// The acquisition history, in a dialog.
+#[derive(Debug, Template)]
+#[template(path = "partials/library_grabs_modal.html")]
+pub struct LibraryGrabsModalPartial {
+    /// Item title, for the dialog header.
+    pub title: String,
+    /// Acquisition history, newest first.
+    pub grabs: Vec<GrabView>,
 }
 
 /// Results of a manual search, swapped into the item detail page.

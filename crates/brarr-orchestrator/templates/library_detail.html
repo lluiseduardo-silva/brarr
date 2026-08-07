@@ -32,6 +32,16 @@
 
             <div class="flex items-center gap-1.5 flex-wrap mt-2.5">
                 <span class="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium {% if item.is_series %}bg-secondary-soft text-secondary-soft-fg{% else %}bg-accent-soft text-accent-soft-fg{% endif %}">{{ item.kind_label }}</span>
+                {# Status and progress, over the monitored content only —
+                   see `crate::coverage`. #}
+                <span class="lib-status lib-status-{{ item.tone }}">{{ item.status_label }}</span>
+                {% if item.monitored_count > 0 %}
+                <span class="text-xs font-mono text-fg-secondary">{{ item.have }}/{{ item.monitored_count }}</span>
+                {% if item.missing > 0 %}
+                <span class="text-xs font-medium text-danger-soft-fg">{{ item.missing }} faltando</span>
+                {% endif %}
+                <div class="lib-bar lib-bar-{{ item.tone }} w-28 shrink-0"><span class="lib-bar-fill" style="width:{{ item.percent }}%"></span></div>
+                {% endif %}
                 {% if let Some(st) = item.status %}
                 <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium bg-info-soft text-info-soft-fg border border-info-solid">{{ st }}</span>
                 {% endif %}
@@ -120,6 +130,18 @@
                     importar do disco
                 </button>
 
+                {# The acquisition history lives in a dialog now. Inline
+                   it pushed the season tree — the thing this page is for
+                   — below 800 release names on a series the *arr import
+                   brought in. #}
+                <button hx-get="/library/{{ item.id }}/grabs"
+                        hx-target="#modal-target"
+                        hx-swap="innerHTML"
+                        title="Histórico de aquisições deste título"
+                        class="btn btn-md btn-secondary">
+                    grabs ({{ grab_count }})
+                </button>
+
                 <div class="flex-1"></div>
 
                 <form hx-get="/library/{{ item.id }}/interactive"
@@ -201,91 +223,46 @@
 <div class="card-hairline bg-bg-surface border border-border-default rounded-xl overflow-hidden mb-4">
     {% for s in seasons %}
     <details class="border-t border-border-default">
+        {# The bookmark sits *outside* the hx-get so clicking it does not
+           also trigger the expand — and it targets the season body, so
+           the cascade it performs is visible on the episodes underneath
+           instead of being taken on trust. #}
         <summary class="flex items-center gap-3 px-4 py-3 cursor-pointer bg-bg-muted list-none"
                  hx-get="/library/{{ item.id }}/season/{{ s.id }}"
                  hx-target="#season-{{ s.id }}"
                  hx-trigger="click once"
                  hx-swap="innerHTML">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 text-fg-secondary"><path d="m6 9 6 6 6-6"/></svg>
+            <button id="season-mark-{{ s.id }}"
+                    type="button"
+                    hx-post="/library/{{ item.id }}/season/{{ s.id }}/monitor"
+                    hx-target="#season-{{ s.id }}"
+                    hx-swap="innerHTML"
+                    aria-pressed="{{ s.monitored }}"
+                    title="{% if s.monitored %}Monitorando a temporada — clique para pausar ela e todos os episódios{% else %}Temporada pausada — clique para monitorar ela e todos os episódios{% endif %}"
+                    class="mark-btn">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="{% if s.monitored %}currentColor{% else %}none{% endif %}" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/>
+                </svg>
+            </button>
             <span class="text-sm font-medium text-fg-primary">{{ s.label }}</span>
             <span class="text-xs text-fg-muted">{{ s.episode_count }} episódios</span>
             <div class="flex-1"></div>
-            {% if s.monitored %}
-            <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium bg-success-soft text-success-soft-fg border border-success-solid">monitorada</span>
-            {% else %}
-            <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium bg-bg-muted text-fg-muted">pausada</span>
-            {% endif %}
-            <button type="button"
-                    hx-post="/library/{{ item.id }}/season/{{ s.id }}/monitor"
-                    class="btn btn-sm {% if s.monitored %}btn-secondary{% else %}btn-toggle-on{% endif %}">
-                {% if s.monitored %}pausar{% else %}monitorar{% endif %}
-            </button>
+            {# One element, so the toggle can replace the whole group
+               out-of-band — the count, the bar and the chip all change
+               together when the cascade runs. #}
+            <span id="season-status-{{ s.id }}" class="flex items-center gap-3">
+                {% if s.monitored_count > 0 %}
+                <span class="text-xs font-mono text-fg-secondary">{{ s.have }}/{{ s.monitored_count }}</span>
+                <div class="lib-bar lib-bar-{{ s.tone }} w-24 shrink-0"><span class="lib-bar-fill" style="width:{{ s.percent }}%"></span></div>
+                {% endif %}
+                <span class="lib-status lib-status-{{ s.tone }}">{{ s.status_label }}</span>
+            </span>
         </summary>
         <div id="season-{{ s.id }}">
             <div class="px-4 py-4 text-xs text-fg-muted italic">carregando episódios…</div>
         </div>
     </details>
-    {% endfor %}
-</div>
-{% endif %}
-
-{# ---- grabs ---- #}
-<h2 class="text-lg font-semibold text-fg-primary mb-2">Grabs</h2>
-{% if grabs.is_empty() %}
-<div class="card-hairline bg-bg-surface border border-border-default rounded-xl px-5 py-8 text-center">
-    <p class="text-sm text-fg-muted italic">Nenhuma aquisição ainda.</p>
-    <p class="text-xs text-fg-muted mt-1">O varredor busca sozinho no intervalo configurado, ou use “buscar agora” acima.</p>
-</div>
-{% else %}
-<div class="card-hairline bg-bg-surface border border-border-default rounded-xl overflow-hidden">
-    <div class="flex items-center py-2.5 bg-bg-muted">
-        <div class="px-4 flex-1 text-[10px] font-medium uppercase tracking-[0.06em] text-fg-muted">Release</div>
-        <div class="px-4 w-40 text-[10px] font-medium uppercase tracking-[0.06em] text-fg-muted">Provider</div>
-        <div class="px-4 w-28 text-[10px] font-medium uppercase tracking-[0.06em] text-fg-muted">Protocolo</div>
-        <div class="px-4 w-28 text-[10px] font-medium uppercase tracking-[0.06em] text-fg-muted">Status</div>
-        <div class="px-4 w-28 text-[10px] font-medium uppercase tracking-[0.06em] text-fg-muted">Quando</div>
-        {# The header needs this cell too. Without it the body's extra
-           column steals width from the flex-1 Release cell and every
-           label above shifts out of line. #}
-        <div class="px-4 w-24"></div>
-    </div>
-    {% for g in grabs %}
-    <div class="flex items-center border-t border-border-default">
-        <div class="px-4 py-2.5 flex-1 min-w-0">
-            <div class="text-xs font-mono text-fg-primary truncate">{{ g.release_name }}</div>
-            {% if let Some(err) = g.error %}
-            <div class="text-[11px] text-danger-soft-fg mt-0.5">{{ err }}</div>
-            {% endif %}
-        </div>
-        <div class="px-4 w-40 text-xs text-fg-secondary truncate">{{ g.provider_name }}</div>
-        <div class="px-4 w-28">
-            {# Three branches, not two: an adopted file is neither
-               torrent nor usenet, and with an if/else it would render in
-               the torrent colour and read as something brarr downloaded. #}
-            <span class="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium {% if g.protocol == "usenet" %}bg-secondary-soft text-secondary-soft-fg{% else if g.protocol == "local" %}bg-bg-muted text-fg-secondary{% else %}bg-accent-soft text-accent-soft-fg{% endif %}">{{ g.protocol }}</span>
-        </div>
-        <div class="px-4 w-28">
-            {# O status continua `imported` porque ele foi — o que mudou
-               é que o arquivo não está mais lá. #}
-            {% if g.file_missing %}
-            <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium bg-warning-soft text-warning-soft-fg">sumiu</span>
-            {% else %}
-            <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium {% if g.tone == "ok" %}bg-success-soft text-success-soft-fg border border-success-solid{% else if g.tone == "err" %}bg-danger-soft text-danger-soft-fg{% else if g.tone == "warn" %}bg-warning-soft text-warning-soft-fg{% else %}bg-bg-muted text-fg-muted{% endif %}">{{ g.status }}</span>
-            {% endif %}
-        </div>
-        <div class="px-4 w-28 text-[11px] font-mono text-fg-secondary">{{ g.grabbed_at }}</div>
-        <div class="px-4 w-24 text-right">
-            {# Only an adoption can be undone. A tracker grab is
-               acquisition history and is never deleted from here. #}
-            {% if g.is_local %}
-            <button hx-delete="/library/adoption/{{ g.id }}"
-                    hx-confirm="{% if g.in_place %}Esquecer este arquivo? Ele continua no disco, intacto.{% else %}Remover o vínculo que o brarr criou? O arquivo de origem continua no lugar.{% endif %}"
-                    class="btn btn-sm btn-ghost">
-                remover
-            </button>
-            {% endif %}
-        </div>
-    </div>
     {% endfor %}
 </div>
 {% endif %}

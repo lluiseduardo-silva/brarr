@@ -165,6 +165,20 @@ fn normalise(token: &str) -> String {
     token.trim_start_matches('!').to_owned()
 }
 
+/// Whether `token` is the literal half of a class whose suffix comes from
+/// Rust — `class="lib-status-{{ it.tone }}"` leaves `lib-status-` behind
+/// once the tag is stripped.
+///
+/// Such a token is satisfied by *any* rule beginning with it. That is
+/// weaker than an exact match, and deliberately so: it still catches a
+/// typo in the stable half (`lib-statuss-` matches nothing), while the
+/// variable half is checked where it is actually produced — see
+/// `every_status_tone_has_a_rule`, which enumerates the real enums rather
+/// than a list somebody has to remember to update.
+fn is_interpolated_prefix(token: &str, defined: &BTreeSet<String>) -> bool {
+    token.ends_with('-') && defined.iter().any(|class| class.starts_with(token))
+}
+
 fn collect_files(dir: &Path, extension: &str, out: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -203,7 +217,10 @@ fn every_class_used_by_a_template_has_a_rule() {
             let class = normalise(&token);
             // `!` important variants resolve to the same rule name in
             // this stylesheet (`.\!bg-danger-soft`), so check both forms.
-            if !defined.contains(&class) && !defined.contains(&token) {
+            if !defined.contains(&class)
+                && !defined.contains(&token)
+                && !is_interpolated_prefix(&class, &defined)
+            {
                 missing.push(format!(
                     "{}: {token}",
                     path.file_name().unwrap_or_default().to_string_lossy()
@@ -218,6 +235,58 @@ fn every_class_used_by_a_template_has_a_rule() {
         missing.is_empty(),
         "templates use {} class(es) with no rule in static/app.css — they render as no-ops:\n  {}",
         missing.len(),
+        missing.join("\n  ")
+    );
+}
+
+/// The half `every_class_used_by_a_template_has_a_rule` cannot see.
+///
+/// `class="lib-status-{{ it.tone }}"` is checked there only up to the
+/// prefix; the suffix comes from `coverage::ItemStatus::tone` and
+/// `coverage::EpisodeState::tone`. This walks the real enums, so a new
+/// variant with no rule fails here rather than rendering colourless in
+/// production — which is exactly how the emerald badges shipped.
+#[test]
+fn every_status_tone_has_a_rule() {
+    use brarr_orchestrator::coverage::{EpisodeState, ItemStatus};
+
+    let defined = defined_classes();
+    let mut missing = Vec::new();
+
+    for status in [
+        ItemStatus::Paused,
+        ItemStatus::Nothing,
+        ItemStatus::Upcoming,
+        ItemStatus::Missing,
+        ItemStatus::UpToDate,
+        ItemStatus::Complete,
+    ] {
+        // Every place a tone is rendered — miss one and that surface
+        // silently loses its colour while the others keep theirs.
+        for prefix in ["lib-status-", "lib-bar-", "lib-spine-"] {
+            let class = format!("{prefix}{}", status.tone());
+            if !defined.contains(&class) {
+                missing.push(class);
+            }
+        }
+    }
+
+    for state in [
+        EpisodeState::Downloaded,
+        EpisodeState::Downloading,
+        EpisodeState::Missing,
+        EpisodeState::Unaired,
+        EpisodeState::Gone,
+    ] {
+        let class = format!("ep-mark-{}", state.tone());
+        if !defined.contains(&class) {
+            missing.push(class);
+        }
+    }
+
+    assert!(
+        missing.is_empty(),
+        "these status classes are produced by Rust and have no rule in static/app.css:\n  {}",
         missing.join("\n  ")
     );
 }

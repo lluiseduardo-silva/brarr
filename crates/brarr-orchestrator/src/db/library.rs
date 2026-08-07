@@ -793,6 +793,97 @@ pub async fn sync_seasons(
     Ok(())
 }
 
+/// One monitored episode, reduced to what a coverage count reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MonitoredEpisode {
+    /// Series it belongs to.
+    pub item_id: Uuid,
+    /// Episode id, which is what a per-episode grab names.
+    pub id: Uuid,
+    /// Season, so a pack of another season does not answer for it.
+    pub season_number: i32,
+    /// Air date. `None` counts as "not aired" everywhere in brarr.
+    pub air_date: Option<OffsetDateTime>,
+}
+
+/// Every monitored episode of every series, in one query.
+///
+/// Season 0 is excluded, because the scanner excludes it: counting
+/// specials would make a series read as incomplete over episodes brarr
+/// will never chase.
+///
+/// One query rather than one per item on purpose. The library index used
+/// to call [`seasons`] and [`episodes`] per row to build its summary
+/// line, which is two round trips per title — 720 of them once the \*arr
+/// migration lands 360 titles.
+///
+/// # Errors
+///
+/// Returns [`AppError::Database`] on SQL failure.
+pub async fn monitored_episodes(pool: &Pool) -> Result<Vec<MonitoredEpisode>, AppError> {
+    let rows = sqlx::query(
+        "SELECT item_id, id, season_number, air_date FROM library_episodes \
+         WHERE monitored = 1 AND season_number > 0",
+    )
+    .fetch_all(pool)
+    .await?;
+    rows.iter()
+        .map(|row| {
+            Ok(MonitoredEpisode {
+                item_id: uuid_at(row, "item_id")?,
+                id: uuid_at(row, "id")?,
+                season_number: i32::try_from(row.try_get::<i64, _>("season_number")?).unwrap_or(0),
+                air_date: opt_ts_at(row, "air_date")?,
+            })
+        })
+        .collect()
+}
+
+/// Season / episode / special counts per series, in one query.
+///
+/// Same reasoning as [`monitored_episodes`]: the index needs this for
+/// every row, and asking per row is what made the page scale with the
+/// catalogue.
+///
+/// # Errors
+///
+/// Returns [`AppError::Database`] on SQL failure.
+pub async fn tree_counts(pool: &Pool) -> Result<HashMap<Uuid, TreeCounts>, AppError> {
+    let rows = sqlx::query(
+        "SELECT e.item_id, \
+                COUNT(DISTINCT CASE WHEN e.season_number > 0 THEN e.season_number END) AS seasons, \
+                SUM(CASE WHEN e.season_number > 0 THEN 1 ELSE 0 END) AS episodes, \
+                SUM(CASE WHEN e.season_number = 0 THEN 1 ELSE 0 END) AS specials \
+         FROM library_episodes e GROUP BY e.item_id",
+    )
+    .fetch_all(pool)
+    .await?;
+    let mut out = HashMap::with_capacity(rows.len());
+    for row in &rows {
+        let id = uuid_at(row, "item_id")?;
+        out.insert(
+            id,
+            TreeCounts {
+                seasons: usize::try_from(row.try_get::<i64, _>("seasons")?).unwrap_or(0),
+                episodes: usize::try_from(row.try_get::<i64, _>("episodes")?).unwrap_or(0),
+                specials: usize::try_from(row.try_get::<i64, _>("specials")?).unwrap_or(0),
+            },
+        );
+    }
+    Ok(out)
+}
+
+/// What one series' tree holds, specials counted apart.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TreeCounts {
+    /// Real seasons — season 0 excluded.
+    pub seasons: usize,
+    /// Real episodes.
+    pub episodes: usize,
+    /// Specials, which The Boys has 76 of against 40 real episodes.
+    pub specials: usize,
+}
+
 /// Seasons of a series, ascending.
 ///
 /// # Errors

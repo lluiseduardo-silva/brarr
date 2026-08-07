@@ -745,9 +745,100 @@ pub fn covers(grab: &Grab, target: GrabTarget) -> bool {
     if !grab.status.blocks_search() || grab.file_missing_at.is_some() {
         return false;
     }
-    grab.episode_id == target.episode_id
-        || (grab.episode_id.is_none()
-            && (grab.season_number.is_none() || grab.season_number == target.season_number))
+    covers_target(grab.episode_id, grab.season_number, target)
+}
+
+/// The coordinate half of [`covers`], without the status checks.
+///
+/// Split out so [`Coverage`] — which is already filtered to live rows in
+/// SQL — can ask the same question without carrying a whole [`Grab`].
+/// There is exactly one place this rule is written in Rust, and the test
+/// that confronts it with the SQL guards that one.
+#[must_use]
+pub fn covers_target(
+    episode_id: Option<Uuid>,
+    season_number: Option<i32>,
+    target: GrabTarget,
+) -> bool {
+    episode_id == target.episode_id
+        || (episode_id.is_none()
+            && (season_number.is_none() || season_number == target.season_number))
+}
+
+/// The coordinates of one grab that still counts as coverage.
+///
+/// A [`Grab`] is ~20 columns and the library index needs three of them
+/// across every row in the table. Loading the full struct for a
+/// collection with thousands of adopted files, once per page render,
+/// is not a cost the answer justifies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Coverage {
+    /// Catalogue entry the grab belongs to.
+    pub item_id: Uuid,
+    /// Episode it names, when it names one.
+    pub episode_id: Option<Uuid>,
+    /// Season it names, for a pack.
+    pub season_number: Option<i32>,
+}
+
+impl Coverage {
+    /// Whether this grab answers for `target`.
+    #[must_use]
+    pub fn covers(self, target: GrabTarget) -> bool {
+        covers_target(self.episode_id, self.season_number, target)
+    }
+}
+
+const COVERAGE_WHERE: &str = "status NOT IN ('failed', 'rejected') AND file_missing_at IS NULL";
+
+fn row_to_coverage(row: &SqliteRow) -> Result<Coverage, AppError> {
+    let item: String = row.try_get("item_id")?;
+    let episode: Option<String> = row.try_get("episode_id")?;
+    let season: Option<i64> = row.try_get("season_number")?;
+    Ok(Coverage {
+        item_id: Uuid::parse_str(&item)
+            .map_err(|e| AppError::InvalidInput(format!("invalid grabs.item_id: {e}")))?,
+        episode_id: episode
+            .as_deref()
+            .map(Uuid::parse_str)
+            .transpose()
+            .map_err(|e| AppError::InvalidInput(format!("invalid grabs.episode_id: {e}")))?,
+        season_number: season.and_then(|v| i32::try_from(v).ok()),
+    })
+}
+
+/// Every live grab's coordinates, for the whole library, in one query.
+///
+/// The status and `file_missing_at` filters live in the SQL because they
+/// are what "live" means; the per-target rule stays in Rust as
+/// [`covers_target`], so it is not written a third time.
+///
+/// # Errors
+///
+/// Returns [`AppError::Database`] on SQL failure.
+pub async fn live_coverage(pool: &Pool) -> Result<Vec<Coverage>, AppError> {
+    let rows = sqlx::query(&format!(
+        "SELECT item_id, episode_id, season_number FROM grabs WHERE {COVERAGE_WHERE}"
+    ))
+    .fetch_all(pool)
+    .await?;
+    rows.iter().map(row_to_coverage).collect()
+}
+
+/// The same, narrowed to one item.
+///
+/// # Errors
+///
+/// Returns [`AppError::Database`] on SQL failure.
+pub async fn live_coverage_for_item(pool: &Pool, item_id: Uuid) -> Result<Vec<Coverage>, AppError> {
+    let rows = sqlx::query(&format!(
+        "SELECT item_id, episode_id, season_number FROM grabs \
+         WHERE item_id = ? AND {COVERAGE_WHERE}"
+    ))
+    .bind(item_id.to_string())
+    .fetch_all(pool)
+    .await?;
+    rows.iter().map(row_to_coverage).collect()
 }
 
 /// Record a successful hand-off: the client accepted the release.

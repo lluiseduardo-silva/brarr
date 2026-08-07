@@ -135,7 +135,20 @@
         <div class="px-4 w-20">
             <span class="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium {% if it.is_series %}bg-secondary-soft text-secondary-soft-fg{% else %}bg-accent-soft text-accent-soft-fg{% endif %}">{{ it.kind_label }}</span>
         </div>
-        <div class="px-4 w-56 text-xs text-fg-secondary">{% if it.tree_summary.is_empty() %}—{% else %}{{ it.tree_summary }}{% endif %}</div>
+        <div class="px-4 w-56">
+            <div class="flex items-center gap-2">
+                <span class="lib-status lib-status-{{ it.tone }}">{{ it.status_label }}</span>
+                {% if it.monitored_count > 0 %}
+                <span class="text-[11px] font-mono text-fg-secondary">{{ it.have }}/{{ it.monitored_count }}</span>
+                {% endif %}
+            </div>
+            {% if it.monitored_count > 0 %}
+            <div class="lib-bar lib-bar-{{ it.tone }} mt-1.5"><span class="lib-bar-fill" style="width:{{ it.percent }}%"></span></div>
+            {% endif %}
+            {% if !it.tree_summary.is_empty() %}
+            <div class="text-[11px] text-fg-muted mt-1">{{ it.tree_summary }}</div>
+            {% endif %}
+        </div>
         <div class="px-4 w-40 text-xs text-fg-secondary truncate">{{ it.profile }}</div>
         <div class="px-4 w-28 text-[11px] font-mono text-fg-secondary">{{ it.added_at }}</div>
         <div class="px-4 w-44 flex items-center justify-end gap-1.5">
@@ -149,7 +162,12 @@
 {# ---- grid view ---- #}
 <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
 {% for it in items %}
-<div class="card-hairline bg-bg-surface border border-border-default rounded-xl p-4 flex items-start gap-3.5" id="lib-{{ it.id }}">
+{# `relative` anchors the status spine down the left edge — the
+   indicator you can read across a whole grid without focusing on any one
+   card. The card's own `p-4` already clears the 4px bar, so no extra
+   padding is needed. #}
+<div class="card-hairline bg-bg-surface border border-border-default rounded-xl relative overflow-hidden p-4 flex items-start gap-3.5" id="lib-{{ it.id }}">
+    <span class="lib-spine lib-spine-{{ it.tone }}" aria-hidden="true"></span>
     {% if let Some(url) = it.poster_url %}
     <img src="{{ url }}" alt="" loading="lazy" class="shrink-0 rounded-md object-cover" style="width:100px;height:150px;">
     {% else %}
@@ -169,12 +187,27 @@
 
         <div class="flex items-center gap-1.5 flex-wrap mt-2">
             <span class="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium {% if it.is_series %}bg-secondary-soft text-secondary-soft-fg{% else %}bg-accent-soft text-accent-soft-fg{% endif %}">{{ it.kind_label }}</span>
-            {% if it.monitored %}
-            <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium bg-success-soft text-success-soft-fg border border-success-solid">monitorado</span>
-            {% else %}
-            <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium bg-bg-muted text-fg-muted">pausado</span>
-            {% endif %}
+            {# One chip, not two. "monitorado" said what brarr was told to
+               do; this says what actually happened, and it already
+               carries "pausado" as one of its answers. #}
+            <span class="lib-status lib-status-{{ it.tone }}">{{ it.status_label }}</span>
         </div>
+
+        {# Progress over the monitored content — never over what the
+           series happens to have. See `crate::coverage`. #}
+        {% if it.monitored_count > 0 %}
+        <div class="mt-2.5">
+            <div class="flex items-baseline gap-2 mb-1">
+                <span class="text-xs font-mono text-fg-secondary">{{ it.have }}/{{ it.monitored_count }}</span>
+                {% if it.missing > 0 %}
+                <span class="text-xs font-medium text-danger-soft-fg">{{ it.missing }} faltando</span>
+                {% else if it.upcoming > 0 %}
+                <span class="text-xs text-fg-muted">{{ it.upcoming }} a estrear</span>
+                {% endif %}
+            </div>
+            <div class="lib-bar lib-bar-{{ it.tone }}"><span class="lib-bar-fill" style="width:{{ it.percent }}%"></span></div>
+        </div>
+        {% endif %}
 
         {% if !it.tree_summary.is_empty() %}
         <p class="text-xs text-fg-muted mt-2">{{ it.tree_summary }}</p>

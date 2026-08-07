@@ -1,0 +1,92 @@
+{# The acquisition history, moved off the detail page.
+
+   It used to sit inline below the seasons, one row per file. That is
+   fine for a movie and unreadable for a series the *arr import brought
+   in with 800 of them — the episode tree, which is what the page is
+   for, ended up below a wall of release names. Here it is one click
+   away and nothing else is pushed down.
+
+   The per-episode question it used to answer — "which file is tied to
+   this episode?" — is now the tooltip on the episode's state mark, which
+   is where it was being looked for anyway. #}
+<dialog id="grabs-dialog"
+        class="bg-transparent p-0 max-w-full max-h-full backdrop:bg-[rgba(10,6,18,0.7)]"
+        aria-label="Histórico de grabs">
+    <div class="w-[1120px] max-w-full card-hairline bg-bg-surface border border-border-default rounded-2xl overflow-hidden"
+         style="box-shadow: 0 24px 60px var(--color-glow);">
+
+        <header class="px-6 py-5 flex items-center gap-3">
+            <div>
+                <h2 class="text-[22px] font-semibold leading-tight text-fg-primary">Grabs</h2>
+                <p class="text-xs text-fg-secondary">{{ title }} · {{ grabs.len() }} aquisição(ões)</p>
+            </div>
+            <div class="flex-1"></div>
+            <button type="button" onclick="document.getElementById('grabs-dialog').close()"
+                    class="btn btn-sm btn-secondary">Fechar</button>
+        </header>
+
+        <div class="h-px bg-border-default"></div>
+
+        {% if grabs.is_empty() %}
+        <div class="px-6 py-10 text-center">
+            <p class="text-sm text-fg-muted italic">Nenhuma aquisição ainda.</p>
+            <p class="text-xs text-fg-muted mt-1">O varredor busca sozinho no intervalo configurado, ou use “buscar agora”.</p>
+        </div>
+        {% else %}
+        <div class="max-h-[420px] overflow-y-auto">
+            <table class="w-full text-sm">
+                <thead class="bg-bg-muted">
+                    <tr class="text-left">
+                        <th class="px-4 py-2.5 font-medium text-[10px] uppercase tracking-[0.06em] text-fg-muted">Release</th>
+                        <th class="px-4 py-2.5 font-medium text-[10px] uppercase tracking-[0.06em] text-fg-muted">Provider</th>
+                        <th class="px-4 py-2.5 font-medium text-[10px] uppercase tracking-[0.06em] text-fg-muted">Protocolo</th>
+                        <th class="px-4 py-2.5 font-medium text-[10px] uppercase tracking-[0.06em] text-fg-muted">Status</th>
+                        <th class="px-4 py-2.5 font-medium text-[10px] uppercase tracking-[0.06em] text-fg-muted">Quando</th>
+                        <th class="px-4 py-2.5"></th>
+                    </tr>
+                </thead>
+                <tbody>
+                {% for g in grabs %}
+                    <tr class="border-t border-border-default align-top">
+                        <td class="px-4 py-2.5 min-w-0">
+                            <div class="text-xs font-mono text-fg-primary break-all">{{ g.release_name }}</div>
+                            {% if let Some(err) = g.error %}
+                            <div class="text-[11px] text-danger-soft-fg mt-0.5">{{ err }}</div>
+                            {% endif %}
+                        </td>
+                        <td class="px-4 py-2.5 text-xs text-fg-secondary">{{ g.provider_name }}</td>
+                        <td class="px-4 py-2.5">
+                            {# Three branches, not two: an adopted file is neither
+                               torrent nor usenet, and with an if/else it would render in
+                               the torrent colour and read as something brarr downloaded. #}
+                            <span class="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium {% if g.protocol == "usenet" %}bg-secondary-soft text-secondary-soft-fg{% else if g.protocol == "local" %}bg-bg-muted text-fg-secondary{% else %}bg-accent-soft text-accent-soft-fg{% endif %}">{{ g.protocol }}</span>
+                        </td>
+                        <td class="px-4 py-2.5">
+                            {# O status continua `imported` porque ele foi — o que mudou
+                               é que o arquivo não está mais lá. #}
+                            {% if g.file_missing %}
+                            <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium bg-warning-soft text-warning-soft-fg">sumiu</span>
+                            {% else %}
+                            <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium {% if g.tone == "ok" %}bg-success-soft text-success-soft-fg border border-success-solid{% else if g.tone == "err" %}bg-danger-soft text-danger-soft-fg{% else if g.tone == "warn" %}bg-warning-soft text-warning-soft-fg{% else %}bg-bg-muted text-fg-muted{% endif %}">{{ g.status }}</span>
+                            {% endif %}
+                        </td>
+                        <td class="px-4 py-2.5 text-[11px] font-mono text-fg-secondary whitespace-nowrap">{{ g.grabbed_at }}</td>
+                        <td class="px-4 py-2.5 text-right">
+                            {# Only an adoption can be undone. A tracker grab is
+                               acquisition history and is never deleted from here. #}
+                            {% if g.is_local %}
+                            <button hx-delete="/library/adoption/{{ g.id }}"
+                                    hx-confirm="{% if g.in_place %}Esquecer este arquivo? Ele continua no disco, intacto.{% else %}Remover o vínculo que o brarr criou? O arquivo de origem continua no lugar.{% endif %}"
+                                    class="btn btn-sm btn-ghost">
+                                remover
+                            </button>
+                            {% endif %}
+                        </td>
+                    </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% endif %}
+    </div>
+</dialog>

@@ -1,28 +1,90 @@
 {# Episode rows for one season, swapped into the <details> body on the
    first expand. Kept as its own partial precisely so a series with a
-   hundred-plus episodes does not render them all up front. #}
+   hundred-plus episodes does not render them all up front.
+
+   Row order is intent → identity → state → name: the bookmark says what
+   brarr was told to chase, the mark says what actually happened, and
+   they are different questions. A monitored episode can be missing and a
+   paused one can be on disk. #}
+
+{# When a season toggle produced this response, two fragments in the
+   <summary> are stale — the bookmark and the status group. They live
+   outside this swap target and ride along out-of-band, rather than
+   forcing a full-page refresh that would close the accordion the
+   operator just opened.
+
+   Sending only the bookmark was not enough: a season whose every episode
+   was just paused stopped being "faltando" and the chip kept saying it. #}
+{% if let Some(mark) = oob %}
+<button id="season-mark-{{ mark.season_id }}"
+        hx-swap-oob="outerHTML"
+        type="button"
+        hx-post="/library/{{ item_id }}/season/{{ mark.season_id }}/monitor"
+        hx-target="#season-{{ mark.season_id }}"
+        hx-swap="innerHTML"
+        aria-pressed="{{ mark.monitored }}"
+        title="{% if mark.monitored %}Monitorando a temporada — clique para pausar ela e todos os episódios{% else %}Temporada pausada — clique para monitorar ela e todos os episódios{% endif %}"
+        class="mark-btn">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="{% if mark.monitored %}currentColor{% else %}none{% endif %}" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/>
+    </svg>
+</button>
+<span id="season-status-{{ mark.season_id }}" hx-swap-oob="outerHTML" class="flex items-center gap-3">
+    {% if mark.monitored_count > 0 %}
+    <span class="text-xs font-mono text-fg-secondary">{{ mark.have }}/{{ mark.monitored_count }}</span>
+    <div class="lib-bar lib-bar-{{ mark.tone }} w-24 shrink-0"><span class="lib-bar-fill" style="width:{{ mark.percent }}%"></span></div>
+    {% endif %}
+    <span class="lib-status lib-status-{{ mark.tone }}">{{ mark.status_label }}</span>
+</span>
+{% endif %}
+
 {% if episodes.is_empty() %}
 <div class="px-4 py-4 text-xs text-fg-muted italic">Nenhum episódio nesta temporada.</div>
 {% else %}
 {% for e in episodes %}
-<div class="flex items-center gap-3 px-4 py-2.5 border-t border-border-default" id="ep-{{ e.id }}">
-    <span class="shrink-0 w-20 text-[11px] font-mono text-fg-secondary">{{ e.code }}</span>
-    <span class="flex-1 min-w-0 text-sm text-fg-primary truncate">{{ e.title }}</span>
-    <span class="shrink-0 w-28 text-[11px] font-mono text-fg-muted">
-        {%- if e.air_date.is_empty() %}não exibido{% else %}{{ e.air_date }}{% endif -%}
-    </span>
-    {% if e.monitored %}
-    <span class="shrink-0 inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium bg-success-soft text-success-soft-fg border border-success-solid">monitorado</span>
-    {% else %}
-    <span class="shrink-0 inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium bg-bg-muted text-fg-muted">pausado</span>
-    {% endif %}
+<div class="flex items-center gap-3 px-4 py-2 border-t border-border-default" id="ep-{{ e.id }}">
     <button type="button"
             hx-post="/library/{{ item_id }}/episode/{{ e.id }}/monitor"
             hx-target="#ep-{{ e.id }}"
             hx-swap="outerHTML"
-            class="shrink-0 btn btn-sm {% if e.monitored %}btn-secondary{% else %}btn-toggle-on{% endif %}">
-        {% if e.monitored %}pausar{% else %}monitorar{% endif %}
+            aria-pressed="{{ e.monitored }}"
+            title="{% if e.monitored %}Monitorado — clique para pausar só este episódio{% else %}Pausado — clique para monitorar só este episódio{% endif %}"
+            class="mark-btn">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="{% if e.monitored %}currentColor{% else %}none{% endif %}" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/>
+        </svg>
     </button>
+
+    <span class="shrink-0 w-16 text-[11px] font-mono text-fg-secondary">{{ e.code }}</span>
+
+    {# The state mark. `title` carries the mapped file name — the one
+       thing that used to require reading the grab table row by row when
+       an episode was tied to the wrong file. #}
+    <span class="ep-mark ep-mark-{{ e.state_tone }}"
+          title="{{ e.state_label }}{% if !e.detail.is_empty() %} · {{ e.detail }}{% endif %}"
+          aria-label="{{ e.state_label }}">
+        {% if e.state_tone == "have" %}
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5L20 7"/></svg>
+        {% else if e.state_tone == "busy" %}
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0 4-4m-4 4-4-4M4 20h16"/></svg>
+        {% else if e.state_tone == "missing" %}
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><path d="M12 5v9M12 18v.5"/></svg>
+        {% else if e.state_tone == "gone" %}
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 4.3 2.6 18a1.6 1.6 0 0 0 1.4 2.4h16a1.6 1.6 0 0 0 1.4-2.4L13.7 4.3a1.6 1.6 0 0 0-2.8 0z"/><path d="M12 10v4M12 17.5v.5"/></svg>
+        {% else %}
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7.5V12l3 2"/></svg>
+        {% endif %}
+    </span>
+
+    <span class="flex-1 min-w-0 text-sm text-fg-primary truncate">{{ e.title }}</span>
+
+    {% if !e.detail.is_empty() %}
+    <span class="shrink-0 max-w-[240px] text-[11px] font-mono text-fg-muted truncate" title="{{ e.detail }}">{{ e.file_name }}</span>
+    {% endif %}
+
+    <span class="shrink-0 w-24 text-right text-[11px] font-mono text-fg-muted">
+        {%- if e.air_date.is_empty() %}—{% else %}{{ e.air_date }}{% endif -%}
+    </span>
 </div>
 {% endfor %}
 {% endif %}
