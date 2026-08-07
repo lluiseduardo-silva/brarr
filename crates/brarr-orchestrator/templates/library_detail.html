@@ -264,8 +264,13 @@
                lazy-load dos episódios) de disparar junto. Nenhum dos dois
                atrapalha o htmx *deste* botão: o listener dele está neste
                elemento, e parar a propagação não cancela outro listener
-               do mesmo nó. #}
-            {% if s.number > 0 %}
+               do mesmo nó.
+
+               **A temporada 0 tem os botões como qualquer outra.** Ela
+               não tinha, porque o varredor a excluía; desde que ele passou
+               a honrar o flag de monitoramento nos especiais, omiti-los
+               aqui recriaria a mesma confusão em escala menor — contado,
+               varrido pelo botão do item, e sem ação na própria linha. #}
             <button type="button"
                     onclick="event.preventDefault(); event.stopPropagation();"
                     hx-get="/library/{{ item.id }}/interactive?season={{ s.number }}"
@@ -297,7 +302,6 @@
                 </svg>
             </button>
             <span id="scan-season-{{ item.id }}-{{ s.number }}" class="shrink-0 text-[11px] italic text-fg-muted"></span>
-            {% endif %}
 
             <div class="flex-1"></div>
             {# One element, so the toggle can replace the whole group

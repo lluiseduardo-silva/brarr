@@ -543,9 +543,16 @@ fn movie_target(item: &LibraryItem) -> Option<Target> {
 ///
 /// Unaired episodes are skipped rather than searched: nothing exists to
 /// find, and asking every tracker about them each cycle is the kind of
-/// traffic that gets an account banned. Season 0 (TMDB's specials
-/// bucket) is excluded for the same reason it is excluded from the tree
-/// counts — it is not what the operator means by "the show".
+/// traffic that gets an account banned.
+///
+/// Season 0 — TMDB's specials bucket — is **not** excluded, since
+/// v0.10.1. The `monitored` flag is what keeps it out of the way, and it
+/// does so on its own: specials arrive unmonitored and stay that way
+/// unless somebody says otherwise. Excluding the season on top of that
+/// meant [`crate::coverage`] counted a monitored special the sweep then
+/// refused to chase, which is a lever that moves the number and nothing
+/// else. A special is matchable, too: `S00E01` parses (only the `0x10`
+/// spelling is refused, and that one is not real).
 fn episode_targets(
     item: &LibraryItem,
     episodes: &[Episode],
@@ -555,7 +562,23 @@ fn episode_targets(
 ) -> TargetPlan {
     let mut plan = TargetPlan::default();
     for e in episodes {
-        if e.season_number <= 0 || !scope.covers(e.season_number, e.episode_number) {
+        // Season 0 (TMDB's specials bucket) used to be excluded here, and
+        // that was the one asymmetry left in the library screens: since
+        // v0.7.1 `crate::coverage` *counts* a monitored special, so one
+        // without a file read as "faltando" while the sweep quietly
+        // refused to go after it.
+        //
+        // The exclusion was also redundant. The `monitored` filter below
+        // is what actually keeps the bucket out: specials arrive
+        // unmonitored and stay that way unless somebody says otherwise.
+        // Measured on this operator's catalogue — 914 specials, exactly
+        // one monitored — so honouring the flag adds one target, not
+        // nine hundred. Monitoring is the operator's lever, and a lever
+        // that moves the count but not the sweep is a broken one.
+        //
+        // A negative season number is not a thing TMDB emits, but it is
+        // not a target either.
+        if e.season_number < 0 || !scope.covers(e.season_number, e.episode_number) {
             continue;
         }
         // Counted, not silently dropped: on a narrowed sweep these two
@@ -894,7 +917,6 @@ mod tests {
             episode(1, 2, false, Some(1_600_000_000)), // unmonitored
             episode(1, 3, true, Some(1_900_000_000)), // not out yet
             episode(1, 4, true, None),                // no date at all
-            episode(0, 1, true, Some(1_600_000_000)), // specials bucket
         ];
         let tvdb = TvdbId::new(70_726).unwrap();
         let targets = episode_targets(&series, &episodes, tvdb, now, Scope::Item).targets;
@@ -903,6 +925,61 @@ mod tests {
         assert_eq!(targets[0].keys.season, Some(1));
         assert_eq!(targets[0].keys.episode, Some(1));
         assert_eq!(targets[0].episode_marker, Some((1, 1)));
+    }
+
+    /// Season 0 is no longer excluded, and the flag is what decides.
+    ///
+    /// `crate::coverage` has counted a monitored special since v0.7.1, so
+    /// leaving the sweep blind to it meant an episode could read
+    /// "faltando" forever with nothing ever going after it. The bucket
+    /// stays out of the way on its own: specials arrive unmonitored.
+    #[test]
+    fn a_monitored_special_is_targeted_and_an_unmonitored_one_is_not() {
+        let series = item(MediaType::Tv);
+        let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        let episodes = vec![
+            episode(0, 1, true, Some(1_600_000_000)), // monitored special
+            episode(0, 2, false, Some(1_600_000_000)), // the usual case
+        ];
+        let tvdb = TvdbId::new(70_726).unwrap();
+        let plan = episode_targets(&series, &episodes, tvdb, now, Scope::Item);
+
+        assert_eq!(plan.targets.len(), 1, "only the monitored one");
+        assert_eq!(plan.targets[0].episode_marker, Some((0, 1)));
+        assert_eq!(plan.targets[0].keys.season, Some(0));
+        assert_eq!(plan.skipped_unmonitored, 1);
+    }
+
+    /// Targeting a special only helps if a special can also be *matched*.
+    /// `S00E01` is a real spelling and parses; `0x10` is not and does not
+    /// — that refusal lives in `cross_marker` and stays.
+    #[test]
+    fn a_special_is_matchable_by_its_sxxexx_marker() {
+        let found = episode_markers("Show.S00E01.Making.Of.1080p.WEB-DL");
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].season, 0);
+        assert_eq!(found[0].episode, 1);
+
+        // The other spelling would invent an episode out of a number
+        // pair, so it is still refused.
+        assert!(episode_markers("Show.0x10.1080p").is_empty());
+    }
+
+    /// And the narrow scope reaches it too, so the button on the specials
+    /// row is not decorative.
+    #[test]
+    fn the_specials_season_can_be_swept_on_its_own() {
+        let series = item(MediaType::Tv);
+        let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        let episodes = vec![
+            episode(0, 1, true, Some(1_600_000_000)),
+            episode(1, 1, true, Some(1_600_000_000)),
+        ];
+        let tvdb = TvdbId::new(70_726).unwrap();
+        let plan = episode_targets(&series, &episodes, tvdb, now, Scope::Season(0));
+
+        assert_eq!(plan.targets.len(), 1);
+        assert_eq!(plan.targets[0].keys.season, Some(0));
     }
 
     #[test]

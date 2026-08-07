@@ -127,6 +127,9 @@ async fn seed_series_with_special(state: &AppState) -> Uuid {
         &NewLibraryItem {
             media_type: Some(MediaType::Tv),
             tmdb_id: 35_753,
+            // Needed by the sweep tests: without it `build_targets`
+            // bails on "no search axis" before it looks at a season.
+            tvdb_id: Some(79_183),
             title: "The Familiar of Zero".to_owned(),
             year: Some(2006),
             ..NewLibraryItem::default()
@@ -472,19 +475,61 @@ async fn the_interactive_search_left_the_header_for_the_rows() {
     assert!(page.contains(r#"id="interactive-results""#));
 }
 
-/// Season 0 is TMDB's specials bucket and the scanner skips it
-/// everywhere. The old picker omitted it; the magnifier must too, or it
-/// becomes the single door into a season nothing else chases.
+/// Season 0 gets the same buttons as any other season.
+///
+/// It used to get none, because the scanner excluded the specials
+/// bucket. Now that the sweep honours the monitoring flag there too,
+/// omitting them would recreate the same confusion one size smaller:
+/// counted in the tree, swept by the item button, and no action on its
+/// own row.
 #[tokio::test]
-async fn the_specials_season_gets_no_search_button() {
+async fn the_specials_season_gets_the_same_buttons_as_any_other() {
     let (addr, state) = spawn().await;
-    let item = seed_series(&state).await;
+    let item = seed_series_with_special(&state).await;
 
     let page = get(addr, &format!("/library/{item}")).await;
     assert!(
-        !page.contains(&format!("/library/{item}/interactive?season=0")),
-        "season 0 must not offer a search: {page}"
+        page.contains(&format!("/library/{item}/interactive?season=0")),
+        "season 0 needs its magnifier: {page}"
     );
+    assert!(
+        page.contains(&format!("/library/{item}/scan/target?season=0")),
+        "and its sweep: {page}"
+    );
+}
+
+/// The asymmetry that closed: `coverage` counts a monitored special, so
+/// the sweep has to be able to go after it. A sweep of season 0 that
+/// found no targets would mean the tree flags a gap nothing will ever
+/// close.
+#[tokio::test]
+async fn sweeping_the_specials_season_actually_builds_a_target() {
+    let (addr, state) = spawn().await;
+    let item = seed_series_with_special(&state).await;
+    let episodes = library::episodes(state.pool(), item).await.unwrap();
+    let special = episodes
+        .iter()
+        .find(|e| e.season_number == 0)
+        .expect("the fixture has a specials bucket");
+    library::set_episode_monitored(state.pool(), special.id, true)
+        .await
+        .unwrap();
+
+    let body = reqwest::Client::new()
+        .post(format!("http://{addr}/library/{item}/scan/target?season=0"))
+        .send()
+        .await
+        .expect("send")
+        .text()
+        .await
+        .unwrap();
+    // No providers configured, so the honest verdict is "searched and
+    // found nothing" — not "paused" and not "no targets".
+    assert!(
+        body.contains("nada encontrado"),
+        "a monitored special must be searched, got: {body}"
+    );
+    assert!(!body.contains("pausado"), "got: {body}");
 }
 
 /// Each episode row carries its own magnifier, addressed by season and

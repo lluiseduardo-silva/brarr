@@ -26,13 +26,13 @@
 //! has a file. Specials arrive unmonitored and stay that way unless
 //! somebody says otherwise, which is precisely what should decide it.
 //!
-//! One consequence to know: [`crate::scan`] still skips season 0 when
-//! building search targets. A monitored special with no file therefore
-//! reads as missing here and the sweep will not chase it — the
-//! interactive search will. That is a real asymmetry, kept deliberately
-//! rather than papered over: it costs nothing today (no such episode
-//! exists) and widening the sweep to specials is a change to what brarr
-//! asks trackers for, which is not a counting decision.
+//! [`crate::scan`] agrees, as of v0.10.1. It used to skip season 0 when
+//! building targets, which left the one asymmetry these screens had: a
+//! monitored special with no file read as missing here and the sweep
+//! refused to go after it. The exclusion was redundant anyway — the
+//! `monitored` flag is what keeps the bucket out, and on this operator's
+//! catalogue that is 1 special of 914. A lever that moves the count but
+//! not the sweep is a broken lever.
 //!
 //! ## "Aired" splits missing from merely unreleased
 //!

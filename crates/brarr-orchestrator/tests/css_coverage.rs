@@ -339,6 +339,139 @@ fn every_class_emitted_from_rust_has_a_rule() {
     );
 }
 
+/// Every `--custom-property` this stylesheet **defines**, anywhere.
+///
+/// Scope is deliberately ignored: a token defined only under
+/// `:root[data-theme="dark"]` still counts as defined, because the light
+/// block defines it too and a rule referencing it is legitimate.
+fn defined_custom_properties(css: &str) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    let bytes: Vec<char> = css.chars().collect();
+    let mut i = 0;
+    while i + 1 < bytes.len() {
+        if bytes[i] != '-' || bytes[i + 1] != '-' {
+            i += 1;
+            continue;
+        }
+        // A definition is `--name:`; a use is `var(--name)`. Only the
+        // former is what we are collecting here, so require the colon.
+        let mut j = i + 2;
+        let mut name = String::from("--");
+        while j < bytes.len() && (bytes[j].is_ascii_alphanumeric() || bytes[j] == '-') {
+            name.push(bytes[j]);
+            j += 1;
+        }
+        if bytes.get(j) == Some(&':') && name.len() > 2 {
+            out.insert(name);
+        }
+        i = j.max(i + 1);
+    }
+    out
+}
+
+/// Every `var(--custom-property)` this stylesheet **reads**.
+///
+/// The two-argument form `var(--x, fallback)` is handled by stopping at
+/// the first character that cannot be part of a name.
+fn used_custom_properties(css: &str) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    let mut rest = css;
+    while let Some(at) = rest.find("var(") {
+        let after = &rest[at + 4..];
+        let name: String = after
+            .chars()
+            .skip_while(char::is_ascii_whitespace)
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+            .collect();
+        if name.starts_with("--") && name.len() > 2 {
+            out.insert(name);
+        }
+        rest = after;
+    }
+    out
+}
+
+/// The hole the class guard could not see, and which a real bug fell
+/// straight through.
+///
+/// `css_coverage` checks class *names*. It says nothing about the value
+/// side of a declaration, so `.btn-count { color:
+/// var(--color-on-accent-solid); }` — a property that does not exist,
+/// the real one being `--color-accent-fg` — shipped with the whole suite
+/// green. That is the same shape as the `bg-emerald-100` regression this
+/// file was written to catch, one layer down: an unknown custom property
+/// is not an error, it just makes the declaration invalid and the
+/// element inherits instead.
+#[test]
+fn every_custom_property_read_is_also_defined() {
+    let css = std::fs::read_to_string(crate_dir().join("static/app.css")).unwrap();
+    let defined = defined_custom_properties(&css);
+    let used = used_custom_properties(&css);
+
+    assert!(
+        defined.len() > 20,
+        "parsed only {} custom properties out of app.css — the parser is broken, not the stylesheet",
+        defined.len()
+    );
+    assert!(used.len() > 20, "parsed only {} var() reads", used.len());
+
+    let missing: Vec<&String> = used.difference(&defined).collect();
+    assert!(
+        missing.is_empty(),
+        "app.css reads {} custom propert(ies) it never defines — the declaration is dropped and \
+         the element silently inherits:\n  {}",
+        missing.len(),
+        missing
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    );
+}
+
+#[test]
+fn the_custom_property_parser_tells_definition_from_use() {
+    let css = ":root { --color-accent-fg: #fff; --unused-token: 1px; }\n\
+               .a { color: var(--color-accent-fg); }\n\
+               .b { color: var( --color-accent-fg ); }\n\
+               .c { gap: var(--spacing-x, 4px); }";
+    let defined = defined_custom_properties(css);
+    let used = used_custom_properties(css);
+
+    assert!(defined.contains("--color-accent-fg"));
+    assert!(defined.contains("--unused-token"));
+    // A `var()` read is not a definition, so `--spacing-x` is missing.
+    assert!(!defined.contains("--spacing-x"));
+
+    assert!(used.contains("--color-accent-fg"));
+    // The fallback form still yields the name, not the fallback.
+    assert!(used.contains("--spacing-x"));
+    // Defining a token nobody reads is fine — the guard is one-way.
+    assert!(!used.contains("--unused-token"));
+
+    assert_eq!(
+        used.difference(&defined).collect::<Vec<_>>(),
+        vec![&"--spacing-x".to_owned()]
+    );
+}
+
+/// The exact bug, pinned. `--color-on-accent-solid` does not exist; the
+/// property that carries the foreground colour on an accent fill is
+/// `--color-accent-fg`.
+#[test]
+fn the_property_that_shipped_wrong_is_still_not_a_thing() {
+    let css = std::fs::read_to_string(crate_dir().join("static/app.css")).unwrap();
+    let defined = defined_custom_properties(&css);
+    assert!(
+        !defined.contains("--color-on-accent-solid"),
+        "if this token now exists the test below is meaningless — update both"
+    );
+    assert!(
+        defined.contains("--color-accent-fg"),
+        "the real token must exist, or every accent-filled control is uncoloured"
+    );
+}
+
 #[test]
 fn a_format_placeholder_is_not_mistaken_for_a_class() {
     // The exact shape of the badge fragments in `web/routes.rs`.
