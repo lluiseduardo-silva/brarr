@@ -33,15 +33,24 @@
             <div class="flex items-center gap-1.5 flex-wrap mt-2.5">
                 <span class="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium {% if item.is_series %}bg-secondary-soft text-secondary-soft-fg{% else %}bg-accent-soft text-accent-soft-fg{% endif %}">{{ item.kind_label }}</span>
                 {# Status and progress, over the monitored content only —
-                   see `crate::coverage`. #}
-                <span class="lib-status lib-status-{{ item.tone }}">{{ item.status_label }}</span>
-                {% if item.monitored_count > 0 %}
-                <span class="text-xs font-mono text-fg-secondary">{{ item.have }}/{{ item.monitored_count }}</span>
-                {% if item.missing > 0 %}
-                <span class="text-xs font-medium text-danger-soft-fg">{{ item.missing }} faltando</span>
-                {% endif %}
-                <div class="lib-bar lib-bar-{{ item.tone }} w-28 shrink-0"><span class="lib-bar-fill" style="width:{{ item.percent }}%"></span></div>
-                {% endif %}
+                   specials included when they are monitored, see
+                   `crate::coverage`.
+
+                   One element with an id, because a season or an episode
+                   toggle changes the denominator and re-sends this group
+                   out-of-band. The same markup lives in
+                   `partials/library_season.html`; they render the same
+                   `ItemStatusView` and a test asserts the hero moves. #}
+                <span id="item-status" class="flex items-center gap-1.5">
+                    <span class="lib-status lib-status-{{ status.tone }}">{{ status.status_label }}</span>
+                    {% if status.monitored_count > 0 %}
+                    <span class="text-xs font-mono text-fg-secondary">{{ status.have }}/{{ status.monitored_count }}</span>
+                    {% if status.missing > 0 %}
+                    <span class="text-xs font-medium text-danger-soft-fg">{{ status.missing }} faltando</span>
+                    {% endif %}
+                    <div class="lib-bar lib-bar-{{ status.tone }} w-28 shrink-0"><span class="lib-bar-fill" style="width:{{ status.percent }}%"></span></div>
+                    {% endif %}
+                </span>
                 {% if let Some(st) = item.status %}
                 <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium bg-info-soft text-info-soft-fg border border-info-solid">{{ st }}</span>
                 {% endif %}

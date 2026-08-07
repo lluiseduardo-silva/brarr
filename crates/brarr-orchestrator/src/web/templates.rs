@@ -1331,6 +1331,8 @@ pub struct TmdbHitView {
 pub struct LibraryDetailTemplate {
     /// The catalogue entry.
     pub item: LibraryDetailView,
+    /// Its status line, kept apart so a toggle can re-send just this.
+    pub status: ItemStatusView,
     /// Seasons, ascending. Empty for movies.
     pub seasons: Vec<SeasonView>,
     /// How many acquisitions the dialog would show. The list itself is
@@ -1391,15 +1393,28 @@ pub struct LibraryDetailView {
     /// `true` while the digital release date is still in the future —
     /// searching before it usually only turns up cams.
     pub in_theatrical_window: bool,
+}
+
+/// The item's status line, as its own type because a season or episode
+/// toggle has to send it back out-of-band.
+///
+/// Both the hero and the toggle response render these same fields; the
+/// markup is written twice because the two live in different templates,
+/// and `library_ui_integration` asserts the hero actually moves after a
+/// toggle, which is what catches them drifting apart.
+#[derive(Debug, Clone)]
+pub struct ItemStatusView {
     /// [`crate::coverage::ItemStatus::tone`].
     pub tone: String,
     /// What the chip says.
     pub status_label: String,
-    /// Monitored episodes, or `1` for a monitored movie.
+    /// Monitored episodes, or `1` for a monitored movie. Specials count
+    /// when they are monitored — see [`crate::coverage`].
     pub monitored_count: usize,
     /// Of those, how many are on disk.
     pub have: usize,
-    /// Aired, monitored and absent.
+    /// Aired, monitored and absent — and only when it is worth calling
+    /// out, see [`crate::coverage::ItemStatus::callout`].
     pub missing: usize,
     /// `have / monitored_count`.
     pub percent: u8,
@@ -1443,6 +1458,12 @@ pub struct LibrarySeasonPartial {
     /// rides along out-of-band. A full-page refresh would be the other
     /// option, and it closes the accordion the operator just opened.
     pub oob: Option<SeasonMarkView>,
+    /// The item's status line, sent by **both** toggles.
+    ///
+    /// Monitoring a season or an episode changes the denominator, so the
+    /// hero above is wrong the instant either runs. Leaving it stale is
+    /// what made unmarking a season look like it did nothing.
+    pub item_status: Option<ItemStatusView>,
 }
 
 /// The out-of-band half of a season toggle: its bookmark and its status.

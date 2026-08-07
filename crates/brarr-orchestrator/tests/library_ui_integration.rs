@@ -115,6 +115,49 @@ async fn seed_series(state: &AppState) -> Uuid {
     item.id
 }
 
+/// A series with a specials bucket, the shape The Familiar of Zero has:
+/// one special the operator monitors, plus three real episodes.
+async fn seed_series_with_special(state: &AppState) -> Uuid {
+    let item = library::upsert(
+        state.pool(),
+        &NewLibraryItem {
+            media_type: Some(MediaType::Tv),
+            tmdb_id: 35_753,
+            title: "The Familiar of Zero".to_owned(),
+            year: Some(2006),
+            ..NewLibraryItem::default()
+        },
+    )
+    .await
+    .unwrap();
+    let ep = |n: i32| NewEpisode {
+        episode_number: n,
+        title: None,
+        air_date: Some(days_ago(3000)),
+    };
+    library::sync_seasons(
+        state.pool(),
+        item.id,
+        &[
+            NewSeason {
+                season_number: 0,
+                episode_count: 1,
+                air_date: Some(days_ago(3000)),
+                episodes: vec![ep(1)],
+            },
+            NewSeason {
+                season_number: 1,
+                episode_count: 3,
+                air_date: Some(days_ago(3000)),
+                episodes: vec![ep(1), ep(2), ep(3)],
+            },
+        ],
+    )
+    .await
+    .unwrap();
+    item.id
+}
+
 /// Record a file against one episode, the way the adoption and the *arr
 /// import both do: reserve, then mark imported at the same path.
 async fn adopt(state: &AppState, item: Uuid, episode: Uuid, path: &str) {
@@ -328,12 +371,21 @@ async fn a_season_toggle_answers_with_every_episode_it_changed() {
         body.contains(&format!("id=\"season-status-{}\"", s1.id)),
         "the season chip has to be refreshed too: {body}"
     );
+    // Scoped to the season's own fragment: the response also carries the
+    // *item* status, and that one legitimately still reads "faltando"
+    // because season 2 is untouched. Asserting over the whole body would
+    // confuse the two.
+    let season_fragment = body
+        .split(&format!("id=\"season-status-{}\"", s1.id))
+        .nth(1)
+        .and_then(|rest| rest.split("id=\"item-status\"").next())
+        .unwrap_or_default();
     assert!(
-        body.contains("lib-status-paused"),
+        season_fragment.contains("lib-status-paused"),
         "the season that was just paused is not 'faltando' any more: {body}"
     );
     assert!(
-        !body.contains("lib-status-missing"),
+        !season_fragment.contains("lib-status-missing"),
         "the stale chip is the bug this fragment exists to fix: {body}"
     );
 
@@ -370,6 +422,80 @@ async fn the_grab_history_is_a_dialog_and_not_the_page() {
     let modal = get(addr, &format!("/library/{item}/grabs")).await;
     assert!(modal.contains("<dialog"), "{modal}");
     assert!(modal.contains("/midias/one.mkv"), "{modal}");
+}
+
+/// Reported from the screen: The Familiar of Zero has one monitored
+/// special, on disk, and the card read 49/49 instead of 50/50.
+///
+/// The count follows monitoring and nothing else — and the second half
+/// matters as much: unmarking the specials season has to *change* the
+/// number, or the operator's click is a no-op.
+#[tokio::test]
+async fn a_monitored_special_counts_and_unmarking_it_changes_the_number() {
+    let (addr, state) = spawn().await;
+    let item = seed_series_with_special(&state).await;
+    let episodes = library::episodes(state.pool(), item).await.unwrap();
+    for e in &episodes {
+        adopt(&state, item, e.id, &format!("/midias/{}.mkv", e.id)).await;
+    }
+
+    // 3 real episodes + 1 special, all monitored and all on disk.
+    let body = get(addr, &format!("/library/{item}")).await;
+    assert!(body.contains("4/4"), "the special is one of them: {body}");
+    assert!(body.contains("lib-status-complete"), "{body}");
+
+    // Unmark the specials season: the count has to drop to 3/3.
+    let specials = library::seasons(state.pool(), item)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|s| s.season_number == 0)
+        .unwrap();
+    let after = reqwest::Client::new()
+        .post(format!(
+            "http://{addr}/library/{item}/season/{}/monitor",
+            specials.id
+        ))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+
+    // The hero rides back out-of-band — leaving it stale is what made
+    // unmarking a season look like it did nothing.
+    assert!(
+        after.contains("id=\"item-status\""),
+        "the hero has to be re-sent: {after}"
+    );
+    assert!(after.contains("3/3"), "{after}");
+    assert!(get(addr, &format!("/library/{item}")).await.contains("3/3"));
+}
+
+/// One monitored episode toggle also moves the denominator, so the hero
+/// has to come back from that one too.
+#[tokio::test]
+async fn an_episode_toggle_refreshes_the_item_status() {
+    let (addr, state) = spawn().await;
+    let item = seed_series(&state).await;
+    let episodes = library::episodes(state.pool(), item).await.unwrap();
+
+    let body = reqwest::Client::new()
+        .post(format!(
+            "http://{addr}/library/{item}/episode/{}/monitor",
+            episodes[0].id
+        ))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(body.contains("id=\"item-status\""), "{body}");
+    assert!(body.contains("hx-swap-oob"), "{body}");
+    // Five monitored episodes became four.
+    assert!(body.contains("0/4"), "{body}");
 }
 
 /// A movie has no episodes, so its progress is the one unit it is — and

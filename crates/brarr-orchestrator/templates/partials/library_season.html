@@ -38,6 +38,23 @@
 </span>
 {% endif %}
 
+{# Both toggles change the denominator, so the hero above is stale the
+   instant either runs — leaving it there is what made unmarking a season
+   look like it did nothing at all. Same markup as the hero in
+   `library_detail.html`, same `ItemStatusView`. #}
+{% if let Some(st) = item_status %}
+<span id="item-status" hx-swap-oob="outerHTML" class="flex items-center gap-1.5">
+    <span class="lib-status lib-status-{{ st.tone }}">{{ st.status_label }}</span>
+    {% if st.monitored_count > 0 %}
+    <span class="text-xs font-mono text-fg-secondary">{{ st.have }}/{{ st.monitored_count }}</span>
+    {% if st.missing > 0 %}
+    <span class="text-xs font-medium text-danger-soft-fg">{{ st.missing }} faltando</span>
+    {% endif %}
+    <div class="lib-bar lib-bar-{{ st.tone }} w-28 shrink-0"><span class="lib-bar-fill" style="width:{{ st.percent }}%"></span></div>
+    {% endif %}
+</span>
+{% endif %}
+
 {% if episodes.is_empty() %}
 <div class="px-4 py-4 text-xs text-fg-muted italic">Nenhum episódio nesta temporada.</div>
 {% else %}

@@ -12,8 +12,27 @@
 //! read as permanently behind, which is exactly the state most of this
 //! operator's anime is in on purpose.
 //!
-//! Season 0 is excluded on the same principle: the scanner never chases
-//! specials, so counting them would show a gap brarr will never close.
+//! **That includes specials.** Season 0 is excluded from the tree
+//! *summary* — the line that says how big the series is — because 76
+//! specials against 40 real episodes is not what anyone means by "the
+//! show". But it is **not** excluded here, and the difference is the
+//! whole point: monitoring is the operator's lever, and a rule that
+//! ignores a season makes their click do nothing. The Familiar of Zero
+//! has one monitored special, on disk, and read 49/49 instead of 50/50.
+//!
+//! The fear that motivated the old exclusion — a series showing 76
+//! specials as a permanent gap — is measurable and did not happen: of 914
+//! specials in this operator's catalogue exactly one is monitored, and it
+//! has a file. Specials arrive unmonitored and stay that way unless
+//! somebody says otherwise, which is precisely what should decide it.
+//!
+//! One consequence to know: [`crate::scan`] still skips season 0 when
+//! building search targets. A monitored special with no file therefore
+//! reads as missing here and the sweep will not chase it — the
+//! interactive search will. That is a real asymmetry, kept deliberately
+//! rather than papered over: it costs nothing today (no such episode
+//! exists) and widening the sweep to specials is a change to what brarr
+//! asks trackers for, which is not a counting decision.
 //!
 //! ## "Aired" splits missing from merely unreleased
 //!
@@ -40,7 +59,8 @@ use crate::db::library::{LibraryItem, MediaType, MonitoredEpisode};
 /// How much of what is monitored is actually here.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Progress {
-    /// Monitored episodes, specials excluded. `1` for a monitored movie.
+    /// Monitored episodes, **specials included when they are
+    /// monitored**. `1` for a monitored movie.
     pub total: usize,
     /// Of those, how many a live grab covers.
     pub have: usize,
@@ -407,6 +427,44 @@ mod tests {
         assert_eq!(progress.have, 28);
         assert_eq!(progress.aired_missing, 2);
         assert_eq!(ItemStatus::of(true, progress), ItemStatus::Missing);
+    }
+
+    /// Reported from the screen: The Familiar of Zero has 1 + 13 + 12 +
+    /// 12 + 12 = 50 monitored episodes — the first is a special the
+    /// operator monitors and already has — and the card read 49/49.
+    ///
+    /// Excluding a whole season from the count also made the operator's
+    /// own toggle do nothing: unmarking the specials changed no number,
+    /// because they were never in one.
+    #[test]
+    fn a_monitored_special_counts() {
+        let item = Uuid::new_v4();
+        let mut episodes = vec![ep(item, 0, -3000)];
+        for season in 1..=4 {
+            for _ in 0..12 {
+                episodes.push(ep(item, season, -3000));
+            }
+        }
+        episodes.push(ep(item, 1, -3000)); // season 1 has 13
+        let coverage: Vec<Coverage> = episodes.iter().map(|e| cover_episode(item, e.id)).collect();
+
+        let progress = summarise(&episodes, &coverage, now())[&item];
+        assert_eq!(progress.total, 50, "the monitored special is one of them");
+        assert_eq!(progress.have, 50);
+        assert_eq!(ItemStatus::of(true, progress), ItemStatus::Complete);
+    }
+
+    /// The other half of the same rule: an *unmonitored* special is not
+    /// counted, which is what makes unmarking the season the operator's
+    /// lever rather than a no-op.
+    #[test]
+    fn an_unmonitored_special_is_simply_absent() {
+        let item = Uuid::new_v4();
+        // `monitored_episodes` filters on the flag in SQL, so an
+        // unmonitored row never reaches the summariser at all.
+        let only_real: Vec<MonitoredEpisode> = (1..=3).map(|s| ep(item, s, -100)).collect();
+        let progress = summarise(&only_real, &[], now())[&item];
+        assert_eq!(progress.total, 3);
     }
 
     /// An unaired episode is not a gap, and must not turn the card red —

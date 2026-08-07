@@ -808,9 +808,11 @@ pub struct MonitoredEpisode {
 
 /// Every monitored episode of every series, in one query.
 ///
-/// Season 0 is excluded, because the scanner excludes it: counting
-/// specials would make a series read as incomplete over episodes brarr
-/// will never chase.
+/// **Season 0 is included.** The tree summary excludes specials because
+/// they are not what anyone means by "the show", but the progress count
+/// follows monitoring and nothing else — an excluded season makes the
+/// operator's own toggle do nothing, which is how The Familiar of Zero
+/// read 49/49 with a monitored special on disk. See [`crate::coverage`].
 ///
 /// One query rather than one per item on purpose. The library index used
 /// to call [`seasons`] and [`episodes`] per row to build its summary
@@ -822,8 +824,7 @@ pub struct MonitoredEpisode {
 /// Returns [`AppError::Database`] on SQL failure.
 pub async fn monitored_episodes(pool: &Pool) -> Result<Vec<MonitoredEpisode>, AppError> {
     let rows = sqlx::query(
-        "SELECT item_id, id, season_number, air_date FROM library_episodes \
-         WHERE monitored = 1 AND season_number > 0",
+        "SELECT item_id, id, season_number, air_date FROM library_episodes WHERE monitored = 1",
     )
     .fetch_all(pool)
     .await?;

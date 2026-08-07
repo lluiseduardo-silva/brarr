@@ -1485,16 +1485,8 @@ async fn library_detail(
     } else {
         Vec::new()
     };
-    let monitored: Vec<library::MonitoredEpisode> = episodes
-        .iter()
-        .filter(|e| e.monitored && e.season_number > 0)
-        .map(|e| library::MonitoredEpisode {
-            item_id: uuid,
-            id: e.id,
-            season_number: e.season_number,
-            air_date: e.air_date,
-        })
-        .collect();
+    // Specials included: the count follows monitoring and nothing else.
+    let monitored = monitored_rows(uuid, &episodes);
     let series_progress = crate::coverage::summarise(&monitored, &coverage, now);
     let progress = crate::coverage::progress_of(&item, &series_progress, &coverage, now);
     let status = crate::coverage::ItemStatus::of(item.monitored, progress);
@@ -1554,6 +1546,8 @@ async fn library_detail(
                 .physical_release_at
                 .map_or_else(String::new, short_date),
             in_theatrical_window,
+        },
+        status: crate::web::templates::ItemStatusView {
             tone: status.tone().to_owned(),
             status_label: status.label().to_owned(),
             monitored_count: progress.total,
@@ -1567,6 +1561,52 @@ async fn library_detail(
         root_folders: root_folder_options,
         root_folder: current_root,
     })
+}
+
+/// The item's status line, read fresh.
+///
+/// Both toggles call this: monitoring a season or a single episode moves
+/// the denominator, so the hero is wrong the moment either runs. Three
+/// small queries on a click is the cheap half of the trade — the other
+/// option was `HX-Refresh`, which closes the accordion.
+async fn item_status_view(
+    state: &AppState,
+    item_id: Uuid,
+) -> Result<crate::web::templates::ItemStatusView, AppError> {
+    let item = library::get_by_id(state.pool(), item_id).await?;
+    let episodes = library::episodes(state.pool(), item_id).await?;
+    let coverage = grabs::live_coverage_for_item(state.pool(), item_id).await?;
+    let now = OffsetDateTime::now_utc();
+    let monitored = monitored_rows(item_id, &episodes);
+    let series = crate::coverage::summarise(&monitored, &coverage, now);
+    let progress = crate::coverage::progress_of(&item, &series, &coverage, now);
+    let status = crate::coverage::ItemStatus::of(item.monitored, progress);
+    Ok(crate::web::templates::ItemStatusView {
+        tone: status.tone().to_owned(),
+        status_label: status.label().to_owned(),
+        monitored_count: progress.total,
+        have: progress.have,
+        missing: status.callout(progress).0,
+        percent: progress.percent(),
+    })
+}
+
+/// The monitored episodes of one item, as the coverage rule reads them.
+///
+/// **No season filter.** The count follows monitoring, so a monitored
+/// special counts and an unmonitored one does not — which is what makes
+/// the operator's season toggle mean something. See [`crate::coverage`].
+fn monitored_rows(item_id: Uuid, episodes: &[library::Episode]) -> Vec<library::MonitoredEpisode> {
+    episodes
+        .iter()
+        .filter(|e| e.monitored)
+        .map(|e| library::MonitoredEpisode {
+            item_id,
+            id: e.id,
+            season_number: e.season_number,
+            air_date: e.air_date,
+        })
+        .collect()
 }
 
 /// One season header, with its own progress.
@@ -1721,6 +1761,8 @@ async fn library_season(
         item_id: id,
         episodes: episode_views(&episodes, &history),
         oob: None,
+        // A plain expand changes nothing, so the hero stays as it is.
+        item_status: None,
     })
 }
 
@@ -1761,16 +1803,7 @@ async fn library_season_monitor(
     // that rides out-of-band agrees with the rows below it.
     let coverage = grabs::live_coverage_for_item(state.pool(), item_uuid).await?;
     let now = OffsetDateTime::now_utc();
-    let monitored: Vec<library::MonitoredEpisode> = episodes
-        .iter()
-        .filter(|e| e.monitored && e.season_number > 0)
-        .map(|e| library::MonitoredEpisode {
-            item_id: item_uuid,
-            id: e.id,
-            season_number: e.season_number,
-            air_date: e.air_date,
-        })
-        .collect();
+    let monitored = monitored_rows(item_uuid, &episodes);
     let fresh = library::Season {
         monitored: now_monitored,
         ..current
@@ -1789,6 +1822,7 @@ async fn library_season_monitor(
             have: view.have,
             percent: view.percent,
         }),
+        item_status: Some(item_status_view(&state, item_uuid).await?),
     })
 }
 
@@ -1821,6 +1855,8 @@ async fn library_episode_monitor(
         item_id: id,
         episodes: episode_views(&[updated], &history),
         oob: None,
+        // One episode moves the denominator too.
+        item_status: Some(item_status_view(&state, item_uuid).await?),
     })
 }
 
