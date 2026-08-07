@@ -1095,6 +1095,9 @@ pub struct SettingsValues {
     pub public_url: String,
     /// Poller cadence in seconds (matches `BRARR_ARR_POLL_INTERVAL_SECS`).
     pub poll_interval_secs: String,
+    /// Cadence of the passive *arr sweep, in seconds. Blank shows the
+    /// default the task is actually using.
+    pub arr_sync_interval_secs: String,
     /// History-retention window in days (matches
     /// `BRARR_DECISIONS_RETENTION_DAYS`). `"0"` = keep forever.
     pub decisions_retention_days: String,

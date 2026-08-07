@@ -24,6 +24,12 @@ pub const KEY_TRUSTED_PROXIES: &str = "trusted_proxies";
 pub const KEY_PUBLIC_URL: &str = "public_url";
 /// *arr poll cadence in seconds (replaces `BRARR_ARR_POLL_INTERVAL_SECS`).
 pub const KEY_POLL_INTERVAL_SECS: &str = "poll_interval_secs";
+/// Cadence, in seconds, of the passive \*arr sweep — the task that
+/// re-reads every instance marked `sync_source` and catalogues whatever
+/// appeared, always paused. Blank falls back to
+/// [`crate::arr_import::DEFAULT_SYNC_INTERVAL`]. Read fresh on every
+/// cycle, so an edit here lands without a restart.
+pub const KEY_ARR_SYNC_INTERVAL_SECS: &str = "arr_sync_interval_secs";
 /// How many days of `decisions` / `searches` history to keep before the
 /// background maintenance task prunes them. `0` = keep forever (disabled).
 /// Replaces `BRARR_DECISIONS_RETENTION_DAYS`.

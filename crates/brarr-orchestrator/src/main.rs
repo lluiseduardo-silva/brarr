@@ -54,8 +54,8 @@ use brarr_orchestrator::db::settings::{
 };
 use brarr_orchestrator::state::{LogReloader, RuntimeConfig};
 use brarr_orchestrator::{
-    AppState, AuthConfig, BypassConfig, TrustedPeers, db, grpc, import, maintenance, poll, queue,
-    scan, verify, web,
+    AppState, AuthConfig, BypassConfig, TrustedPeers, arr_import, db, grpc, import, maintenance,
+    poll, queue, scan, verify, web,
 };
 use tracing::warn;
 use tracing_subscriber::layer::SubscriberExt;
@@ -234,6 +234,11 @@ async fn main() -> Result<()> {
     // Long-lived library file check — the one thing that reconciles
     // brarr's belief that it has a file with the disk actually having it.
     let _verify_handle = verify::spawn(state.clone());
+    // Long-lived passive *arr sweep — re-reads every instance marked as
+    // a sync source and catalogues what appeared, always paused. It
+    // no-ops while no instance is a source or TMDB is unconfigured, so a
+    // deployment that never touches the *arr screen sees no change.
+    let _arr_sync_handle = arr_import::spawn(state.clone());
 
     tokio::select! {
         res = web_task => res.context("web task panicked")?.context("web server")?,

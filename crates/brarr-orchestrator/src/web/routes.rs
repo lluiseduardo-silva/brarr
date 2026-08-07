@@ -4025,6 +4025,18 @@ async fn load_settings_values(state: &AppState) -> Result<SettingsValues, AppErr
             // the form happens to be pre-filled with.
             state.poll_interval().as_secs().to_string()
         },
+        arr_sync_interval_secs: {
+            let stored = get(settings::KEY_ARR_SYNC_INTERVAL_SECS);
+            if stored.is_empty() {
+                // Same rationale as the poller: show what the task is
+                // actually using rather than an empty box.
+                crate::arr_import::DEFAULT_SYNC_INTERVAL
+                    .as_secs()
+                    .to_string()
+            } else {
+                stored
+            }
+        },
         decisions_retention_days: if map.contains_key(settings::KEY_DECISIONS_RETENTION_DAYS) {
             get(settings::KEY_DECISIONS_RETENTION_DAYS)
         } else {
@@ -4090,6 +4102,8 @@ struct SettingsGeneralForm {
     public_url: String,
     #[serde(default)]
     poll_interval_secs: String,
+    #[serde(default)]
+    arr_sync_interval_secs: String,
     #[serde(default)]
     decisions_retention_days: String,
     // Checkbox: present (`"1"`) when ticked, absent (`""`) when not.
@@ -4197,6 +4211,40 @@ async fn settings_general(
         }
     };
 
+    // Blank is "use the default", so it is stored blank rather than
+    // rejected. A value below the floor is a typo worth naming: the task
+    // would clamp it silently and the box would keep showing a number it
+    // is not using.
+    let arr_sync_secs = if form.arr_sync_interval_secs.trim().is_empty() {
+        None
+    } else {
+        match form.arr_sync_interval_secs.trim().parse::<u64>() {
+            Ok(secs) if secs >= MIN_POLL_INTERVAL_SECS => Some(secs),
+            Ok(secs) => {
+                return settings_flash_render(
+                    &state,
+                    SettingsFlash {
+                        kind: "err".to_string(),
+                        message: format!(
+                            "Intervalo da sincronização *arr muito curto: {secs}s (mínimo {MIN_POLL_INTERVAL_SECS}s)"
+                        ),
+                    },
+                )
+                .await;
+            }
+            Err(e) => {
+                return settings_flash_render(
+                    &state,
+                    SettingsFlash {
+                        kind: "err".to_string(),
+                        message: format!("Intervalo da sincronização *arr inválido: {e}"),
+                    },
+                )
+                .await;
+            }
+        }
+    };
+
     let retention_days = if form.decisions_retention_days.trim().is_empty() {
         None
     } else {
@@ -4256,6 +4304,12 @@ async fn settings_general(
         pool,
         settings::KEY_POLL_INTERVAL_SECS,
         &interval_secs.map(|s| s.to_string()).unwrap_or_default(),
+    )
+    .await?;
+    settings::set(
+        pool,
+        settings::KEY_ARR_SYNC_INTERVAL_SECS,
+        &arr_sync_secs.map(|s| s.to_string()).unwrap_or_default(),
     )
     .await?;
     settings::set(

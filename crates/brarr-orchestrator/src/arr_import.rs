@@ -48,10 +48,14 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
 
 use brarr_arr::{ArrClient, ArrEpisode, ArrError, ArrFile, ArrKind, ArrMovie, ArrSeries};
 use brarr_tmdb::TmdbClient;
 use time::OffsetDateTime;
+use tokio::task::JoinHandle;
+use tokio::time::sleep;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
@@ -1096,6 +1100,101 @@ async fn locate(file: &ArrFileRef, rules: &[PrefixRule]) -> LocalFile {
     }
 }
 
+/// Default cadence of the passive sweep.
+///
+/// Half an hour, and it could be longer: the wish list only changes when
+/// a colleague asks Seerr for something, and nothing downstream is
+/// waiting on it — the titles land paused. Reading three catalogues is
+/// cheap, but every *new* title costs a TMDB call, so a tight loop buys
+/// nothing and spends someone else's rate limit.
+pub const DEFAULT_SYNC_INTERVAL: Duration = Duration::from_secs(30 * 60);
+
+/// Floor for the configured cadence. A one-second sweep would hammer
+/// both the \*arr and TMDB for a list that changes a few times a day.
+const MIN_SYNC_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Delay before the first sweep, so it does not pile onto the startup
+/// burst. Deliberately clear of the other tasks' openings — the poller
+/// starts immediately, the scanner at 90s, the importer at 120s.
+const STARTUP_DELAY: Duration = Duration::from_secs(150);
+
+/// Spawn the passive sweep.
+///
+/// Returns the [`JoinHandle`] so the caller can keep it alive — dropping
+/// it aborts the task.
+#[must_use]
+pub fn spawn(state: AppState) -> JoinHandle<()> {
+    let state = Arc::new(state);
+    info!(
+        target: "brarr_orchestrator::arr_import",
+        default_interval_secs = DEFAULT_SYNC_INTERVAL.as_secs(),
+        "starting the passive *arr sweep (cadence is hot-reloadable via /settings)"
+    );
+    tokio::spawn(async move {
+        sleep(STARTUP_DELAY).await;
+        loop {
+            run_cycle(&state).await;
+            sleep(configured_interval(state.pool()).await).await;
+        }
+    })
+}
+
+/// The cadence as configured, floored. Read fresh every cycle so an edit
+/// in `/settings` lands on the next tick rather than at the next restart
+/// — the same hot-reload contract the poller and the maintenance task
+/// have.
+async fn configured_interval(pool: &Pool) -> Duration {
+    let stored =
+        match crate::db::settings::get(pool, crate::db::settings::KEY_ARR_SYNC_INTERVAL_SECS).await
+        {
+            Ok(Some(row)) => row.value.trim().parse::<u64>().ok(),
+            // A blank, missing or unreadable setting is the default, not a
+            // stall: this task must keep running while the DB hiccups.
+            _ => None,
+        };
+    stored.map_or(DEFAULT_SYNC_INTERVAL, |secs| {
+        Duration::from_secs(secs).max(MIN_SYNC_INTERVAL)
+    })
+}
+
+/// One sweep. Errors are logged, never propagated — a transient failure
+/// must not kill the long-lived task.
+async fn run_cycle(state: &AppState) {
+    // Checked before the instance list so an install with no TMDB
+    // credential logs one debug line instead of an error per instance
+    // every half hour.
+    match tmdb_sync::load_config(state.pool()).await {
+        Ok(cfg) if !cfg.is_configured() => {
+            debug!(
+                target: "brarr_orchestrator::arr_import",
+                "TMDB not configured; skipping the passive sweep"
+            );
+            return;
+        }
+        Ok(_) => {}
+        Err(e) => {
+            warn!(target: "brarr_orchestrator::arr_import", error = %e, "could not read the TMDB config");
+            return;
+        }
+    }
+    match sync_all(state).await {
+        Ok(report) if report.added > 0 || report.files.adopted > 0 || report.failed > 0 => info!(
+            target: "brarr_orchestrator::arr_import",
+            added = report.added,
+            refreshed = report.refreshed,
+            adopted = report.files.adopted,
+            failed = report.failed,
+            "passive sweep complete"
+        ),
+        Ok(_) => {
+            debug!(target: "brarr_orchestrator::arr_import", "passive sweep found nothing new")
+        }
+        Err(e) => {
+            warn!(target: "brarr_orchestrator::arr_import", error = %e, "passive sweep failed")
+        }
+    }
+}
+
 /// Every instance marked as a sync source, read in turn.
 ///
 /// Sequential on purpose: three instances against one TMDB credential,
@@ -1369,6 +1468,36 @@ mod tests {
 
         let episodes = library::episodes(&pool, item.id).await.unwrap();
         assert!(episodes.iter().all(|e| !e.monitored));
+    }
+
+    #[tokio::test]
+    async fn the_sweep_cadence_defaults_and_floors() {
+        use crate::db::settings;
+        let pool = open_memory().await.unwrap();
+        assert_eq!(
+            configured_interval(&pool).await,
+            DEFAULT_SYNC_INTERVAL,
+            "nothing stored means the default"
+        );
+
+        settings::set(&pool, settings::KEY_ARR_SYNC_INTERVAL_SECS, "900")
+            .await
+            .unwrap();
+        assert_eq!(configured_interval(&pool).await, Duration::from_secs(900));
+
+        // A blanked setting reads as "use the default", the same contract
+        // every other hot-reloadable value has.
+        settings::set(&pool, settings::KEY_ARR_SYNC_INTERVAL_SECS, "")
+            .await
+            .unwrap();
+        assert_eq!(configured_interval(&pool).await, DEFAULT_SYNC_INTERVAL);
+
+        // A one-second sweep would hammer both the *arr and TMDB for a
+        // list that changes a few times a day.
+        settings::set(&pool, settings::KEY_ARR_SYNC_INTERVAL_SECS, "1")
+            .await
+            .unwrap();
+        assert_eq!(configured_interval(&pool).await, MIN_SYNC_INTERVAL);
     }
 
     #[tokio::test]

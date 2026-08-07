@@ -133,6 +133,16 @@
             <input name="poll_interval_secs" value="{{ values.poll_interval_secs }}" inputmode="numeric" placeholder="1800"
                    class="w-full px-3 h-10 rounded-md bg-bg-canvas border border-border-strong text-sm text-fg-primary placeholder:text-fg-muted focus:outline-none focus:border-accent-solid">
         </label>
+        <label class="block max-w-xs mt-4">
+            <span class="block mb-1.5 text-xs font-medium uppercase tracking-[0.06em] text-fg-muted">Intervalo da sincronização *arr (segundos)</span>
+            <input name="arr_sync_interval_secs" value="{{ values.arr_sync_interval_secs }}" inputmode="numeric" placeholder="1800"
+                   class="w-full px-3 h-10 rounded-md bg-bg-canvas border border-border-strong text-sm text-fg-primary placeholder:text-fg-muted focus:outline-none focus:border-accent-solid">
+            <span class="block mt-1 text-xs text-fg-muted">
+                Com que frequência o brarr relê os catálogos marcados como <strong>fonte</strong> em
+                <a href="/arr-instances" class="text-accent-soft-fg font-semibold">*arr</a>. O que aparecer
+                entra <strong>pausado</strong>, sempre — esse caminho nunca liga monitoramento. Mínimo 60s.
+            </span>
+        </label>
     </section>
 
     <section class="settings-section {% if section != "metadados" %}hidden{% endif %} card-hairline bg-bg-surface border border-border-default rounded-xl p-5">
