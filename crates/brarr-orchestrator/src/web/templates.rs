@@ -654,6 +654,30 @@ pub struct QueueTemplate {
     pub summary: String,
     /// Combined download rate across every row that reported one.
     pub total_speed: String,
+    /// Seconds until the page asks again. Same field as
+    /// [`QueueLiveTemplate`] because the page renders the fragment
+    /// through `{% include %}`.
+    pub poll_secs: u64,
+}
+
+/// The self-refreshing half of `/queue`, also served on its own at
+/// `/queue/live`.
+///
+/// The fragment carries its own `hx-trigger`, so the server picks the
+/// next interval on every cycle — see the template's own note for why
+/// this is an adaptive cadence rather than htmx's `286` stop signal.
+#[derive(Debug, Template)]
+#[template(path = "partials/queue_live.html")]
+pub struct QueueLiveTemplate {
+    /// One row per in-flight grab, oldest first.
+    pub entries: Vec<QueueEntryView>,
+    /// Headline: `"3 baixando · 1 concluído"`, or an empty string when
+    /// nothing is in flight.
+    pub summary: String,
+    /// Combined download rate across every row that reported one.
+    pub total_speed: String,
+    /// Seconds until the page asks again.
+    pub poll_secs: u64,
 }
 
 /// One row of the queue.

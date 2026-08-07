@@ -88,6 +88,34 @@ pub const DEFAULT_PUSH_THRESHOLD: u32 = 150;
 /// burst (migrations, the poller's first cycle, both servers binding).
 const STARTUP_DELAY: Duration = Duration::from_secs(90);
 
+/// How long a finished manual sweep stays readable by the badge that
+/// asked for it.
+///
+/// Long enough that the operator can leave the tab and come back; short
+/// enough that this stays a mailbox rather than a job history. The
+/// durable record of what a sweep did is `grabs`.
+pub const SCAN_RESULT_TTL: Duration = Duration::from_secs(10 * 60);
+
+/// What a manual "buscar agora" sweep is doing, as far as the badge on
+/// the detail page can tell.
+///
+/// The sweep is spawned and its `JoinHandle` dropped once the handler
+/// stops waiting, so a scan that outran the wait used to be
+/// unrecoverable — the handler's only honest answer was "recarregue a
+/// página", and the page never learned the sweep had finished. This is
+/// the mailbox it writes into instead. It is deliberately not a job
+/// store: entries expire, and nothing depends on one being there.
+#[derive(Debug, Clone)]
+pub enum ScanProgress {
+    /// Still sweeping.
+    Running,
+    /// Finished. Carries what it did, so the badge reads the same
+    /// whether the sweep beat the wait or not.
+    Done(ScanSummary),
+    /// The sweep itself failed.
+    Failed(String),
+}
+
 /// What one sweep did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ScanSummary {

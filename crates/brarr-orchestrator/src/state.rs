@@ -35,11 +35,13 @@ use std::time::Duration;
 use arc_swap::{ArcSwap, Guard};
 use brarr_decision_service::Engine;
 use brarr_plugin_host::{DEFAULT_TICK_INTERVAL, WasmEpochTicker};
+use uuid::Uuid;
 use wasmtime::{Config, Engine as WasmEngine};
 
 use crate::auth::{AuthConfig, BypassConfig};
 use crate::db::Pool;
 use crate::provider_cache::ProviderClientCache;
+use crate::scan::{SCAN_RESULT_TTL, ScanProgress};
 use crate::search::{ProviderScope, SEARCH_CACHE_TTL, SearchKeys, SearchRunOutcome};
 use crate::ttl_cache::TtlCache;
 
@@ -174,6 +176,11 @@ struct Inner {
     /// issue per Interactive Search (per season/episode, once per feed).
     /// Keyed by [`SearchCacheKey`]. See [`crate::ttl_cache`].
     search_cache: TtlCache<SearchCacheKey, SearchRunOutcome>,
+    /// Mailbox for manual "buscar agora" sweeps, keyed by library item.
+    /// The sweep is spawned and outlives the request that started it, so
+    /// without somewhere to write its verdict the page could never learn
+    /// it had finished. See [`crate::scan::ScanProgress`].
+    scans: TtlCache<Uuid, ScanProgress>,
     runtime: RuntimeConfig,
 }
 
@@ -251,6 +258,7 @@ impl AppState {
                 wasm_ticker,
                 provider_clients: ProviderClientCache::new(),
                 search_cache: TtlCache::new(SEARCH_CACHE_TTL),
+                scans: TtlCache::new(SCAN_RESULT_TTL),
                 runtime,
             }),
         }
@@ -356,6 +364,13 @@ impl AppState {
     #[must_use]
     pub fn search_cache(&self) -> &TtlCache<SearchCacheKey, SearchRunOutcome> {
         &self.inner.search_cache
+    }
+
+    /// Borrow the manual-scan mailbox. Written by the spawned sweep,
+    /// read by the badge that polls for its verdict.
+    #[must_use]
+    pub fn scans(&self) -> &TtlCache<Uuid, ScanProgress> {
+        &self.inner.scans
     }
 }
 

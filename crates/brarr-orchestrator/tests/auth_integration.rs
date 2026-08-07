@@ -79,6 +79,46 @@ async fn protected_route_redirects_when_cookie_wrong() {
 }
 
 #[tokio::test]
+async fn htmx_request_gets_hx_redirect_rather_than_a_followed_303() {
+    let addr = spawn_with_auth(AuthConfig::from_optional(Some(TOKEN))).await;
+    let client = no_redirect_client();
+    let resp = client
+        .get(format!("http://{addr}/queue"))
+        .header("HX-Request", "true")
+        .send()
+        .await
+        .expect("send");
+    // `fetch` follows a 303 transparently, so a redirect here would put
+    // the whole login page inside whatever fragment target issued the
+    // request. With a polling trigger that fires unattended.
+    assert_eq!(resp.status(), 401);
+    assert_eq!(
+        resp.headers()
+            .get("hx-redirect")
+            .and_then(|v| v.to_str().ok()),
+        Some("/login")
+    );
+    assert!(
+        resp.text().await.unwrap().is_empty(),
+        "the body must be empty — anything here gets swapped into the target"
+    );
+}
+
+#[tokio::test]
+async fn plain_navigation_still_gets_the_303() {
+    // The fix must not change what a browser address-bar visit does.
+    let addr = spawn_with_auth(AuthConfig::from_optional(Some(TOKEN))).await;
+    let client = no_redirect_client();
+    let resp = client
+        .get(format!("http://{addr}/queue"))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 303);
+    assert!(resp.headers().get("hx-redirect").is_none());
+}
+
+#[tokio::test]
 async fn login_post_sets_cookie_and_redirects_home() {
     let addr = spawn_with_auth(AuthConfig::from_optional(Some(TOKEN))).await;
     let client = no_redirect_client();

@@ -326,6 +326,239 @@ async fn queue_lists_an_in_flight_grab_without_reaching_a_client() {
 }
 
 #[tokio::test]
+async fn the_queue_page_polls_itself_and_the_fragment_is_the_same_markup() {
+    let (addr, _state) = spawn().await;
+
+    let page = reqwest::get(format!("http://{addr}/queue"))
+        .await
+        .expect("send")
+        .text()
+        .await
+        .unwrap();
+    assert!(page.contains(r#"id="queue-live""#));
+    assert!(page.contains(r#"hx-get="/queue/live""#));
+    assert!(page.contains(r#"hx-swap="outerHTML""#));
+
+    let fragment = reqwest::get(format!("http://{addr}/queue/live"))
+        .await
+        .expect("send")
+        .text()
+        .await
+        .unwrap();
+    // A fragment, not a page: swapping a whole document into the target
+    // is how a poll quietly nests the layout inside itself.
+    assert!(
+        !fragment.contains("<!DOCTYPE"),
+        "the fragment must not carry the base layout"
+    );
+    assert!(!fragment.contains("<nav"));
+    // It carries the trigger for the next cycle — a fragment that lost
+    // it would refresh exactly once and then go silent.
+    assert!(fragment.contains(r#"id="queue-live""#));
+    assert!(fragment.contains(r#"hx-get="/queue/live""#));
+    assert!(fragment.contains("hx-trigger=\"every "));
+}
+
+#[tokio::test]
+async fn an_empty_queue_asks_again_slowly() {
+    let (addr, _state) = spawn().await;
+    let body = reqwest::get(format!("http://{addr}/queue/live"))
+        .await
+        .expect("send")
+        .text()
+        .await
+        .unwrap();
+    let idle = brarr_orchestrator::queue::LIVE_POLL_IDLE.as_secs();
+    assert!(
+        body.contains(&format!(r#"hx-trigger="every {idle}s""#)),
+        "an empty queue should back off, got: {body}"
+    );
+}
+
+#[tokio::test]
+async fn a_grab_still_moving_makes_the_page_ask_again_soon() {
+    use brarr_orchestrator::db::grabs::{self, NewGrab, Protocol};
+    use brarr_orchestrator::db::library::{self, MediaType, NewLibraryItem};
+    use brarr_orchestrator::db::providers::{self, NewProvider};
+
+    let (addr, state) = spawn().await;
+    let item = library::upsert(
+        state.pool(),
+        &NewLibraryItem {
+            media_type: Some(MediaType::Movie),
+            tmdb_id: 603,
+            title: "The Matrix".to_owned(),
+            ..NewLibraryItem::default()
+        },
+    )
+    .await
+    .unwrap();
+    let provider = providers::insert(
+        state.pool(),
+        NewProvider {
+            name: "capybara",
+            base_url: &url::Url::parse("https://capybarabr.com/").unwrap(),
+            api_token: "tok",
+            kind: "unit3d",
+            plugin_path: None,
+        },
+    )
+    .await
+    .unwrap();
+    grabs::reserve(
+        state.pool(),
+        &NewGrab {
+            item_id: item.id,
+            episode_id: None,
+            season_number: None,
+            decision_id: None,
+            provider_id: provider.id,
+            provider_name: "capybara",
+            release_id_remote: "abc",
+            release_name: "Matrix.1999.1080p.BluRay.PT-BR",
+            download_url: None,
+            protocol: Protocol::Torrent,
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    let body = reqwest::get(format!("http://{addr}/queue/live"))
+        .await
+        .expect("send")
+        .text()
+        .await
+        .unwrap();
+    let active = brarr_orchestrator::queue::LIVE_POLL_ACTIVE.as_secs();
+    assert!(
+        body.contains(&format!(r#"hx-trigger="every {active}s""#)),
+        "a grab that has not landed yet is still moving, got: {body}"
+    );
+}
+
+// ---------- the manual scan reports without a reload ----------
+//
+// The sweep is spawned and outlives the request that started it, so past
+// `MANUAL_SCAN_WAIT` the badge used to say "recarregue a página". These
+// cover the mailbox that replaced that: what the badge asks, and when it
+// is told to stop asking.
+
+#[tokio::test]
+async fn a_running_scan_keeps_the_badge_asking() {
+    use brarr_orchestrator::scan::ScanProgress;
+    use std::time::Instant;
+    use uuid::Uuid;
+
+    let (addr, state) = spawn().await;
+    let id = Uuid::new_v4();
+    state
+        .scans()
+        .insert(id, ScanProgress::Running, Instant::now());
+
+    let resp = reqwest::get(format!("http://{addr}/library/{id}/scan/status"))
+        .await
+        .expect("send");
+    assert_eq!(
+        resp.status(),
+        200,
+        "a sweep still running must not carry the stop signal"
+    );
+    let body = resp.text().await.unwrap();
+    assert!(body.contains(&format!(r#"hx-get="/library/{id}/scan/status""#)));
+    assert!(body.contains("hx-trigger=\"every "));
+    assert!(body.contains("buscando"));
+}
+
+#[tokio::test]
+async fn a_finished_scan_reports_its_verdict_and_stops_asking() {
+    use brarr_orchestrator::scan::{ScanProgress, ScanSummary};
+    use std::time::Instant;
+    use uuid::Uuid;
+
+    let (addr, state) = spawn().await;
+    let id = Uuid::new_v4();
+    state.scans().insert(
+        id,
+        ScanProgress::Done(ScanSummary {
+            targets: 3,
+            searches: 3,
+            grabbed: 2,
+            ..ScanSummary::default()
+        }),
+        Instant::now(),
+    );
+
+    let resp = reqwest::get(format!("http://{addr}/library/{id}/scan/status"))
+        .await
+        .expect("send");
+    // 286 is htmx's "stop polling". Right here — a sweep ends — and
+    // wrong on /queue, which refills on its own.
+    assert_eq!(resp.status(), 286);
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("2 grab(s)"));
+    assert!(
+        !body.contains("hx-trigger"),
+        "a finished sweep must not leave a live trigger behind"
+    );
+}
+
+#[tokio::test]
+async fn a_scan_nobody_started_answers_empty_rather_than_a_verdict() {
+    use uuid::Uuid;
+
+    let (addr, _state) = spawn().await;
+    let id = Uuid::new_v4();
+    let resp = reqwest::get(format!("http://{addr}/library/{id}/scan/status"))
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 286);
+    let body = resp.text().await.unwrap();
+    assert!(body.contains(&format!(r#"id="scan-{id}""#)));
+    assert!(!body.contains("hx-trigger"));
+    assert!(
+        !body.contains("badge"),
+        "an expired mailbox is not a verdict — the slot goes back to empty"
+    );
+}
+
+#[tokio::test]
+async fn the_scan_button_leaves_its_verdict_in_the_mailbox() {
+    use brarr_orchestrator::db::library::{self, MediaType, NewLibraryItem};
+    use brarr_orchestrator::scan::ScanProgress;
+    use std::time::Instant;
+
+    let (addr, state) = spawn().await;
+    let item = library::upsert(
+        state.pool(),
+        &NewLibraryItem {
+            media_type: Some(MediaType::Movie),
+            tmdb_id: 603,
+            title: "The Matrix".to_owned(),
+            ..NewLibraryItem::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{addr}/library/{}/scan", item.id))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 200);
+
+    // With no providers configured the sweep beats the wait, so the
+    // handler answers directly — and the mailbox still holds the same
+    // verdict, which is what makes the slow path readable.
+    let recorded = state.scans().get(&item.id, Instant::now());
+    assert!(
+        matches!(recorded, Some(ScanProgress::Done(_))),
+        "the spawned sweep must record its outcome, got {recorded:?}"
+    );
+}
+
+#[tokio::test]
 async fn scan_now_reports_that_nothing_was_found() {
     use brarr_orchestrator::db::library::{self, MediaType, NewLibraryItem};
 

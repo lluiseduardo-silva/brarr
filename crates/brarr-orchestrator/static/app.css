@@ -674,6 +674,24 @@ body, body * {
 .lib-bar-paused   .lib-bar-fill,
 .lib-bar-nothing  .lib-bar-fill { background-color: var(--color-fg-muted); }
 
+/* The queue's progress bar. Carries only the transition, because the
+   colour is picked per row and the width is inline.
+
+   This is what makes a poll every few seconds read as movement instead
+   of a jump: the swap lands a new inline width and the browser animates
+   between the two. The duration is deliberately close to the poll
+   interval — a bar that finishes its animation instantly looks steppier
+   than one still gliding when the next value arrives.
+
+   `prefers-reduced-motion` turns it off; a bar that snaps is a bar, a
+   bar that slides is motion the operator did not ask for. */
+.queue-bar {
+  transition: width 1200ms linear;
+}
+@media (prefers-reduced-motion: reduce) {
+  .queue-bar { transition: none; }
+}
+
 /* The spine down the left edge of a grid card — the indicator you can
    read without focusing on any text. */
 .lib-spine {

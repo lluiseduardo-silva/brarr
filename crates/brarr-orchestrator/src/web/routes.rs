@@ -20,7 +20,7 @@
 use std::fmt::Write as _;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use askama::Template as _;
 use axum::Router;
@@ -45,6 +45,7 @@ use crate::db::{
     arr_instances, decisions, download_clients, grabs, library, path_mappings, providers,
     push_history, root_folders, searches,
 };
+use crate::scan::ScanProgress;
 #[allow(
     unused_imports,
     reason = "re-exported for downstream tests that still call it"
@@ -116,6 +117,7 @@ pub fn router(state: AppState, static_dir: &std::path::Path) -> Router {
         .route("/library/{id}/profile", post(library_set_profile))
         .route("/library/{id}/refresh", post(library_refresh))
         .route("/library/{id}/scan", post(library_scan_now))
+        .route("/library/{id}/scan/status", get(library_scan_status))
         .route("/library/{id}/interactive", get(library_interactive))
         .route("/library/{id}/grab/{decision_id}", post(library_grab))
         .route("/library/{id}/grabs", get(library_grabs))
@@ -130,6 +132,7 @@ pub fn router(state: AppState, static_dir: &std::path::Path) -> Router {
         )
         .route("/library/{id}", get(library_detail).delete(library_delete))
         .route("/queue", get(queue_index))
+        .route("/queue/live", get(queue_live))
         .route("/webhooks", get(webhooks_index))
         .route("/health", get(health_index))
         .route("/settings", get(settings_index))
@@ -308,6 +311,24 @@ async fn auth_middleware(
         .is_some_and(|tok| state.auth().token_matches(tok));
     if ok {
         return Ok(next.run(req).await);
+    }
+    // An HTMX request must not be redirected. `fetch` follows a 303
+    // transparently, so the whole login page would be swapped into
+    // whatever fragment target issued the request — a dropdown, a table
+    // row, a 24px badge. `HX-Redirect` on an empty 401 tells htmx to
+    // navigate the window instead, which is what the operator wants to
+    // happen when the session died.
+    //
+    // This is a prerequisite for polling, not a nicety: today the misfire
+    // needs a click, and a `hx-trigger="every Ns"` makes it fire
+    // unattended. The session cookie carries no `Max-Age` (it dies with
+    // the browser) and the deploy recipe regenerates `BRARR_AUTH_TOKEN`
+    // per run, so an expired session is the ordinary case.
+    if req.headers().contains_key("hx-request") {
+        let mut resp = StatusCode::UNAUTHORIZED.into_response();
+        resp.headers_mut()
+            .insert("HX-Redirect", HeaderValue::from_static("/login"));
+        return Err(resp);
     }
     Err(Redirect::to("/login").into_response())
 }
@@ -2215,9 +2236,26 @@ async fn library_scan_now(
         .map_err(|e| AppError::InvalidInput(format!("invalid library id: {e}")))?;
     let item = library::get_by_id(state.pool(), uuid).await?;
 
+    // Claim the mailbox before spawning, so a status poll that arrives
+    // between the spawn and the first await still sees "running" rather
+    // than "nothing here".
+    state
+        .scans()
+        .insert(uuid, ScanProgress::Running, Instant::now());
+
     let task_state = state.clone();
-    let handle =
-        tokio::spawn(async move { crate::scan::run_once_for_item(&task_state, &item).await });
+    let handle = tokio::spawn(async move {
+        let outcome = crate::scan::run_once_for_item(&task_state, &item).await;
+        // Record before returning. Past `MANUAL_SCAN_WAIT` the handler has
+        // already dropped this `JoinHandle`, so the mailbox is the only
+        // place the verdict survives.
+        let progress = match &outcome {
+            Ok(summary) => ScanProgress::Done(summary.clone()),
+            Err(e) => ScanProgress::Failed(e.to_string()),
+        };
+        task_state.scans().insert(uuid, progress, Instant::now());
+        outcome
+    });
     let summary = match tokio::time::timeout(MANUAL_SCAN_WAIT, handle).await {
         Ok(Ok(Ok(summary))) => summary,
         Ok(Ok(Err(e))) => return Err(e),
@@ -2225,21 +2263,103 @@ async fn library_scan_now(
             return Err(AppError::InvalidInput(format!("busca falhou: {join}")));
         }
         Err(_elapsed) => {
-            // The task owns itself now; it keeps going and its results
-            // land in the item's grab history.
-            let badge = PingBadge {
-                ok: true,
-                label: "em andamento".to_string(),
-                detail: "a busca continua rodando em segundo plano; recarregue a página para ver os grabs".to_string(),
-            };
-            return Ok(html_string(render_status_badge(
-                &format!("scan-{uuid}"),
-                &badge,
-            )));
+            // The task owns itself now. The badge it leaves behind asks
+            // for the verdict on a timer instead of telling the operator
+            // to reload — which was the one place in the app where a
+            // background job with a known end surfaced as "press F5".
+            return Ok(html_string(render_scan_running_badge(uuid)));
         }
     };
 
-    let badge = if summary.grabbed > 0 {
+    let badge = scan_badge(&summary);
+    Ok(html_string(render_status_badge(
+        &format!("scan-{uuid}"),
+        &badge,
+    )))
+}
+
+/// How often the badge asks whether its sweep has finished.
+///
+/// Faster than the queue's cadence because this is one cheap in-memory
+/// read, not a round of calls to the download clients — and because the
+/// operator is looking straight at it, having just clicked.
+const SCAN_POLL: Duration = Duration::from_secs(3);
+
+/// htmx's "stop polling" status. Any 2xx is still swapped; this one also
+/// cancels the trigger.
+///
+/// Right here and wrong on `/queue`: a sweep genuinely ends, and only a
+/// new click starts another. A queue refills on its own.
+const HX_STOP_POLLING: u16 = 286;
+
+/// The badge shown while a sweep is still running — it replaces itself
+/// every [`SCAN_POLL`] until the status route says it is done.
+fn render_scan_running_badge(item: Uuid) -> String {
+    let badge = PingBadge {
+        ok: true,
+        label: "buscando…".to_string(),
+        detail: "a varredura continua em segundo plano; o resultado aparece aqui".to_string(),
+    };
+    render_status_badge_with(
+        &format!("scan-{item}"),
+        &badge,
+        &format!(
+            r#" hx-get="/library/{item}/scan/status" hx-trigger="every {}s" hx-swap="outerHTML""#,
+            SCAN_POLL.as_secs()
+        ),
+    )
+}
+
+/// `GET /library/{id}/scan/status` — what the spawned sweep is doing.
+///
+/// Answers `286` on anything terminal so the badge stops asking. A
+/// mailbox that has expired reads as "nothing running", which is the
+/// truth by then: the sweep's durable record is its grabs.
+async fn library_scan_status(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, AppError> {
+    let uuid = Uuid::parse_str(&id)
+        .map_err(|e| AppError::InvalidInput(format!("invalid library id: {e}")))?;
+
+    let (body, done) = match state.scans().get(&uuid, Instant::now()) {
+        Some(ScanProgress::Running) => (render_scan_running_badge(uuid), false),
+        Some(ScanProgress::Done(summary)) => (
+            render_status_badge(&format!("scan-{uuid}"), &scan_badge(&summary)),
+            true,
+        ),
+        Some(ScanProgress::Failed(reason)) => {
+            let badge = PingBadge {
+                ok: false,
+                label: "erro".to_string(),
+                detail: reason,
+            };
+            (render_status_badge(&format!("scan-{uuid}"), &badge), true)
+        }
+        // Nothing running and nothing recent: leave the slot empty
+        // rather than inventing a verdict, and stop asking.
+        None => (
+            format!(
+                r#"<span id="scan-{uuid}" class="text-xs italic text-fg-muted"></span>"#,
+                uuid = crate::web::templates::escape(&uuid.to_string())
+            ),
+            true,
+        ),
+    };
+
+    let mut resp = html_string(body);
+    if done {
+        *resp.status_mut() = StatusCode::from_u16(HX_STOP_POLLING).unwrap_or(StatusCode::OK);
+    }
+    Ok(resp)
+}
+
+/// Turn a finished sweep into the badge that reports it.
+///
+/// Shared by the synchronous answer and the polled one, so a sweep that
+/// beat [`MANUAL_SCAN_WAIT`] and one that did not read identically.
+fn scan_badge(summary: &crate::scan::ScanSummary) -> PingBadge {
+    if summary.grabbed > 0 {
         PingBadge {
             ok: true,
             label: format!("{} grab(s)", summary.grabbed),
@@ -2269,11 +2389,7 @@ async fn library_scan_now(
                 summary.searches
             ),
         }
-    };
-    Ok(html_string(render_status_badge(
-        &format!("scan-{uuid}"),
-        &badge,
-    )))
+    }
 }
 
 /// `POST /library/verify` — reconcile the catalogue with the disk now.
@@ -2921,7 +3037,31 @@ fn hx_refresh() -> Response {
 /// ([`crate::queue`]) persists the state transitions; the numbers on
 /// this page are never stored, so they cannot be stale.
 async fn queue_index(State(state): State<AppState>) -> Result<Response, AppError> {
-    let entries = crate::queue::snapshot(&state).await?;
+    let live = queue_live_view(&state).await?;
+    html(&crate::web::templates::QueueTemplate {
+        entries: live.entries,
+        summary: live.summary,
+        total_speed: live.total_speed,
+        poll_secs: live.poll_secs,
+    })
+}
+
+/// The fragment `/queue` polls. Same data, same template — the page
+/// renders it through `{% include %}`, so the first paint and every
+/// refresh cannot disagree.
+async fn queue_live(State(state): State<AppState>) -> Result<Response, AppError> {
+    html(&queue_live_view(&state).await?)
+}
+
+/// Read the clients and assemble the live view.
+///
+/// Picks the next poll interval as a side effect of counting the rows:
+/// a queue with something moving asks again soon, one that is empty or
+/// merely waiting on the importer asks again slowly.
+async fn queue_live_view(
+    state: &AppState,
+) -> Result<crate::web::templates::QueueLiveTemplate, AppError> {
+    let entries = crate::queue::snapshot(state).await?;
     // One query for every title in the queue rather than one per row.
     let titles: std::collections::HashMap<Uuid, String> = library::list(state.pool())
         .await?
@@ -2955,7 +3095,12 @@ async fn queue_index(State(state): State<AppState>) -> Result<Response, AppError
     if done > 0 {
         parts.push(format!("{done} concluído(s)"));
     }
-    html(&crate::web::templates::QueueTemplate {
+    let interval = if downloading > 0 {
+        crate::queue::LIVE_POLL_ACTIVE
+    } else {
+        crate::queue::LIVE_POLL_IDLE
+    };
+    Ok(crate::web::templates::QueueLiveTemplate {
         entries: views,
         summary: parts.join(" · "),
         total_speed: if total_speed > 0 {
@@ -2963,6 +3108,7 @@ async fn queue_index(State(state): State<AppState>) -> Result<Response, AppError
         } else {
             String::new()
         },
+        poll_secs: interval.as_secs(),
     })
 }
 
@@ -3367,6 +3513,16 @@ fn render_ping_badge(provider_id: &str, b: &PingBadge) -> String {
 /// `css_coverage` test only scanned templates, so nothing caught it;
 /// it scans this file now too.
 fn render_status_badge(dom_id: &str, b: &PingBadge) -> String {
+    render_status_badge_with(dom_id, b, "")
+}
+
+/// Same badge with `extra` appended verbatim to the `<span>`'s
+/// attributes.
+///
+/// `extra` is **not** escaped, so it is for attributes this file builds
+/// — the polling wiring on a running scan — and never for anything
+/// derived from a request.
+fn render_status_badge_with(dom_id: &str, b: &PingBadge, extra: &str) -> String {
     let (bg, fg) = if b.ok {
         ("bg-success-soft", "text-success-soft-fg")
     } else {
@@ -3375,7 +3531,7 @@ fn render_status_badge(dom_id: &str, b: &PingBadge) -> String {
     let detail = crate::web::templates::escape(&b.detail);
     let label = crate::web::templates::escape(&b.label);
     let dom_id = crate::web::templates::escape(dom_id);
-    format!(r#"<span id="{dom_id}" class="badge {bg} {fg}" title="{detail}">{label}</span>"#)
+    format!(r#"<span id="{dom_id}" class="badge {bg} {fg}" title="{detail}"{extra}>{label}</span>"#)
 }
 
 async fn releases_index(State(state): State<AppState>) -> Result<Response, AppError> {

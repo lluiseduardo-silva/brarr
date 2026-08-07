@@ -42,6 +42,28 @@ use crate::{AppError, AppState};
 /// and cheap enough that it is a handful of local HTTP calls.
 pub const SYNC_INTERVAL: Duration = Duration::from_secs(60);
 
+/// How often `/queue` refreshes itself while something is actually
+/// moving.
+///
+/// This is a different clock from [`SYNC_INTERVAL`] and deliberately much
+/// faster. The background sync only writes *state transitions*;
+/// percentage, speed and ETA are read from the client on every render
+/// (see the module note above), so this is the interval at which the
+/// operator sees a real number change.
+///
+/// The cost is one HTTP call per in-flight grab per cycle — the
+/// `DownloadClient` trait has no batch call. At a handful of rows that is
+/// well under what qBittorrent's own WebUI does to itself.
+pub const LIVE_POLL_ACTIVE: Duration = Duration::from_secs(5);
+
+/// How often `/queue` refreshes itself while nothing is moving.
+///
+/// An idle cycle costs a single query: [`snapshot`] returns early on an
+/// empty queue and touches no client at all. Rows that are merely
+/// `completed` — finished, waiting on the importer — count as idle too;
+/// probing them every few seconds would buy nothing.
+pub const LIVE_POLL_IDLE: Duration = Duration::from_secs(30);
+
 /// How long a grab may go unrecognised by its own client before brarr
 /// concludes it is gone.
 ///
