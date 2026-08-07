@@ -1475,6 +1475,20 @@ pub struct SeasonView {
 pub struct LibrarySeasonPartial {
     /// Parent item id, for the toggle URLs.
     pub item_id: String,
+    /// This season's id when the response **is** the season body, and
+    /// `None` when it is a single episode row.
+    ///
+    /// The distinction is load-bearing: the season body is wrapped in a
+    /// re-requestable `<div>`, and a single row is swapped straight into
+    /// `#ep-{id}`. Wrapping the latter would nest a second
+    /// `season-rows-…` inside the list and duplicate its id.
+    pub season_id: Option<String>,
+    /// Seconds until the rows ask again, or `None` to stay put.
+    ///
+    /// Set only while an episode is actually downloading. A season with
+    /// nothing in flight renders a wrapper with no trigger and never
+    /// asks again — polling a static list would be pure noise.
+    pub poll_secs: Option<u64>,
     /// Episodes of one season, ascending.
     pub episodes: Vec<EpisodeView>,
     /// Set only when a *season* toggle produced this response: its

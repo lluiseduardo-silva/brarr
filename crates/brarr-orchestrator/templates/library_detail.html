@@ -184,9 +184,9 @@
     </div>
 </div>
 
-{# Alvo dos resultados: fora do card do hero para a tabela poder ocupar
-   a largura toda. #}
-<div id="interactive-results"></div>
+{# O alvo dos resultados era um `<div>` aqui. Virou diálogo em
+   `#modal-target`: preenchido, este div não tinha como ser fechado —
+   o operador precisava navegar para outra tela e voltar. #}
 
 {% if item.in_theatrical_window %}
 <div class="flex items-start gap-3 px-4 py-3 mb-4 rounded-lg bg-info-soft border border-info-solid">
@@ -274,9 +274,8 @@
             <button type="button"
                     onclick="event.preventDefault(); event.stopPropagation();"
                     hx-get="/library/{{ item.id }}/interactive?season={{ s.number }}"
-                    hx-target="#interactive-results"
-                    hx-swap="outerHTML"
-                    hx-indicator="#interactive-results"
+                    hx-target="#modal-target"
+                    hx-swap="innerHTML"
                     title="Ver o que existe para a temporada {{ s.number }} — mostra tudo, inclusive o que o perfil rejeitaria"
                     aria-label="Busca interativa da temporada {{ s.number }}"
                     class="btn btn-sm btn-icon btn-ghost shrink-0">

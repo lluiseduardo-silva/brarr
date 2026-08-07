@@ -55,6 +55,20 @@
 </span>
 {% endif %}
 
+{# As linhas, num invólucro que se troca sozinho **enquanto algo baixa**.
+
+   Mesma cadência decidida pelo servidor que a `/queue` usa: a resposta
+   carrega o próprio `hx-trigger`, e quando o download termina o
+   invólucro volta sem gatilho e o poll para sozinho. Uma temporada com
+   nada em voo nunca chega a perguntar. #}
+{% if let Some(sid) = season_id %}
+<div id="season-rows-{{ sid }}"
+     {%- if let Some(secs) = poll_secs %}
+     hx-get="/library/{{ item_id }}/season/{{ sid }}"
+     hx-trigger="every {{ secs }}s"
+     hx-swap="outerHTML"
+     {%- endif %}>
+{% endif %}
 {% if episodes.is_empty() %}
 <div class="px-4 py-4 text-xs text-fg-muted italic">Nenhum episódio nesta temporada.</div>
 {% else %}
@@ -116,9 +130,9 @@
         {%- if e.air_date.is_empty() %}—{% else %}{{ e.air_date }}{% endif -%}
     </span>
 
-    {# Lupa do episódio. O alvo é o mesmo `#interactive-results` da lupa
-       da temporada — um alvo só, porque a tabela de resultados é larga e
-       duas delas na tela ao mesmo tempo não ajudariam ninguém.
+    {# Lupa do episódio. Abre o mesmo diálogo da lupa da temporada — um
+       alvo só, porque a tabela de resultados é larga e duas delas na
+       tela ao mesmo tempo não ajudariam ninguém.
 
        Sem `preventDefault` aqui: a linha do episódio não está dentro de
        um `<summary>`, então não há toggle nativo para suprimir. #}
@@ -127,9 +141,8 @@
                pelo escape do Askama, e um `&` solto em atributo é HTML
                inválido. O DOM devolve `&` ao htmx de qualquer forma. #}
             hx-get="/library/{{ item_id }}/interactive?season={{ e.season_number }}&amp;episode={{ e.episode_number }}"
-            hx-target="#interactive-results"
-            hx-swap="outerHTML"
-            hx-indicator="#interactive-results"
+            hx-target="#modal-target"
+            hx-swap="innerHTML"
             title="Ver o que existe para {{ e.code }} — mostra tudo, inclusive o que o perfil rejeitaria"
             aria-label="Busca interativa de {{ e.code }}"
             class="btn btn-sm btn-icon btn-ghost shrink-0">
@@ -161,3 +174,4 @@
 </div>
 {% endfor %}
 {% endif %}
+{% if season_id.is_some() %}</div>{% endif %}

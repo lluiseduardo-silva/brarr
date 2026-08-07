@@ -974,6 +974,7 @@ body, body * {
    the dialog does not, so the header and the footer with the counters
    and the confirm button stay put. */
 .max-h-\[420px\] { max-height: 420px; }
+.max-h-\[70vh\] { max-height: 70vh; }
 .min-h-screen { min-height: 100vh; }
 
 .w-1    { width: 0.25rem; }
@@ -1008,6 +1009,10 @@ body, body * {
    title, a season, an episode and an effect per row, and squeezing those
    into 560px is what turns a decision into a guess. */
 .w-\[1120px\] { width: 1120px; }
+/* Mais largo que os outros diálogos porque o conteúdo é uma tabela de
+   seis colunas com nome de release em mono — o caso que motivou o casco
+   fluido também vale aqui. `max-w-full` segura em telas menores. */
+.w-\[1400px\] { width: 1400px; }
 .w-\[640px\] { width: 640px; }
 
 .max-w-full { max-width: 100%; }

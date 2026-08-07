@@ -173,6 +173,51 @@ pub fn spawn(state: AppState) -> JoinHandle<()> {
 /// [`Probe::Unreachable`], not an error.
 pub async fn snapshot(state: &AppState) -> Result<Vec<QueueEntry>, AppError> {
     let grabs = grabs::queue(state.pool()).await?;
+    probe_all(state, grabs).await
+}
+
+/// Refresh the progress cache for **one library item**, live.
+///
+/// The episode rows read [`AppState::progress`], which the 60s background
+/// sync fills. That is fine for a number that changes slowly, and wrong
+/// next to `/queue`, which probes the client on every render: the same
+/// download showed two different percentages, and the detail screen's was
+/// always the older one.
+///
+/// This closes that gap without reintroducing the cost the cache exists
+/// to avoid. `snapshot` probes **every** in-flight grab in the library;
+/// this probes only the ones belonging to `item`, which in practice is
+/// one or two. Callers use it when a row is actually going to render a
+/// number, never speculatively.
+///
+/// # Errors
+///
+/// Returns [`AppError::Database`] when the grab or client list cannot be
+/// read. A client that fails to answer becomes [`Probe::Unreachable`].
+pub async fn refresh_progress_for_item(state: &AppState, item: Uuid) -> Result<(), AppError> {
+    let in_flight: Vec<Grab> = grabs::for_item(state.pool(), item)
+        .await?
+        .into_iter()
+        .filter(|g| matches!(g.status, GrabStatus::Sent | GrabStatus::Downloading))
+        .collect();
+    if in_flight.is_empty() {
+        return Ok(());
+    }
+    let stamped = Instant::now();
+    for entry in probe_all(state, in_flight).await? {
+        if let Probe::Known(status) = &entry.probe {
+            state
+                .progress()
+                .insert(entry.grab.id, percent_of(status.progress), stamped);
+        }
+    }
+    Ok(())
+}
+
+/// Ask each grab's client about it. Shared by the whole-queue snapshot
+/// and the per-item refresh, so the two cannot drift apart in how they
+/// read a client.
+async fn probe_all(state: &AppState, grabs: Vec<Grab>) -> Result<Vec<QueueEntry>, AppError> {
     if grabs.is_empty() {
         return Ok(Vec::new());
     }

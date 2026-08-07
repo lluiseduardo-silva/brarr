@@ -173,7 +173,10 @@ async fn interactive_search_reports_when_nothing_is_found() {
         .await
         .unwrap();
     assert!(body.contains("nenhuma release encontrada"), "body = {body}");
-    assert!(body.contains("interactive-results"));
+    // Even the empty answer is a dialog, so it can be dismissed like any
+    // other. It used to be a loose div with no way out.
+    assert!(body.contains("interactive-dialog"), "body = {body}");
+    assert!(body.contains("<dialog"), "body = {body}");
 }
 
 #[tokio::test]

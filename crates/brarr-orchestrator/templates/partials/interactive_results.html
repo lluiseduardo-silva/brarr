@@ -1,22 +1,45 @@
-{# Resultados da busca interativa. Trocado inteiro a cada busca.
+{# Resultados da busca interativa, num diálogo.
+
+   Era um `<div>` solto abaixo do hero, e uma vez preenchido **não havia
+   como fechá-lo**: o operador tinha de navegar para outra tela e voltar.
+   O diálogo resolve isso e ainda tira a tabela de cima da árvore de
+   temporadas, que é a razão de a página existir.
 
    O que o varredor faz sozinho é escolher a melhor release acima do
    threshold do perfil. Aqui quem escolhe é o operador — o threshold vira
    informação (a coluna "score" diz de que lado da linha caiu), não
-   veto. #}
-<div id="interactive-results" class="mt-4">
+   veto.
+
+   Fechar é `type="button"` + `close()`. `<form method="dialog">`
+   aninhado é removido pelo parser e viraria submit do form de fora. #}
+<dialog id="interactive-dialog" class="w-[1400px] max-w-full rounded-xl bg-bg-surface border border-border-default p-0">
+    <header class="flex items-center justify-between gap-3 px-5 py-4 border-b border-border-default">
+        <div class="min-w-0">
+            <h2 class="text-base font-semibold text-fg-primary">Busca interativa</h2>
+            <p class="text-xs text-fg-muted mt-0.5">
+                {% if !message.is_empty() %}sem resultados{% else %}{{ results.len() }} release(s){% if !axis.is_empty() %} · {{ axis }}{% endif %}{% endif %}
+                — baixar entrega direto ao cliente, ignorando o threshold
+            </p>
+        </div>
+        <button type="button"
+                onclick="document.getElementById('interactive-dialog').close()"
+                title="Fechar"
+                aria-label="Fechar"
+                class="btn btn-md btn-icon btn-ghost shrink-0">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                <path d="M18 6 6 18M6 6l12 12"/>
+            </svg>
+        </button>
+    </header>
+
     {% if !message.is_empty() %}
-    <div class="card-hairline bg-bg-surface border border-border-default rounded-xl px-5 py-6 text-center">
+    <div class="px-5 py-10 text-center">
         <p class="text-sm text-fg-secondary">{{ message }}</p>
     </div>
     {% else %}
-    <div class="card-hairline bg-bg-surface border border-border-default rounded-xl overflow-hidden">
-        <header class="flex items-center justify-between gap-3 px-4 py-3 bg-bg-muted">
-            <span class="text-xs font-medium uppercase tracking-[0.06em] text-fg-muted">
-                {{ results.len() }} release(s){% if !axis.is_empty() %} · {{ axis }}{% endif %}
-            </span>
-            <span class="text-[11px] text-fg-muted">clicar em baixar entrega direto ao cliente, ignorando o threshold</span>
-        </header>
+    {# A lista é longa — 102 releases de quatro providers já aconteceu —
+       então ela rola dentro do diálogo, não o diálogo dentro da página. #}
+    <div class="max-h-[70vh] overflow-y-auto">
         <div class="overflow-x-auto">
             <table class="w-full text-sm">
                 <thead class="bg-bg-muted">
@@ -81,4 +104,10 @@
         </div>
     </div>
     {% endif %}
-</div>
+
+    <footer class="px-5 py-4 border-t border-border-default flex items-center justify-end">
+        <button type="button"
+                onclick="document.getElementById('interactive-dialog').close()"
+                class="btn btn-md btn-secondary">Fechar</button>
+    </footer>
+</dialog>

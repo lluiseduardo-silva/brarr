@@ -1793,9 +1793,44 @@ async fn library_season(
         .collect();
     let history = grabs::for_item(state.pool(), item_uuid).await?;
 
+    // Refresh the cache from the client before rendering, but only for
+    // this item and only when a row is actually going to show a number.
+    // `/queue` probes live on every render, so without this the same
+    // download read two different percentages and the detail screen's
+    // was always the older one — up to a full `SYNC_INTERVAL` behind.
+    //
+    // Best-effort: a client that will not answer must not take the
+    // season tree down with it. The row falls back to the cached value,
+    // or to no number at all.
+    if history.iter().any(|g| {
+        matches!(
+            g.status,
+            grabs::GrabStatus::Sent | grabs::GrabStatus::Downloading
+        )
+    }) && let Err(e) = crate::queue::refresh_progress_for_item(&state, item_uuid).await
+    {
+        tracing::debug!(
+            target: "brarr_orchestrator::web",
+            item = %item_uuid,
+            error = %e,
+            "could not refresh download progress; rendering from the cache"
+        );
+    }
+
+    let views = episode_views(&episodes, &history, state.progress());
+    // Poll only while something is moving, and let the response decide —
+    // same server-driven cadence as `/queue`. A season with nothing in
+    // flight renders a plain wrapper and never asks again.
+    let poll_secs = views
+        .iter()
+        .any(|e| e.state_tone == "busy")
+        .then(|| crate::queue::LIVE_POLL_ACTIVE.as_secs());
+
     html(&LibrarySeasonPartial {
         item_id: id,
-        episodes: episode_views(&episodes, &history, state.progress()),
+        season_id: Some(season_id),
+        poll_secs,
+        episodes: views,
         oob: None,
         // A plain expand changes nothing, so the hero stays as it is.
         item_status: None,
@@ -1848,6 +1883,10 @@ async fn library_season_monitor(
 
     html(&LibrarySeasonPartial {
         item_id: id,
+        // A toggle re-renders the whole season body, so it carries the
+        // wrapper — and the poll with it, if something is in flight.
+        season_id: Some(season_id.clone()),
+        poll_secs: None,
         episodes: episode_views(&episodes, &history, state.progress()),
         oob: Some(SeasonMarkView {
             season_id,
@@ -1889,6 +1928,9 @@ async fn library_episode_monitor(
     let history = grabs::for_item(state.pool(), item_uuid).await?;
     html(&LibrarySeasonPartial {
         item_id: id,
+        // One row, swapped straight into `#ep-{id}`: no wrapper.
+        season_id: None,
+        poll_secs: None,
         episodes: episode_views(&[updated], &history, state.progress()),
         oob: None,
         // One episode moves the denominator too.

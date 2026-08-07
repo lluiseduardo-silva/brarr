@@ -471,8 +471,44 @@ async fn the_interactive_search_left_the_header_for_the_rows() {
         "the season needs its own search: {page}"
     );
     // Still one target, because the results table is wide and two of
-    // them on screen at once would help nobody.
-    assert!(page.contains(r#"id="interactive-results""#));
+    // them on screen at once would help nobody — it is the house modal
+    // slot now, not a loose div under the hero.
+    assert!(page.contains(r##"hx-target="#modal-target""##));
+}
+
+/// The results open in a dialog the operator can actually dismiss.
+///
+/// They used to land in a loose `<div>` under the hero, and once filled
+/// there was no way to close it — the only exit was navigating to
+/// another screen and back.
+#[tokio::test]
+async fn the_interactive_results_open_in_a_dismissable_dialog() {
+    let (addr, state) = spawn().await;
+    let item = seed_series(&state).await;
+
+    let page = get(addr, &format!("/library/{item}")).await;
+    assert!(
+        !page.contains(r#"id="interactive-results""#),
+        "the loose div must be gone: {page}"
+    );
+    // `r##` because the literal itself contains `"#`, which would close
+    // a single-hash raw string.
+    assert!(
+        page.contains(r##"hx-target="#modal-target""##),
+        "the magnifier must open the house modal slot: {page}"
+    );
+
+    let results = get(addr, &format!("/library/{item}/interactive?season=1")).await;
+    assert!(results.contains("<dialog"), "got: {results}");
+    assert!(results.contains(r#"id="interactive-dialog""#));
+    // Two ways out, and neither is a nested `<form method="dialog">` —
+    // the parser drops that and it becomes a submit of the outer form.
+    assert_eq!(
+        results.matches("interactive-dialog').close()").count(),
+        2,
+        "an X in the header and a Fechar in the footer: {results}"
+    );
+    assert!(!results.contains(r#"method="dialog""#));
 }
 
 /// Season 0 gets the same buttons as any other season.
@@ -714,6 +750,70 @@ async fn an_episode_row_shows_the_cached_download_percentage() {
     assert!(
         after.contains(r#"style="width:42%""#),
         "and so must the bar: {after}"
+    );
+}
+
+/// The rows re-request themselves while something is downloading, and
+/// stop when nothing is. `/queue` polls the same way, and the operator
+/// noticed the detail screen lagging behind it.
+#[tokio::test]
+async fn the_episode_rows_poll_only_while_something_is_downloading() {
+    let (addr, state) = spawn().await;
+    let item = seed_series(&state).await;
+    let episodes = library::episodes(state.pool(), item).await.unwrap();
+    let ep = episodes
+        .iter()
+        .find(|e| e.season_number == 1 && e.episode_number == 1)
+        .unwrap();
+    let seasons = library::seasons(state.pool(), item).await.unwrap();
+    let first = seasons.iter().find(|s| s.season_number == 1).unwrap();
+    let url = format!("/library/{item}/season/{}", first.id);
+
+    // Nothing in flight: a plain wrapper, no trigger. Polling a static
+    // list of episodes would be pure noise.
+    let idle = get(addr, &url).await;
+    assert!(idle.contains(&format!(r#"id="season-rows-{}""#, first.id)));
+    assert!(
+        !idle.contains("hx-trigger"),
+        "a settled season must not ask again: {idle}"
+    );
+
+    in_flight(&state, item, ep.id, ep.season_number).await;
+
+    let busy = get(addr, &url).await;
+    let active = brarr_orchestrator::queue::LIVE_POLL_ACTIVE.as_secs();
+    assert!(
+        busy.contains(&format!(r#"hx-trigger="every {active}s""#)),
+        "a downloading episode must keep the rows fresh: {busy}"
+    );
+    assert!(busy.contains(&format!("hx-get=\"/library/{item}/season/{}\"", first.id)));
+}
+
+/// A single-row response must not carry the wrapper: it is swapped
+/// straight into `#ep-{id}`, so wrapping would nest a second
+/// `season-rows-…` inside the list and duplicate its id.
+#[tokio::test]
+async fn an_episode_toggle_answers_with_the_row_and_no_wrapper() {
+    let (addr, state) = spawn().await;
+    let item = seed_series(&state).await;
+    let episodes = library::episodes(state.pool(), item).await.unwrap();
+    let ep = &episodes[0];
+
+    let body = reqwest::Client::new()
+        .post(format!(
+            "http://{addr}/library/{item}/episode/{}/monitor",
+            ep.id
+        ))
+        .send()
+        .await
+        .expect("send")
+        .text()
+        .await
+        .unwrap();
+    assert!(body.contains(&format!(r#"id="ep-{}""#, ep.id)));
+    assert!(
+        !body.contains("season-rows-"),
+        "one row is not a season body: {body}"
     );
 }
 
