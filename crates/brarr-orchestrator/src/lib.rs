@@ -51,6 +51,7 @@
 )]
 
 pub mod adopt;
+pub mod arr_import;
 pub mod auth;
 pub mod db;
 pub mod deliver;
