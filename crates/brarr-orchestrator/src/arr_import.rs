@@ -109,12 +109,14 @@ pub struct ArrTitle {
 }
 
 /// One file the \*arr already matched to a target.
+///
+/// Deliberately without the size the \*arr reports. brarr stats the file
+/// itself once translated, and a second number nothing reads is a number
+/// free to disagree with the disk.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArrFileRef {
     /// Absolute path in the \*arr's namespace.
     pub path: String,
-    /// Size in bytes, as the \*arr recorded it.
-    pub size: u64,
     /// `None` for a movie, `Some((season, episode))` for an episode.
     pub episode: Option<(i32, i32)>,
 }
@@ -150,7 +152,6 @@ fn movie_to_title(movie: &ArrMovie) -> ArrTitle {
             .filter(|f| !f.path.is_empty())
             .map(|f| ArrFileRef {
                 path: f.path.clone(),
-                size: f.size,
                 episode: None,
             })
             .collect(),
@@ -202,7 +203,6 @@ fn join_episode_files(episodes: &[ArrEpisode], files: &[ArrFile]) -> Vec<ArrFile
             let file = by_id.get(&e.episode_file_id)?;
             (!file.path.is_empty()).then(|| ArrFileRef {
                 path: file.path.clone(),
-                size: file.size,
                 episode: Some((e.season_number, e.episode_number)),
             })
         })
@@ -1187,10 +1187,10 @@ async fn run_cycle(state: &AppState) {
             "passive sweep complete"
         ),
         Ok(_) => {
-            debug!(target: "brarr_orchestrator::arr_import", "passive sweep found nothing new")
+            debug!(target: "brarr_orchestrator::arr_import", "passive sweep found nothing new");
         }
         Err(e) => {
-            warn!(target: "brarr_orchestrator::arr_import", error = %e, "passive sweep failed")
+            warn!(target: "brarr_orchestrator::arr_import", error = %e, "passive sweep failed");
         }
     }
 }
@@ -1266,19 +1266,25 @@ mod tests {
     }
 
     /// The whole reason to import from Sonarr: it already decided which
-    /// file is which episode. The file name here carries an absolute
-    /// number — 1 069 — that no `SxxEyy` parser reads, and the pairing
-    /// still lands on S05E14.
+    /// file is which episode.
+    ///
+    /// Taken verbatim from the operator's `sonarr-animes` on 2026-08-07 —
+    /// 224 files, 224 paired, not one `SxxEyy` marker among them. A name
+    /// like this is what `adopt::parse_marker` refuses (correctly: it
+    /// would have to guess), and what Sonarr answers without guessing.
     #[test]
     fn sonarr_pairs_an_absolute_numbered_file_with_its_episode() {
-        let files = vec![file(7, "/data/Animes/One Piece/One Piece - 1069.mkv")];
-        let episodes = vec![episode(90, 5, 14, 7)];
-        let paired = join_episode_files(&episodes, &files);
+        const PATH: &str = "/data/Animes/Yu-Gi-Oh! Duel Monsters/Season 01/\
+             Yu-Gi-Oh! Duel Monsters - 001 - O Terrivel Blue-Eyes White Dragon.mkv";
+        let paired = join_episode_files(&[episode(1, 1, 1, 7)], &[file(7, PATH)]);
         assert_eq!(paired.len(), 1);
-        assert_eq!(paired[0].episode, Some((5, 14)));
-        assert_eq!(
-            paired[0].path,
-            "/data/Animes/One Piece/One Piece - 1069.mkv"
+        assert_eq!(paired[0].episode, Some((1, 1)));
+        assert_eq!(paired[0].path, PATH);
+        // The name brarr would have had to read on its own.
+        assert!(
+            crate::adopt::parse_marker(PATH).is_err(),
+            "if a marker parser could read this, the *arr import would be a convenience \
+             rather than the only way to get these 545 files right"
         );
     }
 
@@ -1518,7 +1524,6 @@ mod tests {
         }];
         let files = vec![ArrFileRef {
             path: "/data/Series/The Boys - S01E01.mkv".to_owned(),
-            size: 1,
             episode: Some((1, 1)),
         }];
 
@@ -1551,7 +1556,6 @@ mod tests {
         let item = seed_series(&pool).await;
         let files = vec![ArrFileRef {
             path: "/data/Series/The Boys - S01E01.mkv".to_owned(),
-            size: 1,
             episode: Some((1, 1)),
         }];
         let counts = adopt_files(&pool, &item, &files, &[]).await.unwrap();
@@ -1583,7 +1587,6 @@ mod tests {
         // TMDB has two episodes; Sonarr claims a ninth.
         let files = vec![ArrFileRef {
             path: "/data/Series/x.mkv".to_owned(),
-            size: 1,
             episode: Some((1, 9)),
         }];
         let counts = adopt_files(&pool, &item, &files, &rules).await.unwrap();
