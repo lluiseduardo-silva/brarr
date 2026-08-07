@@ -84,7 +84,11 @@
 {% else %}
 {# Card grid — shares the release_card partial with releases.html so
    visual style stays identical across both pages. #}
-<div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+{# Terceira coluna acima de 1440px: o card é 620x280 fixo com clip por
+   desenho, então largura extra tem de virar coluna. A duas colunas num
+   casco de 1856px cada card viraria ~920px e o slot clipado perderia a
+   razão de existir. #}
+<div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
 {% for d in decisions %}
     {% include "partials/release_card.html" %}
 {% endfor %}

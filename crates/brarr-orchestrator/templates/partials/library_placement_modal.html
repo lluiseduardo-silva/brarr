@@ -1,0 +1,60 @@
+{# "Onde e como" deste título, atrás da engrenagem.
+
+   Eram dois `<select>` soltos na fileira de controles, cada um com
+   `onchange="this.form.submit()"`. Funcionavam, mas um `<select>` no
+   meio de uma fileira de quadrados de 36px quebra o alinhamento, e a
+   navegação de página cheia a cada troca não dava retorno nenhum.
+
+   Continua sendo o mesmo `POST /library/{id}/profile` de antes — um
+   form comum, não htmx: o handler responde `303` e a navegação fecha o
+   diálogo junto. Trocar perfil ou pasta raiz é ação rara; não vale uma
+   rota nova só para evitar um repaint.
+
+   Cancelar é `type="button"` + `close()`. `<form method="dialog">`
+   aninhado é removido pelo parser e vira submit do form de fora. #}
+<dialog id="placement-dialog" class="w-[520px] max-w-full rounded-xl bg-bg-surface border border-border-default p-0">
+    <form method="post" action="/library/{{ item_id }}/profile">
+        <div class="px-6 py-5 border-b border-border-default">
+            <h2 class="text-lg font-semibold text-fg-primary">Perfil e pasta raiz</h2>
+            <p class="text-sm text-fg-secondary mt-1 truncate" title="{{ item_title }}">{{ item_title }}</p>
+        </div>
+
+        <div class="px-6 py-5 flex flex-col gap-5">
+            <div>
+                <label for="placement-profile" class="block text-sm font-medium text-fg-primary mb-1.5">Perfil de qualidade</label>
+                <select id="placement-profile" name="profile_id"
+                        class="w-full h-9 px-3 rounded-md bg-bg-canvas border border-border-strong text-sm text-fg-primary focus:outline-none focus:border-accent-solid">
+                    <option value="" {% if profile_id.is_empty() %}selected{% endif %}>Sem perfil</option>
+                    {% for p in profiles %}
+                    <option value="{{ p.0 }}" {% if profile_id == p.0 %}selected{% endif %}>{{ p.1 }}</option>
+                    {% endfor %}
+                </select>
+                <p class="text-xs text-fg-muted mt-1.5">
+                    Decide o corte: só release que passa do threshold do perfil é entregue ao cliente.
+                    Sem perfil, vale o padrão de {{ crate::scan::DEFAULT_PUSH_THRESHOLD }}.
+                </p>
+            </div>
+
+            {% if !root_folders.is_empty() %}
+            <div>
+                <label for="placement-root" class="block text-sm font-medium text-fg-primary mb-1.5">Pasta raiz</label>
+                <select id="placement-root" name="root_folder"
+                        class="w-full h-9 px-3 rounded-md bg-bg-canvas border border-border-strong text-sm text-fg-primary focus:outline-none focus:border-accent-solid">
+                    <option value="" {% if root_folder.is_empty() %}selected{% endif %}>Pasta padrão do tipo</option>
+                    {% for f in root_folders %}
+                    <option value="{{ f.0 }}" {% if root_folder == f.0 %}selected{% endif %}>{{ f.1 }}</option>
+                    {% endfor %}
+                </select>
+                <p class="text-xs text-fg-muted mt-1.5">Onde o importador vai colocar os arquivos deste título.</p>
+            </div>
+            {% endif %}
+        </div>
+
+        <div class="px-6 py-4 border-t border-border-default flex items-center justify-end gap-2">
+            <button type="button"
+                    onclick="document.getElementById('placement-dialog').close()"
+                    class="btn btn-md btn-secondary">Cancelar</button>
+            <button type="submit" class="btn btn-md btn-primary">Salvar</button>
+        </div>
+    </form>
+</dialog>

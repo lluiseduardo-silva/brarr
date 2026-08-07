@@ -69,7 +69,7 @@
             </div>
 
             {% if let Some(ov) = item.overview %}
-            <p class="text-sm text-fg-secondary mt-3 leading-relaxed">{{ ov }}</p>
+            <p class="prose-cap text-sm text-fg-secondary mt-3 leading-relaxed">{{ ov }}</p>
             {% else %}
             <p class="text-sm italic text-fg-muted mt-3">Sem sinopse no TMDB — nem em pt-BR, nem em en-US.</p>
             {% endif %}
@@ -85,106 +85,100 @@
                 {% endif %}
             </div>
 
-            {# Controls. The profile picker submits on change so there is
-               no save button to forget. #}
-            <div class="flex items-center gap-2.5 flex-wrap mt-4">
+            {# Controls — uma fileira de ícones, com o rótulo no `title`.
+
+               Eram duas fileiras de botões de texto que empurravam a
+               árvore de temporadas (a razão de existir desta página)
+               para baixo da dobra. Ícone + tooltip cabe numa linha só.
+
+               Os dois `<select>` (perfil e pasta raiz) viraram a
+               engrenagem: um `<select>` no meio de uma fileira de
+               quadrados de 36px quebra o alinhamento, e "onde e como"
+               é configuração, não ação do dia a dia.
+
+               A busca interativa saiu daqui inteira — virou lupa por
+               temporada e por episódio, lá embaixo, onde o operador já
+               está olhando quando decide buscar. #}
+            <div class="flex items-center gap-2 flex-wrap mt-4">
                 <button hx-post="/library/{{ item.id }}/monitor"
-                        class="btn btn-md {% if item.monitored %}btn-secondary{% else %}btn-toggle-on{% endif %}">
-                    {% if item.monitored %}pausar monitoramento{% else %}voltar a monitorar{% endif %}
+                        title="{% if item.monitored %}Monitorando — clique para pausar o título inteiro{% else %}Pausado — clique para voltar a monitorar{% endif %}"
+                        aria-label="{% if item.monitored %}Pausar monitoramento{% else %}Voltar a monitorar{% endif %}"
+                        class="btn btn-md btn-icon {% if item.monitored %}btn-toggle-on{% else %}btn-secondary{% endif %}">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="{% if item.monitored %}currentColor{% else %}none{% endif %}" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/>
+                    </svg>
                 </button>
 
-                {# Um form só: os dois selects são "onde e como" deste
-                   item, e o handler grava os dois de uma vez. #}
-                <form method="post" action="/library/{{ item.id }}/profile" class="contents">
-                    <select name="profile_id" onchange="this.form.submit()"
-                            class="h-9 px-3 rounded-md bg-bg-surface border border-accent-solid text-sm text-fg-primary focus:outline-none">
-                        <option value="" {% if item.profile_id.is_empty() %}selected{% endif %}>Sem perfil</option>
-                        {% for p in profiles %}
-                        <option value="{{ p.0 }}" {% if item.profile_id == p.0 %}selected{% endif %}>{{ p.1 }}</option>
-                        {% endfor %}
-                    </select>
-                    {% if !root_folders.is_empty() %}
-                    <select name="root_folder" onchange="this.form.submit()"
-                            title="Onde o import vai colocar os arquivos deste título"
-                            class="h-9 px-3 rounded-md bg-bg-surface border border-border-strong text-sm text-fg-primary focus:outline-none">
-                        <option value="" {% if root_folder.is_empty() %}selected{% endif %}>Pasta padrão do tipo</option>
-                        {% for f in root_folders %}
-                        <option value="{{ f.0 }}" {% if root_folder == f.0 %}selected{% endif %}>{{ f.1 }}</option>
-                        {% endfor %}
-                    </select>
-                    {% endif %}
-                </form>
-
                 {# Same sweep the scheduler runs, minus the per-cycle cap
-                   — the operator asked for this title specifically. The
-                   verdict lands in the badge next to it. #}
+                   — the operator asked for this title specifically. O
+                   veredito chega no badge ao lado, que desde a v0.8.0 se
+                   atualiza sozinho até a varredura terminar. #}
                 <button hx-post="/library/{{ item.id }}/scan"
                         hx-target="#scan-{{ item.id }}"
                         hx-swap="outerHTML"
                         hx-indicator="#scan-{{ item.id }}"
-                        title="Busca em todos os providers, aplica o perfil e entrega ao cliente de download"
-                        class="btn btn-md btn-toggle-on">
-                    buscar agora
+                        title="Buscar agora — varre todos os providers, aplica o perfil e entrega ao cliente de download"
+                        aria-label="Buscar agora"
+                        class="btn btn-md btn-icon btn-primary">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/>
+                    </svg>
                 </button>
-                <span id="scan-{{ item.id }}" class="text-xs italic text-fg-muted"></span>
 
-                {# Same dialog as the library-wide button, opened pinned
-                   to this title: every row comes assigned to it, so the
-                   only question left per file is the episode. #}
                 <button hx-get="/library/import?item={{ item.id }}"
                         hx-target="#modal-target"
                         hx-swap="innerHTML"
-                        title="Procura arquivos deste título no disco e mostra o que seria importado antes de gravar"
-                        class="btn btn-md btn-secondary">
-                    importar do disco
+                        title="Importar do disco — procura arquivos deste título e mostra o que seria importado antes de gravar"
+                        aria-label="Importar do disco"
+                        class="btn btn-md btn-icon btn-secondary">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M3 15v4a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/>
+                    </svg>
                 </button>
 
-                {# The acquisition history lives in a dialog now. Inline
-                   it pushed the season tree — the thing this page is for
-                   — below 800 release names on a series the *arr import
-                   brought in. #}
                 <button hx-get="/library/{{ item.id }}/grabs"
                         hx-target="#modal-target"
                         hx-swap="innerHTML"
-                        title="Histórico de aquisições deste título"
-                        class="btn btn-md btn-secondary">
-                    grabs ({{ grab_count }})
+                        title="Histórico de aquisições deste título ({{ grab_count }})"
+                        aria-label="Histórico de aquisições ({{ grab_count }})"
+                        class="btn btn-md btn-icon btn-secondary">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M3 3v5h5"/><path d="M3.05 13A9 9 0 1 0 6 5.3L3 8"/><path d="M12 7v5l4 2"/>
+                    </svg>
+                    {% if grab_count > 0 %}
+                    {# O número é o que faz clicar. Perdê-lo ao virar
+                       ícone seria trocar informação por estética. #}
+                    <span class="btn-count">{{ grab_count }}</span>
+                    {% endif %}
                 </button>
 
-                <div class="flex-1"></div>
-
-                <form hx-get="/library/{{ item.id }}/interactive"
-                      hx-target="#interactive-results"
-                      hx-swap="outerHTML"
-                      hx-indicator="#interactive-results"
-                      class="flex items-center gap-2">
-                    {% if item.is_series %}
-                    {# Temporada obrigatória para série: o eixo TVDB é o
-                       único que entende temporada, e sem ela a busca
-                       volta a série inteira. Episódio em branco = pack. #}
-                    <select name="season"
-                            class="h-9 px-3 rounded-md bg-bg-canvas border border-border-strong text-sm text-fg-primary focus:outline-none focus:border-accent-solid">
-                        {# Temporada 0 é o balde de especiais do TMDB, e o
-                           varredor a exclui em todo lugar — oferecê-la
-                           aqui seria a única porta para ela. #}
-                        {% for s in seasons %}{% if s.number > 0 %}
-                        <option value="{{ s.number }}">Temporada {{ s.number }}</option>
-                        {% endif %}{% endfor %}
-                    </select>
-                    <input name="episode" type="number" min="1" placeholder="ep."
-                           title="Em branco busca o pack da temporada inteira"
-                           class="w-20 h-9 px-3 rounded-md bg-bg-canvas border border-border-strong text-sm text-fg-primary placeholder:text-fg-muted focus:outline-none focus:border-accent-solid">
-                    {% endif %}
-                    <button type="submit" class="btn btn-md btn-secondary">
-                        busca interativa
-                    </button>
-                </form>
-
                 <form method="post" action="/library/{{ item.id }}/refresh" class="contents">
-                    <button type="submit" class="btn btn-md btn-secondary">
-                        atualizar metadados
+                    <button type="submit"
+                            title="Atualizar metadados no TMDB — pôster, sinopse, datas e a árvore de temporadas"
+                            aria-label="Atualizar metadados"
+                            class="btn btn-md btn-icon btn-secondary">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M21 2v6h-6"/><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M3 22v-6h6"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/>
+                        </svg>
                     </button>
                 </form>
+
+                <button hx-get="/library/{{ item.id }}/placement"
+                        hx-target="#modal-target"
+                        hx-swap="innerHTML"
+                        title="Perfil de qualidade e pasta raiz deste título"
+                        aria-label="Configurar perfil e pasta raiz"
+                        class="btn btn-md btn-icon btn-ghost">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <circle cx="12" cy="12" r="3"/>
+                        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6h.09A1.65 1.65 0 0 0 10 3.09V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9v.09a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+                    </svg>
+                </button>
+
+                {# O alvo do badge do scan. Fica na fileira, não abaixo
+                   dela, para o veredito nascer ao lado do botão que o
+                   pediu. #}
+                <span id="scan-{{ item.id }}" class="text-xs italic text-fg-muted"></span>
             </div>
         </div>
     </div>
@@ -256,6 +250,37 @@
             </button>
             <span class="text-sm font-medium text-fg-primary">{{ s.label }}</span>
             <span class="text-xs text-fg-muted">{{ s.episode_count }} episódios</span>
+
+            {# Lupa da temporada — busca o pack inteiro. Sem `episode`, que
+               é o que `library_interactive` já entende como pack.
+
+               A temporada 0 (especiais do TMDB) não ganha lupa: o
+               varredor a exclui em todo lugar, e o formulário antigo
+               também a omitia do select. Oferecê-la aqui seria a única
+               porta para ela.
+
+               `preventDefault` impede o `<details>` de abrir/fechar, e
+               `stopPropagation` impede o `hx-get` do `<summary>` (o
+               lazy-load dos episódios) de disparar junto. Nenhum dos dois
+               atrapalha o htmx *deste* botão: o listener dele está neste
+               elemento, e parar a propagação não cancela outro listener
+               do mesmo nó. #}
+            {% if s.number > 0 %}
+            <button type="button"
+                    onclick="event.preventDefault(); event.stopPropagation();"
+                    hx-get="/library/{{ item.id }}/interactive?season={{ s.number }}"
+                    hx-target="#interactive-results"
+                    hx-swap="outerHTML"
+                    hx-indicator="#interactive-results"
+                    title="Buscar o pack da temporada {{ s.number }}"
+                    aria-label="Buscar o pack da temporada {{ s.number }}"
+                    class="btn btn-sm btn-icon btn-ghost shrink-0">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/>
+                </svg>
+            </button>
+            {% endif %}
+
             <div class="flex-1"></div>
             {# One element, so the toggle can replace the whole group
                out-of-band — the count, the bar and the chip all change

@@ -510,8 +510,28 @@ body, body * {
   color: var(--color-accent-fg);
 }
 
+/* Contador pendurado num botão de ícone — o histórico de grabs perdeu o
+   número ao virar ícone, e "16" é a informação que faz o operador
+   clicar. Fica no canto, sem alargar o quadrado. */
+.btn-count {
+  position: absolute;
+  top: -0.3rem;
+  right: -0.3rem;
+  min-width: 1.05rem;
+  height: 1.05rem;
+  padding-inline: 0.2rem;
+  border-radius: 9999px;
+  background-color: var(--color-accent-solid);
+  color: var(--color-accent-fg);
+  font-size: 0.625rem;
+  font-weight: 600;
+  line-height: 1.05rem;
+  text-align: center;
+  pointer-events: none;
+}
+
 /* Icon-only: square, no text metrics to balance. */
-.btn-icon { padding-inline: 0; width: 2.25rem; }
+.btn-icon { padding-inline: 0; width: 2.25rem; position: relative; }
 .btn-icon.btn-sm { width: 1.75rem; }
 
 /* --------------------------------------------------------------------
@@ -1201,6 +1221,35 @@ body, body * {
   :root:not([data-theme]) .dark\:block  { display: block; }
 }
 
+/* --------------------------------------------------------------------
+   O casco da página
+   -------------------------------------------------------------------- */
+
+/* A largura do app. Era `max-w-7xl` (80rem = 1280px) em duas linhas do
+   `base.html` — o nav e o `<main>` — e num monitor de 2560px isso
+   deixava metade da tela como margem morta.
+
+   Fluido com teto: cresce com a janela até 120rem (1920px) e para ali.
+   Sem teto nenhum, uma tabela de dez colunas num ultrawide vira uma
+   linha de leitura impossível; com o teto antigo, um monitor comum
+   desperdiçava um terço da tela.
+
+   Soltar isto sozinho não bastava: os grids tinham contagem de coluna
+   fixa até `lg` e nada acima, então mais largura só esticava as mesmas
+   três colunas. Ver os degraus `xl:`/`xxl:` no fim do arquivo. */
+.app-shell {
+  width: 100%;
+  margin-inline: auto;
+  max-width: 120rem;
+}
+
+/* Teto de leitura, para o texto corrido que ganhou largura demais junto
+   com o resto. Uma sinopse de 1856px de largura é uma linha que o olho
+   perde no retorno; a medida confortável é 65-75 caracteres. */
+.prose-cap {
+  max-width: 70ch;
+}
+
 /* --- responsive (one real breakpoint: md; lg only in the profile editor) --- */
 @media (width >= 48rem) {
   .md\:w-auto { width: auto; }
@@ -1225,4 +1274,29 @@ body, body * {
   .lg\:top-4 { top: 1rem; }
   .lg\:grid-cols-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
   .lg\:grid-cols-\[1fr_360px\] { grid-template-columns: 1fr 360px; }
+}
+
+/* --- os degraus largos ---
+
+   Antes destes o app não tinha nenhum breakpoint acima de 1024px: uma
+   página renderizava idêntica a 1280 e a 5120. Soltar o teto do
+   `.app-shell` sem eles só alargaria as mesmas colunas.
+
+   O nome **não pode começar com dígito**. `tests/css_coverage.rs` exige
+   que o primeiro caractere de uma classe usada seja letra, `!` ou `-`
+   (`is_utility_token`), então um `2xl:grid-cols-5` no template seria
+   descartado sem ser checado; e do lado do CSS a forma válida
+   `.\32 xl\:grid-cols-5` é lida pelo parser como a classe `32`. Um
+   degrau `2xl:` subiria inteiramente inerte com a suíte verde.
+
+   Os pontos de corte saem da largura do card, não de um número redondo:
+   o card da biblioteca fica confortável por volta de 340-400px, então
+   4 colunas só a partir de 1440 e 5 só a partir de 1792. */
+@media (width >= 90rem) {
+  .xl\:grid-cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .xl\:grid-cols-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+}
+
+@media (width >= 112rem) {
+  .xxl\:grid-cols-5 { grid-template-columns: repeat(5, minmax(0, 1fr)); }
 }

@@ -160,7 +160,10 @@
 
 {% else %}
 {# ---- grid view ---- #}
-<div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+{# A contagem de coluna sobe com a janela: 3 até 1440, 4 até 1792, 5
+   acima disso. Os cortes saem da largura confortável do card (~340-400px
+   para o pôster de 100px mais o texto), não de um número redondo. #}
+<div class="grid grid-cols-1 md:grid-cols-3 xl:grid-cols-4 xxl:grid-cols-5 gap-4">
 {% for it in items %}
 {# `relative` anchors the status spine down the left edge — the
    indicator you can read across a whole grid without focusing on any one

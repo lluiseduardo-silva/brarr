@@ -1522,6 +1522,13 @@ pub struct EpisodeView {
     pub id: String,
     /// `S04E07`.
     pub code: String,
+    /// Season this episode belongs to. Carried separately from
+    /// [`Self::code`] because the per-episode search button builds a
+    /// query string, and parsing `S04E07` back into two numbers to
+    /// rebuild what we already had would be a round trip for nothing.
+    pub season_number: i32,
+    /// Episode number within the season.
+    pub episode_number: i32,
     /// Episode title, or `—`.
     pub title: String,
     /// `dd/mm/aaaa`, or empty when unaired.
@@ -1540,6 +1547,29 @@ pub struct EpisodeView {
     pub detail: String,
     /// Just the file name from [`Self::detail`], for the inline hint.
     pub file_name: String,
+}
+
+/// "Where and how" for one title, in a dialog.
+///
+/// The two `<select>`s used to sit loose in the detail page's control
+/// row. They moved behind a gear when that row became icons — a select
+/// among 36px squares breaks the alignment, and placement is
+/// configuration rather than a daily action.
+#[derive(Debug, Template)]
+#[template(path = "partials/library_placement_modal.html")]
+pub struct LibraryPlacementModalPartial {
+    /// Stringified item UUID, for the form action.
+    pub item_id: String,
+    /// Title, for the dialog subheading.
+    pub item_title: String,
+    /// `(id, name)` for every quality profile.
+    pub profiles: Vec<(String, String)>,
+    /// Currently attached profile id, or empty.
+    pub profile_id: String,
+    /// `(path, label)` for every root folder serving this media type.
+    pub root_folders: Vec<(String, String)>,
+    /// Currently chosen root folder, or empty for "the type's default".
+    pub root_folder: String,
 }
 
 /// The acquisition history, in a dialog.

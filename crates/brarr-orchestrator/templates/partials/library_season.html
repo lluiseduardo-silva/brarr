@@ -102,6 +102,28 @@
     <span class="shrink-0 w-24 text-right text-[11px] font-mono text-fg-muted">
         {%- if e.air_date.is_empty() %}—{% else %}{{ e.air_date }}{% endif -%}
     </span>
+
+    {# Lupa do episódio. O alvo é o mesmo `#interactive-results` da lupa
+       da temporada — um alvo só, porque a tabela de resultados é larga e
+       duas delas na tela ao mesmo tempo não ajudariam ninguém.
+
+       Sem `preventDefault` aqui: a linha do episódio não está dentro de
+       um `<summary>`, então não há toggle nativo para suprimir. #}
+    <button type="button"
+            {# `&amp;` e não `&` cru: texto literal do template não passa
+               pelo escape do Askama, e um `&` solto em atributo é HTML
+               inválido. O DOM devolve `&` ao htmx de qualquer forma. #}
+            hx-get="/library/{{ item_id }}/interactive?season={{ e.season_number }}&amp;episode={{ e.episode_number }}"
+            hx-target="#interactive-results"
+            hx-swap="outerHTML"
+            hx-indicator="#interactive-results"
+            title="Buscar {{ e.code }} nos providers"
+            aria-label="Buscar {{ e.code }}"
+            class="btn btn-sm btn-icon btn-ghost shrink-0">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/>
+        </svg>
+    </button>
 </div>
 {% endfor %}
 {% endif %}

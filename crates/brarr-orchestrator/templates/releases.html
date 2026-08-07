@@ -61,7 +61,7 @@
 {# Card grid — 2 columns on md+ (cards 280px tall each). No more
    horizontal scroll: wide release names truncate inside each card
    instead of pushing the table out of the viewport. #}
-<div class="grid grid-cols-1 md:grid-cols-2 gap-4" data-releases-grid>
+<div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4" data-releases-grid>
 {% for d in decisions %}
     {% include "partials/release_card.html" %}
 {% endfor %}

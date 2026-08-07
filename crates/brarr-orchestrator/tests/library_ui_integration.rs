@@ -399,6 +399,99 @@ async fn a_season_toggle_answers_with_every_episode_it_changed() {
     );
 }
 
+// ---------- the control row and the per-row search ----------
+
+/// The interactive search left the header. It used to be a form with a
+/// season `<select>` and an episode input sitting above the tree; the
+/// search now happens where the operator is already looking.
+#[tokio::test]
+async fn the_interactive_search_left_the_header_for_the_rows() {
+    let (addr, state) = spawn().await;
+    let item = seed_series(&state).await;
+
+    let page = get(addr, &format!("/library/{item}")).await;
+    assert!(
+        !page.contains("busca interativa"),
+        "the header form must be gone: {page}"
+    );
+    assert!(
+        !page.contains(r#"placeholder="ep.""#),
+        "and so must its episode input: {page}"
+    );
+    // Season 1 gets a magnifier that searches the whole pack — no
+    // `episode`, which is what the handler already reads as a pack.
+    assert!(
+        page.contains(&format!("/library/{item}/interactive?season=1")),
+        "the season needs its own search: {page}"
+    );
+    // Still one target, because the results table is wide and two of
+    // them on screen at once would help nobody.
+    assert!(page.contains(r#"id="interactive-results""#));
+}
+
+/// Season 0 is TMDB's specials bucket and the scanner skips it
+/// everywhere. The old picker omitted it; the magnifier must too, or it
+/// becomes the single door into a season nothing else chases.
+#[tokio::test]
+async fn the_specials_season_gets_no_search_button() {
+    let (addr, state) = spawn().await;
+    let item = seed_series(&state).await;
+
+    let page = get(addr, &format!("/library/{item}")).await;
+    assert!(
+        !page.contains(&format!("/library/{item}/interactive?season=0")),
+        "season 0 must not offer a search: {page}"
+    );
+}
+
+/// Each episode row carries its own magnifier, addressed by season and
+/// episode number rather than by parsing `S01E02` back apart.
+#[tokio::test]
+async fn every_episode_row_can_search_itself() {
+    let (addr, state) = spawn().await;
+    let item = seed_series(&state).await;
+    let seasons = library::seasons(state.pool(), item).await.unwrap();
+    let first = seasons.iter().find(|s| s.season_number == 1).unwrap();
+
+    let rows = get(addr, &format!("/library/{item}/season/{}", first.id)).await;
+    assert!(
+        rows.contains(&format!(
+            "/library/{item}/interactive?season=1&amp;episode=1"
+        )),
+        "the row must search exactly its own episode: {rows}"
+    );
+}
+
+/// The two `<select>`s moved behind the gear. They used to submit the
+/// whole page on `change`, from inside a row of 36px squares.
+#[tokio::test]
+async fn placement_moved_into_a_dialog() {
+    let (addr, state) = spawn().await;
+    let item = seed_series(&state).await;
+
+    let page = get(addr, &format!("/library/{item}")).await;
+    assert!(
+        !page.contains("this.form.submit()"),
+        "no more submit-on-change in the control row: {page}"
+    );
+    assert!(
+        page.contains(&format!("/library/{item}/placement")),
+        "the gear opens the dialog: {page}"
+    );
+
+    let dialog = get(addr, &format!("/library/{item}/placement")).await;
+    assert!(dialog.contains("<dialog"));
+    assert!(dialog.contains(r#"name="profile_id""#));
+    // Posts to the handler that already existed — this route only renders.
+    assert!(dialog.contains(&format!(r#"action="/library/{item}/profile""#)));
+    // Cancel is a button, never a nested `<form method="dialog">`: the
+    // parser drops the inner tag and it becomes a submit of the outer.
+    assert!(
+        !dialog.contains(r#"method="dialog""#),
+        "cancel must not be a nested dialog form: {dialog}"
+    );
+}
+
 /// The acquisition history moved into a dialog. Inline, a series the
 /// *arr import brought in pushed the season tree below 800 release
 /// names.
@@ -410,9 +503,17 @@ async fn the_grab_history_is_a_dialog_and_not_the_page() {
     adopt(&state, item, episodes[0].id, "/midias/one.mkv").await;
 
     let page = get(addr, &format!("/library/{item}")).await;
+    // The button became an icon, so the count moved into the corner
+    // badge and the tooltip. Losing the number was the one thing that
+    // would have made the icon row a downgrade — it is what makes the
+    // operator click.
     assert!(
-        page.contains("grabs (1)"),
+        page.contains(r#"<span class="btn-count">1</span>"#),
         "the count stays on the page: {page}"
+    );
+    assert!(
+        page.contains("Histórico de aquisições deste título (1)"),
+        "and it is in the tooltip too: {page}"
     );
     assert!(
         !page.contains("/midias/one.mkv"),

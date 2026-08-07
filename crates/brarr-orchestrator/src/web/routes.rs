@@ -115,6 +115,7 @@ pub fn router(state: AppState, static_dir: &std::path::Path) -> Router {
         .merge(import_routes())
         .route("/library/{id}/monitor", post(library_toggle_monitor))
         .route("/library/{id}/profile", post(library_set_profile))
+        .route("/library/{id}/placement", get(library_placement))
         .route("/library/{id}/refresh", post(library_refresh))
         .route("/library/{id}/scan", post(library_scan_now))
         .route("/library/{id}/scan/status", get(library_scan_status))
@@ -1733,6 +1734,8 @@ fn episode_views(episodes: &[library::Episode], grabs: &[grabs::Grab]) -> Vec<Ep
             EpisodeView {
                 id: e.id.to_string(),
                 code: format!("S{:02}E{:02}", e.season_number, e.episode_number),
+                season_number: e.season_number,
+                episode_number: e.episode_number,
                 title: e.title.clone().unwrap_or_else(|| "—".to_owned()),
                 air_date: e.air_date.map_or_else(String::new, short_date),
                 monitored: e.monitored,
@@ -2276,6 +2279,35 @@ async fn library_scan_now(
         &format!("scan-{uuid}"),
         &badge,
     )))
+}
+
+/// `GET /library/{id}/placement` — the profile + root folder dialog.
+///
+/// Reads the same two lists the detail page reads; the form posts to the
+/// existing `/library/{id}/profile` handler, so this route only renders.
+async fn library_placement(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, AppError> {
+    let uuid = Uuid::parse_str(&id)
+        .map_err(|e| AppError::InvalidInput(format!("invalid library id: {e}")))?;
+    let item = library::get_by_id(state.pool(), uuid).await?;
+
+    let profiles = quality_profiles::list_all(state.pool())
+        .await?
+        .into_iter()
+        .map(|p| (p.id.to_string(), p.name))
+        .collect();
+    let root_folders = root_folder_options(&state, item.media_type).await?;
+
+    html(&crate::web::templates::LibraryPlacementModalPartial {
+        item_id: item.id.to_string(),
+        item_title: item.title,
+        profiles,
+        profile_id: item.profile_id.map(|p| p.to_string()).unwrap_or_default(),
+        root_folders,
+        root_folder: item.root_folder.unwrap_or_default(),
+    })
 }
 
 /// How often the badge asks whether its sweep has finished.

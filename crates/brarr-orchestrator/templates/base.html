@@ -57,7 +57,10 @@
        block so users don't see fake links to pages they cannot reach. #}
     {% block nav %}
     <nav class="bg-bg-surface border-b border-border-default">
-        <div class="max-w-7xl mx-auto px-8 h-16 flex items-center justify-between gap-8">
+        {# `app-shell` e não `max-w-7xl`: o nav e o `<main>` têm de andar
+           juntos, senão a barra fica visivelmente mais estreita que a
+           página embaixo dela. #}
+        <div class="app-shell px-8 h-16 flex items-center justify-between gap-8">
             {# Logo lockup + primary links. #}
             {# `min-w-0` + the scrollable list below keep a long nav from
                widening the page itself: without them the whole body
@@ -150,7 +153,7 @@
     {# Authenticated pages live inside `main`; the centred-card pages
        (login, 404) override `main` with their own layout. #}
     {% block main %}
-    <main class="flex-1 max-w-7xl w-full mx-auto px-8 py-8">
+    <main class="flex-1 app-shell px-8 py-8">
         {% block content %}{% endblock %}
     </main>
     {% endblock %}
