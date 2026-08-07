@@ -58,6 +58,10 @@ async fn seed_series(state: &AppState) -> Uuid {
         &NewLibraryItem {
             media_type: Some(MediaType::Tv),
             tmdb_id: 76_479,
+            // The episode search axis is TVDB, so a series without one
+            // can never be swept — the fixture carries it or the sweep
+            // tests would all exercise the "no axis" path instead.
+            tvdb_id: Some(355_567),
             title: "The Boys".to_owned(),
             year: Some(2019),
             ..NewLibraryItem::default()
@@ -176,6 +180,45 @@ async fn adopt(state: &AppState, item: Uuid, episode: Uuid, path: &str) {
     grabs::mark_imported(state.pool(), grab.id, path)
         .await
         .unwrap();
+}
+
+/// A grab reserved and left in flight — no file, no import. This is what
+/// makes an episode row render `ep-mark-busy`.
+async fn in_flight(state: &AppState, item: Uuid, episode: Uuid, season: i32) -> Uuid {
+    use brarr_orchestrator::db::grabs::{NewGrab, Protocol};
+    use brarr_orchestrator::db::providers::{self, NewProvider};
+
+    let provider = providers::insert(
+        state.pool(),
+        NewProvider {
+            name: "capybara",
+            base_url: &url::Url::parse("https://capybarabr.com/").unwrap(),
+            api_token: "tok",
+            kind: "unit3d",
+            plugin_path: None,
+        },
+    )
+    .await
+    .unwrap();
+    let grab = grabs::reserve(
+        state.pool(),
+        &NewGrab {
+            item_id: item,
+            episode_id: Some(episode),
+            season_number: Some(season),
+            decision_id: None,
+            provider_id: provider.id,
+            provider_name: "capybara",
+            release_id_remote: "abc",
+            release_name: "Show.S01E01.1080p.WEB-DL.PT-BR",
+            download_url: None,
+            protocol: Protocol::Torrent,
+        },
+    )
+    .await
+    .unwrap()
+    .expect("the barrier must let the first reservation through");
+    grab.id
 }
 
 async fn get(addr: SocketAddr, path: &str) -> String {
@@ -489,6 +532,143 @@ async fn placement_moved_into_a_dialog() {
     assert!(
         !dialog.contains(r#"method="dialog""#),
         "cancel must not be a nested dialog form: {dialog}"
+    );
+}
+
+// ---------- item 4: the sweep, pointed at one target ----------
+
+/// The lightning bolt is the automatic sweep, addressed at one episode.
+/// It sits beside the magnifier rather than replacing it: one shows what
+/// exists and lets the operator choose, the other decides.
+#[tokio::test]
+async fn every_episode_row_can_run_the_sweep_on_itself() {
+    let (addr, state) = spawn().await;
+    let item = seed_series(&state).await;
+    let seasons = library::seasons(state.pool(), item).await.unwrap();
+    let first = seasons.iter().find(|s| s.season_number == 1).unwrap();
+
+    let rows = get(addr, &format!("/library/{item}/season/{}", first.id)).await;
+    assert!(
+        rows.contains(&format!(
+            "/library/{item}/scan/target?season=1&amp;episode=1"
+        )),
+        "the row must sweep exactly its own episode: {rows}"
+    );
+    // Both buttons, both slots — the two are different actions.
+    assert!(rows.contains(&format!(
+        "/library/{item}/interactive?season=1&amp;episode=1"
+    )));
+    assert!(rows.contains(&format!(r#"id="scan-ep-{item}-1-1""#)));
+}
+
+/// A narrowed sweep respects monitoring — pausing is the operator's
+/// standing decision and a one-click shortcut must not overrule it. What
+/// it must not do is fail silently: the badge has to say *paused*, not
+/// "nada encontrado", because nothing was even searched.
+#[tokio::test]
+async fn sweeping_a_paused_episode_says_paused_rather_than_nothing_found() {
+    let (addr, state) = spawn().await;
+    let item = seed_series(&state).await;
+    let episodes = library::episodes(state.pool(), item).await.unwrap();
+    let ep = episodes
+        .iter()
+        .find(|e| e.season_number == 1 && e.episode_number == 1)
+        .unwrap();
+    library::set_episode_monitored(state.pool(), ep.id, false)
+        .await
+        .unwrap();
+
+    let body = reqwest::Client::new()
+        .post(format!(
+            "http://{addr}/library/{item}/scan/target?season=1&episode=1"
+        ))
+        .send()
+        .await
+        .expect("send")
+        .text()
+        .await
+        .unwrap();
+    assert!(body.contains("pausado"), "got: {body}");
+    assert!(
+        !body.contains("nada encontrado"),
+        "nothing was searched, so that label would be a lie: {body}"
+    );
+    // And it points at the escape hatch.
+    assert!(body.contains("lupa"), "got: {body}");
+}
+
+/// A movie has no seasons, so a narrowed sweep of one is a
+/// contradiction. Refuse it rather than quietly sweeping the whole film.
+#[tokio::test]
+async fn a_narrowed_sweep_of_a_movie_finds_no_targets() {
+    let (addr, state) = spawn().await;
+    let item = library::upsert(
+        state.pool(),
+        &library::NewLibraryItem {
+            media_type: Some(MediaType::Movie),
+            tmdb_id: 603,
+            title: "The Matrix".to_owned(),
+            ..library::NewLibraryItem::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let resp = reqwest::Client::new()
+        .post(format!(
+            "http://{addr}/library/{}/scan/target?season=1",
+            item.id
+        ))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+    assert!(
+        !body.contains("grab(s)"),
+        "a movie must not be swept by a season button: {body}"
+    );
+}
+
+// ---------- item 2: the number on the row ----------
+
+/// The percentage comes from the cache the queue sync fills, so the row
+/// costs no HTTP call. With nothing cached the row still renders — the
+/// busy icon without a number, which is what it did before.
+#[tokio::test]
+async fn an_episode_row_shows_the_cached_download_percentage() {
+    use std::time::Instant;
+
+    let (addr, state) = spawn().await;
+    let item = seed_series(&state).await;
+    let episodes = library::episodes(state.pool(), item).await.unwrap();
+    let ep = episodes
+        .iter()
+        .find(|e| e.season_number == 1 && e.episode_number == 1)
+        .unwrap();
+    let seasons = library::seasons(state.pool(), item).await.unwrap();
+    let first = seasons.iter().find(|s| s.season_number == 1).unwrap();
+
+    let grab_id = in_flight(&state, item, ep.id, ep.season_number).await;
+
+    // Before the sync has seen it: the icon, no number.
+    let before = get(addr, &format!("/library/{item}/season/{}", first.id)).await;
+    assert!(before.contains("ep-mark-busy"), "{before}");
+    assert!(
+        !before.contains("lib-bar-fill\" style=\"width:42%"),
+        "nothing cached yet, so no number: {before}"
+    );
+
+    state.progress().insert(grab_id, 42, Instant::now());
+
+    let after = get(addr, &format!("/library/{item}/season/{}", first.id)).await;
+    assert!(
+        after.contains("42%"),
+        "the number must reach the row: {after}"
+    );
+    assert!(
+        after.contains(r#"style="width:42%""#),
+        "and so must the bar: {after}"
     );
 }
 

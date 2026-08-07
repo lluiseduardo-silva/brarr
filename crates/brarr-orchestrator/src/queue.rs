@@ -24,7 +24,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use brarr_download_client::{DownloadClient, DownloadState, DownloadStatus};
 use time::OffsetDateTime;
@@ -63,6 +63,26 @@ pub const LIVE_POLL_ACTIVE: Duration = Duration::from_secs(5);
 /// `completed` — finished, waiting on the importer — count as idle too;
 /// probing them every few seconds would buy nothing.
 pub const LIVE_POLL_IDLE: Duration = Duration::from_secs(30);
+
+/// How long a cached percentage stays readable.
+///
+/// Comfortably above [`SYNC_INTERVAL`], so a value is normally replaced
+/// long before it expires — but expire it does, which is the point: a
+/// sync that stopped running must stop the episode rows from showing a
+/// number that has not moved in an hour.
+pub const PROGRESS_TTL: Duration = Duration::from_secs(5 * 60);
+
+/// `0.0..=1.0` as whole percent, clamped. Same rounding the queue page
+/// uses, so the two surfaces cannot disagree by a point.
+#[must_use]
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "clamped to 0..=100 before the cast"
+)]
+pub fn percent_of(progress: f32) -> u8 {
+    (progress * 100.0).clamp(0.0, 100.0).round() as u8
+}
 
 /// How long a grab may go unrecognised by its own client before brarr
 /// concludes it is gone.
@@ -219,8 +239,20 @@ pub async fn sync_once(state: &AppState) -> Result<SyncSummary, AppError> {
     let entries = snapshot(state).await?;
     let mut summary = SyncSummary::default();
     let now = OffsetDateTime::now_utc();
+    let stamped = Instant::now();
     for entry in entries {
         summary.checked += 1;
+        // The pass already asked the client for a percentage and used to
+        // drop it on the floor. Keeping it costs nothing — no extra HTTP
+        // call, no column — and it is what lets an episode row show a
+        // number without probing the client per render. Bounded by the
+        // cache's TTL, so a value whose sync stopped running expires
+        // instead of lying forever.
+        if let Probe::Known(status) = &entry.probe {
+            state
+                .progress()
+                .insert(entry.grab.id, percent_of(status.progress), stamped);
+        }
         let Some(next) = next_status(&entry, now) else {
             if matches!(entry.probe, Probe::Unreachable(_)) {
                 summary.unreachable += 1;

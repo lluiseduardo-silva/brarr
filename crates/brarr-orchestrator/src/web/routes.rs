@@ -119,6 +119,7 @@ pub fn router(state: AppState, static_dir: &std::path::Path) -> Router {
         .route("/library/{id}/refresh", post(library_refresh))
         .route("/library/{id}/scan", post(library_scan_now))
         .route("/library/{id}/scan/status", get(library_scan_status))
+        .route("/library/{id}/scan/target", post(library_scan_target))
         .route("/library/{id}/interactive", get(library_interactive))
         .route("/library/{id}/grab/{decision_id}", post(library_grab))
         .route("/library/{id}/grabs", get(library_grabs))
@@ -1725,13 +1726,24 @@ async fn validated_root_folder(state: &AppState, path: &str) -> Result<String, A
 /// included — [`crate::coverage::episode_mark`] needs them to tell
 /// "never had it" from "had it and the file is gone", which are
 /// different problems with different fixes.
-fn episode_views(episodes: &[library::Episode], grabs: &[grabs::Grab]) -> Vec<EpisodeView> {
+fn episode_views(
+    episodes: &[library::Episode],
+    grabs: &[grabs::Grab],
+    progress: &crate::ttl_cache::TtlCache<Uuid, u8>,
+) -> Vec<EpisodeView> {
     let now = OffsetDateTime::now_utc();
+    let read_at = Instant::now();
     episodes
         .iter()
         .map(|e| {
             let mark = crate::coverage::episode_mark(e.id, e.season_number, e.air_date, grabs, now);
+            // Cache read, never a client call: `queue::snapshot` is one
+            // HTTP request per in-flight grab, and paying that per season
+            // expand is how a screen becomes slower the more it has to
+            // report.
+            let percent = mark.grab_id.and_then(|id| progress.get(&id, read_at));
             EpisodeView {
+                percent,
                 id: e.id.to_string(),
                 code: format!("S{:02}E{:02}", e.season_number, e.episode_number),
                 season_number: e.season_number,
@@ -1783,7 +1795,7 @@ async fn library_season(
 
     html(&LibrarySeasonPartial {
         item_id: id,
-        episodes: episode_views(&episodes, &history),
+        episodes: episode_views(&episodes, &history, state.progress()),
         oob: None,
         // A plain expand changes nothing, so the hero stays as it is.
         item_status: None,
@@ -1836,7 +1848,7 @@ async fn library_season_monitor(
 
     html(&LibrarySeasonPartial {
         item_id: id,
-        episodes: episode_views(&episodes, &history),
+        episodes: episode_views(&episodes, &history, state.progress()),
         oob: Some(SeasonMarkView {
             season_id,
             monitored: now_monitored,
@@ -1877,7 +1889,7 @@ async fn library_episode_monitor(
     let history = grabs::for_item(state.pool(), item_uuid).await?;
     html(&LibrarySeasonPartial {
         item_id: id,
-        episodes: episode_views(&[updated], &history),
+        episodes: episode_views(&[updated], &history, state.progress()),
         oob: None,
         // One episode moves the denominator too.
         item_status: Some(item_status_view(&state, item_uuid).await?),
@@ -2281,6 +2293,51 @@ async fn library_scan_now(
     )))
 }
 
+/// Query for the narrowed sweep: `?season=3` or `?season=3&episode=7`.
+#[derive(Debug, Deserialize)]
+struct ScanScopeQuery {
+    season: Option<i32>,
+    episode: Option<i32>,
+}
+
+/// `POST /library/{id}/scan/target?season=&episode=` — the same sweep,
+/// pointed at one season or one episode.
+///
+/// Answers the same badge as the item-wide button, so the two read
+/// identically; it just reports against a `scan-season-…` /
+/// `scan-ep-…` slot instead.
+async fn library_scan_target(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<ScanScopeQuery>,
+) -> Result<Response, AppError> {
+    let uuid = Uuid::parse_str(&id)
+        .map_err(|e| AppError::InvalidInput(format!("invalid library id: {e}")))?;
+    let item = library::get_by_id(state.pool(), uuid).await?;
+
+    let Some(season) = q.season else {
+        return Err(AppError::InvalidInput(
+            "busca por alvo precisa de uma temporada".to_owned(),
+        ));
+    };
+    let scope = q.episode.map_or(crate::scan::Scope::Season(season), |ep| {
+        crate::scan::Scope::Episode(season, ep)
+    });
+    let dom_id = q.episode.map_or_else(
+        || format!("scan-season-{uuid}-{season}"),
+        |ep| format!("scan-ep-{uuid}-{season}-{ep}"),
+    );
+
+    // Narrow enough to answer inline: one season is a handful of
+    // searches, not the forty a series-wide sweep can be. No spawn, no
+    // mailbox — the operator gets the verdict in the response.
+    let summary = crate::scan::run_once_for_target(&state, &item, scope).await?;
+    Ok(html_string(render_status_badge(
+        &dom_id,
+        &scan_badge(&summary),
+    )))
+}
+
 /// `GET /library/{id}/placement` — the profile + root folder dialog.
 ///
 /// Reads the same two lists the detail page reads; the form posts to the
@@ -2402,6 +2459,35 @@ fn scan_badge(summary: &crate::scan::ScanSummary) -> PingBadge {
             ok: false,
             label: "erro".to_string(),
             detail: format!("{target}: {reason}"),
+        }
+    } else if summary.no_search_axis {
+        PingBadge {
+            ok: false,
+            label: "sem id de busca".to_string(),
+            detail:
+                "a série não tem id TVDB, que é o eixo da busca por episódio — atualize os metadados"
+                    .to_string(),
+        }
+    } else if summary.targets == 0 && summary.skipped_unmonitored > 0 {
+        // The two honest answers to "I clicked and nothing happened".
+        // Without them the badge said "nada encontrado", which is a lie
+        // — nothing was even searched.
+        PingBadge {
+            ok: false,
+            label: "pausado".to_string(),
+            detail: format!(
+                "{} episódio(s) neste alvo estão pausados; a varredura respeita o monitoramento. Use a lupa para buscar mesmo assim.",
+                summary.skipped_unmonitored
+            ),
+        }
+    } else if summary.targets == 0 && summary.skipped_unaired > 0 {
+        PingBadge {
+            ok: true,
+            label: "ainda não estreou".to_string(),
+            detail: format!(
+                "{} episódio(s) neste alvo ainda não foram ao ar; não há o que procurar",
+                summary.skipped_unaired
+            ),
         }
     } else if summary.skipped_covered > 0 && summary.searches == 0 {
         PingBadge {

@@ -1547,6 +1547,15 @@ pub struct EpisodeView {
     pub detail: String,
     /// Just the file name from [`Self::detail`], for the inline hint.
     pub file_name: String,
+    /// Download percentage, when this episode has a grab in flight and
+    /// the queue sync has seen it at least once.
+    ///
+    /// `None` covers three different things on purpose — not
+    /// downloading, downloading but never yet probed, and a sync that
+    /// stopped running long enough for the value to expire. The row
+    /// shows the busy icon either way; only the number goes missing,
+    /// which is better than a number frozen at 43% for an hour.
+    pub percent: Option<u8>,
 }
 
 /// "Where and how" for one title, in a dialog.

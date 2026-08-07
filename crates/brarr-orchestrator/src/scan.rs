@@ -131,6 +131,24 @@ pub struct ScanSummary {
     pub grabbed: usize,
     /// Targets searched that produced nothing worth grabbing.
     pub no_candidate: usize,
+    /// Episodes in scope that the operator paused.
+    ///
+    /// Only interesting on a narrowed sweep: a paused episode among
+    /// forty is not news, but "I clicked buscar on this episode and
+    /// nothing happened" has exactly two honest answers, and this is
+    /// one of them.
+    pub skipped_unmonitored: usize,
+    /// Episodes in scope, monitored, that have not aired. The other
+    /// honest answer.
+    pub skipped_unaired: usize,
+    /// The item carries no id the search axis can use, so no target was
+    /// buildable at all.
+    ///
+    /// A third way for a sweep to do nothing, and it used to read as
+    /// "nada encontrado" — which is a lie in the direction that costs
+    /// most: a series imported without a TVDB id can never be swept, and
+    /// the badge said the trackers had nothing.
+    pub no_search_axis: bool,
     /// `(target, reason)` for everything that went wrong — a dead
     /// client, a provider error, a release the client refused.
     pub failures: Vec<(String, String)>,
@@ -144,6 +162,8 @@ impl ScanSummary {
         self.searches += other.searches;
         self.grabbed += other.grabbed;
         self.no_candidate += other.no_candidate;
+        self.skipped_unmonitored += other.skipped_unmonitored;
+        self.skipped_unaired += other.skipped_unaired;
         self.failures.extend(other.failures);
     }
 }
@@ -216,7 +236,7 @@ pub async fn run_once(state: &AppState) -> Result<ScanSummary, AppError> {
     let mut summary = ScanSummary::default();
     let mut budget = MAX_SEARCHES_PER_CYCLE;
     for item in &items {
-        let one = scan_item(state, item, &mut budget).await?;
+        let one = scan_item(state, item, &mut budget, Scope::Item).await?;
         summary.merge(one);
     }
     Ok(summary)
@@ -233,7 +253,66 @@ pub async fn run_once_for_item(
     item: &LibraryItem,
 ) -> Result<ScanSummary, AppError> {
     let mut budget = usize::MAX;
-    scan_item(state, item, &mut budget).await
+    scan_item(state, item, &mut budget, Scope::Item).await
+}
+
+/// Which slice of an item a sweep should look at.
+///
+/// The scheduler always runs [`Scope::Item`]. The narrower two exist for
+/// the buttons on the detail screen: the operator pointing at one season
+/// or one episode is a different ask from "sweep this title", and firing
+/// the whole item because they wanted episode 7 is both slow and a lot of
+/// tracker traffic for nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Scope {
+    /// Everything the item offers.
+    #[default]
+    Item,
+    /// One season, by its number.
+    Season(i32),
+    /// One episode, by season and episode number.
+    Episode(i32, i32),
+}
+
+impl Scope {
+    /// Whether this scope wants the given episode.
+    const fn covers(self, season: i32, episode: i32) -> bool {
+        match self {
+            Self::Item => true,
+            Self::Season(s) => s == season,
+            Self::Episode(s, e) => s == season && e == episode,
+        }
+    }
+
+    /// Whether this scope names a series slice at all. A movie has no
+    /// seasons, so a narrowed sweep of one is a contradiction rather
+    /// than an empty result.
+    const fn is_narrowed(self) -> bool {
+        !matches!(self, Self::Item)
+    }
+}
+
+/// Run the same sweep against one season or one episode.
+///
+/// Same barrier, same profile, same delivery — only the target list is
+/// narrower. **Monitoring is still respected**, deliberately: pausing a
+/// title is the operator's standing decision and a one-click shortcut
+/// should not quietly overrule it. What changes is that the summary now
+/// says *why* nothing happened, so the button reports "episódio pausado"
+/// instead of the "nada encontrado" it would otherwise render — and the
+/// magnifier right beside it is the manual override that ignores every
+/// flag.
+///
+/// # Errors
+///
+/// Same as [`run_once_for_item`].
+pub async fn run_once_for_target(
+    state: &AppState,
+    item: &LibraryItem,
+    scope: Scope,
+) -> Result<ScanSummary, AppError> {
+    let mut budget = usize::MAX;
+    scan_item(state, item, &mut budget, scope).await
 }
 
 /// One target: a movie, or one episode of a series.
@@ -264,12 +343,16 @@ async fn scan_item(
     state: &AppState,
     item: &LibraryItem,
     budget: &mut usize,
+    scope: Scope,
 ) -> Result<ScanSummary, AppError> {
     let mut summary = ScanSummary::default();
     let profile = resolve_profile(state, item).await?;
-    let targets = build_targets(state, item).await?;
+    let plan = build_targets(state, item, scope).await?;
+    summary.skipped_unmonitored = plan.skipped_unmonitored;
+    summary.skipped_unaired = plan.skipped_unaired;
+    summary.no_search_axis = plan.no_search_axis;
 
-    for target in targets {
+    for target in plan.targets {
         summary.targets += 1;
         let covered = grabs::blocking_for(state.pool(), item.id, target.grab_target()).await?;
         if !covered.is_empty() {
@@ -389,21 +472,37 @@ async fn resolve_profile(
     }
 }
 
-/// Everything worth searching for on one item.
-async fn build_targets(state: &AppState, item: &LibraryItem) -> Result<Vec<Target>, AppError> {
+/// Everything worth searching for on one item, within `scope`.
+async fn build_targets(
+    state: &AppState,
+    item: &LibraryItem,
+    scope: Scope,
+) -> Result<TargetPlan, AppError> {
     match item.media_type {
-        MediaType::Movie => Ok(movie_target(item).into_iter().collect()),
+        // A movie has no seasons, so a narrowed sweep of one is a
+        // contradiction rather than an empty result — refuse it instead
+        // of quietly searching the whole film.
+        MediaType::Movie if scope.is_narrowed() => Ok(TargetPlan::default()),
+        MediaType::Movie => Ok(TargetPlan {
+            targets: movie_target(item).into_iter().collect(),
+            ..TargetPlan::default()
+        }),
         MediaType::Tv => {
             let Some(tvdb) = item.tvdb_id.and_then(|v| u32::try_from(v).ok()) else {
                 debug!(
                     target: "brarr_orchestrator::scan",
                     item = %item.title,
-                    "series has no TVDB id; the episode search axis needs one"
                 );
-                return Ok(Vec::new());
+                return Ok(TargetPlan {
+                    no_search_axis: true,
+                    ..TargetPlan::default()
+                });
             };
             let Ok(tvdb) = TvdbId::new(tvdb) else {
-                return Ok(Vec::new());
+                return Ok(TargetPlan {
+                    no_search_axis: true,
+                    ..TargetPlan::default()
+                });
             };
             let episodes = library::episodes(state.pool(), item.id).await?;
             Ok(episode_targets(
@@ -411,6 +510,7 @@ async fn build_targets(state: &AppState, item: &LibraryItem) -> Result<Vec<Targe
                 &episodes,
                 tvdb,
                 OffsetDateTime::now_utc(),
+                scope,
             ))
         }
     }
@@ -451,22 +551,55 @@ fn episode_targets(
     episodes: &[Episode],
     tvdb: TvdbId,
     now: OffsetDateTime,
-) -> Vec<Target> {
-    episodes
-        .iter()
-        .filter(|e| e.monitored && e.season_number > 0)
-        .filter(|e| e.air_date.is_some_and(|d| d <= now))
-        .filter_map(|e| {
-            let season = u16::try_from(e.season_number).ok()?;
-            let number = u16::try_from(e.episode_number).ok()?;
-            Some(Target {
-                label: format!("{} S{season:02}E{number:02}", item.title),
-                episode: Some(e.clone()),
-                keys: SearchKeys::from_tvdb(tvdb, Some(season), Some(number)),
-                episode_marker: Some((season, number)),
-            })
-        })
-        .collect()
+    scope: Scope,
+) -> TargetPlan {
+    let mut plan = TargetPlan::default();
+    for e in episodes {
+        if e.season_number <= 0 || !scope.covers(e.season_number, e.episode_number) {
+            continue;
+        }
+        // Counted, not silently dropped: on a narrowed sweep these two
+        // are the whole answer to "I clicked and nothing happened".
+        if !e.monitored {
+            plan.skipped_unmonitored += 1;
+            continue;
+        }
+        if e.air_date.is_none_or(|d| d > now) {
+            plan.skipped_unaired += 1;
+            continue;
+        }
+        let (Ok(season), Ok(number)) = (
+            u16::try_from(e.season_number),
+            u16::try_from(e.episode_number),
+        ) else {
+            continue;
+        };
+        plan.targets.push(Target {
+            label: format!("{} S{season:02}E{number:02}", item.title),
+            episode: Some(e.clone()),
+            keys: SearchKeys::from_tvdb(tvdb, Some(season), Some(number)),
+            episode_marker: Some((season, number)),
+        });
+    }
+    plan
+}
+
+/// What [`episode_targets`] resolved to, including the two reasons an
+/// episode was left out.
+///
+/// The counts exist for the narrowed sweep. On a full item sweep nobody
+/// reads them — a paused episode among forty is not news. On "buscar
+/// este episódio" they are the entire report.
+#[derive(Default)]
+struct TargetPlan {
+    /// Episodes that will actually be searched.
+    targets: Vec<Target>,
+    /// In scope, but the operator paused it.
+    skipped_unmonitored: usize,
+    /// In scope and monitored, but it has not aired.
+    skipped_unaired: usize,
+    /// No usable search id on the item at all.
+    no_search_axis: bool,
 }
 
 /// Parse the library's canonical `ttNNNNNNN` into the numeric id the
@@ -764,7 +897,7 @@ mod tests {
             episode(0, 1, true, Some(1_600_000_000)), // specials bucket
         ];
         let tvdb = TvdbId::new(70_726).unwrap();
-        let targets = episode_targets(&series, &episodes, tvdb, now);
+        let targets = episode_targets(&series, &episodes, tvdb, now, Scope::Item).targets;
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].label, "The Matrix S01E01");
         assert_eq!(targets[0].keys.season, Some(1));
@@ -840,7 +973,7 @@ mod tests {
         let tvdb = TvdbId::new(70_726).unwrap();
         let episodes = vec![episode(4, 7, true, Some(1_600_000_000))];
         let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
-        let target = &episode_targets(&series, &episodes, tvdb, now)[0];
+        let target = &episode_targets(&series, &episodes, tvdb, now, Scope::Item).targets[0];
 
         let rows = vec![
             decision("The.Boys.S04E07.1080p.WEB-DL", 300, 10),

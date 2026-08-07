@@ -314,6 +314,12 @@ pub struct EpisodeMark {
     /// see *which* file brarr tied to this episode used to be reading the
     /// grab table row by row.
     pub detail: String,
+    /// The grab this mark stands for, when one is in flight.
+    ///
+    /// Carried so the row can look its percentage up in the progress
+    /// cache. `None` for every other state — a downloaded episode has
+    /// nothing left to report, and a missing one has no grab at all.
+    pub grab_id: Option<Uuid>,
 }
 
 /// Read one episode's state from the grabs of its item.
@@ -343,12 +349,14 @@ pub fn episode_mark(
                 .imported_path
                 .clone()
                 .unwrap_or_else(|| done.release_name.clone()),
+            grab_id: None,
         };
     }
     if let Some(busy) = live.first() {
         return EpisodeMark {
             state: EpisodeState::Downloading,
             detail: format!("{} — {}", busy.status.label(), busy.release_name),
+            grab_id: Some(busy.id),
         };
     }
 
@@ -364,6 +372,7 @@ pub fn episode_mark(
                 .imported_path
                 .clone()
                 .unwrap_or_else(|| gone.release_name.clone()),
+            grab_id: None,
         };
     }
 
@@ -374,6 +383,7 @@ pub fn episode_mark(
             EpisodeState::Unaired
         },
         detail: String::new(),
+        grab_id: None,
     }
 }
 

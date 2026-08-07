@@ -181,6 +181,14 @@ struct Inner {
     /// without somewhere to write its verdict the page could never learn
     /// it had finished. See [`crate::scan::ScanProgress`].
     scans: TtlCache<Uuid, ScanProgress>,
+    /// Download percentage per grab, written by the queue sync.
+    ///
+    /// The sync already asks each client for a percentage every cycle and
+    /// used to discard it. Keeping it here is what lets an episode row
+    /// show a number without probing the client per render — `snapshot`
+    /// is one HTTP call *per in-flight grab*, and a season with eight of
+    /// them open would pay that on every expand.
+    progress: TtlCache<Uuid, u8>,
     runtime: RuntimeConfig,
 }
 
@@ -259,6 +267,7 @@ impl AppState {
                 provider_clients: ProviderClientCache::new(),
                 search_cache: TtlCache::new(SEARCH_CACHE_TTL),
                 scans: TtlCache::new(SCAN_RESULT_TTL),
+                progress: TtlCache::new(crate::queue::PROGRESS_TTL),
                 runtime,
             }),
         }
@@ -371,6 +380,13 @@ impl AppState {
     #[must_use]
     pub fn scans(&self) -> &TtlCache<Uuid, ScanProgress> {
         &self.inner.scans
+    }
+
+    /// Borrow the download-progress cache. Written by the queue sync,
+    /// read when an episode row renders.
+    #[must_use]
+    pub fn progress(&self) -> &TtlCache<Uuid, u8> {
+        &self.inner.progress
     }
 }
 

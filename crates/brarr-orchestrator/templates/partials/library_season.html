@@ -95,6 +95,19 @@
 
     <span class="flex-1 min-w-0 text-sm text-fg-primary truncate">{{ e.title }}</span>
 
+    {# O número, quando existe. Vem do cache que a sincronização da fila
+       alimenta a cada ciclo — ela já perguntava a porcentagem ao cliente
+       e jogava fora. Ler daqui custa zero chamada HTTP por render.
+
+       Reusa `.lib-bar`/`.lib-bar-fill` com largura inline: uma classe
+       por porcentagem seriam 101 regras no app.css. #}
+    {% if let Some(pct) = e.percent %}
+    <span class="shrink-0 flex items-center gap-1.5" title="{{ e.state_label }} — {{ pct }}%">
+        <span class="text-[11px] font-mono text-fg-secondary w-8 text-right">{{ pct }}%</span>
+        <span class="lib-bar lib-bar-current w-16 shrink-0"><span class="lib-bar-fill" style="width:{{ pct }}%"></span></span>
+    </span>
+    {% endif %}
+
     {% if !e.detail.is_empty() %}
     <span class="shrink-0 max-w-[240px] text-[11px] font-mono text-fg-muted truncate" title="{{ e.detail }}">{{ e.file_name }}</span>
     {% endif %}
@@ -117,13 +130,34 @@
             hx-target="#interactive-results"
             hx-swap="outerHTML"
             hx-indicator="#interactive-results"
-            title="Buscar {{ e.code }} nos providers"
-            aria-label="Buscar {{ e.code }}"
+            title="Ver o que existe para {{ e.code }} — mostra tudo, inclusive o que o perfil rejeitaria"
+            aria-label="Busca interativa de {{ e.code }}"
             class="btn btn-sm btn-icon btn-ghost shrink-0">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/>
         </svg>
     </button>
+
+    {# Busca **automática** deste episódio: a mesma varredura do
+       agendador, aplicando o perfil e entregando ao cliente sozinha.
+       Irmã da lupa, não substituta — a lupa mostra e deixa escolher,
+       esta decide.
+
+       A barreira `grabs::reserve` continua valendo: buscar à mão não
+       torna seguro pegar duas vezes. #}
+    <button type="button"
+            hx-post="/library/{{ item_id }}/scan/target?season={{ e.season_number }}&amp;episode={{ e.episode_number }}"
+            hx-target="#scan-ep-{{ item_id }}-{{ e.season_number }}-{{ e.episode_number }}"
+            hx-swap="outerHTML"
+            hx-indicator="#scan-ep-{{ item_id }}-{{ e.season_number }}-{{ e.episode_number }}"
+            title="Buscar e baixar {{ e.code }} automaticamente — aplica o perfil e entrega ao cliente"
+            aria-label="Buscar e baixar {{ e.code }}"
+            class="btn btn-sm btn-icon btn-secondary shrink-0">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M13 2 4.5 13H11l-1 9 8.5-11H12z"/>
+        </svg>
+    </button>
+    <span id="scan-ep-{{ item_id }}-{{ e.season_number }}-{{ e.episode_number }}" class="shrink-0 text-[11px] italic text-fg-muted"></span>
 </div>
 {% endfor %}
 {% endif %}
