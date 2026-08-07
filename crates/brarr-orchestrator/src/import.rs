@@ -460,7 +460,11 @@ async fn locate_download(
     };
 
     let mappings = path_mappings::for_client(state.pool(), client_id).await?;
-    let translation = crate::remote_path::translate(&mappings, &reported);
+    let rules: Vec<_> = mappings
+        .iter()
+        .map(path_mappings::PathMapping::rule)
+        .collect();
+    let translation = crate::remote_path::translate(&rules, &reported);
     Ok(Ok(Located {
         path: translation.local.clone(),
         reported,

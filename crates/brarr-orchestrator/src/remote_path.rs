@@ -29,7 +29,29 @@ use std::path::{Path, PathBuf};
 
 use uuid::Uuid;
 
-use crate::db::path_mappings::PathMapping;
+/// One prefix rewrite, independent of which table it came from.
+///
+/// Two of brarr's tables store this same rule for two different owners:
+/// `path_mappings` translates a download client's namespace, and
+/// `arr_root_mappings` translates a Sonarr/Radarr root. They are the same
+/// question — "what does the other side call this directory?" — and the
+/// sharp edges below were paid for once already: matching on component
+/// boundaries, longest-wins, a backslash being a legal POSIX filename
+/// character. A second table copying the algorithm is how the incident
+/// that produced this module comes back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrefixRule {
+    /// Row this came from, echoed in [`AppliedRule`] so the caller can
+    /// name the mapping that fired.
+    pub id: Uuid,
+    /// Prefix as the *other* side writes it. A `String`, not a `PathBuf`:
+    /// it is not a path on this machine, possibly not even under this
+    /// operating system's rules, and `PathBuf` would invite exactly the
+    /// native operations that must never touch it.
+    pub remote_prefix: String,
+    /// Prefix in brarr's namespace. A `PathBuf`, because it is one.
+    pub local_prefix: PathBuf,
+}
 
 /// Which set of rules a path string was written under.
 ///
@@ -364,12 +386,12 @@ fn append_component(base: PathBuf, segment: &str) -> PathBuf {
 /// is the sqlite volume. A fallback to the raw path would reopen the
 /// hole this closes.)
 #[must_use]
-pub fn translate(mappings: &[PathMapping], reported: &str) -> Translation {
+pub fn translate(rules: &[PrefixRule], reported: &str) -> Translation {
     let path = parse(reported);
     let rooted = !matches!(path.root, Root::Relative);
-    let mut best: Option<(usize, &PathMapping)> = None;
+    let mut best: Option<(usize, &PrefixRule)> = None;
 
-    for candidate in mappings {
+    for candidate in rules {
         let prefix = parse(&candidate.remote_prefix);
         let Some(depth) = covers(&prefix, &path) else {
             continue;
@@ -512,8 +534,8 @@ pub fn is_usable(translation: &Translation) -> bool {
 
 /// Convenience for callers that only want the path.
 #[must_use]
-pub fn local_path(mappings: &[PathMapping], reported: &str) -> PathBuf {
-    translate(mappings, reported).local
+pub fn local_path(rules: &[PrefixRule], reported: &str) -> PathBuf {
+    translate(rules, reported).local
 }
 
 /// Whether `path` sits under `root`, used by the admin screen to warn
@@ -531,23 +553,20 @@ pub fn is_under(path: &Path, root: &Path) -> bool {
 )]
 mod tests {
     use super::*;
-    use time::OffsetDateTime;
 
-    /// Build a mapping without a database. `local` is kept as typed, so
+    /// Build a rule without a database. `local` is kept as typed, so
     /// the expectations below can be written with `join` and stay
     /// correct on both separators.
-    fn rule(remote: &str, local: &str) -> PathMapping {
-        PathMapping {
+    fn rule(remote: &str, local: &str) -> PrefixRule {
+        PrefixRule {
             id: Uuid::nil(),
-            client_id: Uuid::nil(),
             remote_prefix: remote.to_owned(),
             local_prefix: PathBuf::from(local),
-            created_at: OffsetDateTime::UNIX_EPOCH,
         }
     }
 
-    fn matched(mappings: &[PathMapping], reported: &str) -> bool {
-        translate(mappings, reported).applied.is_some()
+    fn matched(rules: &[PrefixRule], reported: &str) -> bool {
+        translate(rules, reported).applied.is_some()
     }
 
     // ---------------------------------------------------------------

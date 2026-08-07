@@ -44,6 +44,23 @@ pub struct PathMapping {
     pub created_at: OffsetDateTime,
 }
 
+impl PathMapping {
+    /// The rewrite rule alone, for [`crate::remote_path::translate`].
+    ///
+    /// The matching cares about two prefixes and an id; which client
+    /// reported the path is this table's business and not the rule's.
+    /// Keeping the two apart is what lets `arr_root_mappings` reuse the
+    /// same tested algorithm instead of growing a second copy.
+    #[must_use]
+    pub fn rule(&self) -> crate::remote_path::PrefixRule {
+        crate::remote_path::PrefixRule {
+            id: self.id,
+            remote_prefix: self.remote_prefix.clone(),
+            local_prefix: self.local_prefix.clone(),
+        }
+    }
+}
+
 /// Values used to create a mapping.
 #[derive(Debug, Clone, Copy)]
 pub struct NewPathMapping<'a> {
