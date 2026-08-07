@@ -1,0 +1,94 @@
+{# What a run did — or, when it outlived the request, that it is still
+   going. Re-running is safe, so the recovery from either state is the
+   same button. #}
+<section class="card-hairline bg-bg-surface border {% if failed > 0 %}border-danger-solid{% else %}border-success-solid{% endif %} rounded-xl overflow-hidden mb-6">
+    <header class="px-5 py-4 flex items-center gap-3">
+        <h2 class="text-lg font-semibold text-fg-primary">
+            {% if running %}Importação em andamento{% else %}Importação concluída{% endif %}
+        </h2>
+        {% if running %}
+        <span class="badge bg-info-soft text-info-soft-fg">rodando em segundo plano</span>
+        {% endif %}
+    </header>
+    <div class="h-px bg-border-default"></div>
+
+    {% if running %}
+    <p class="px-5 py-4 text-sm text-fg-secondary">
+        A leitura continua rodando. Cada título custa uma consulta ao TMDB e cada série mais uma por
+        temporada, então uma migração grande leva minutos. Acompanhe pela
+        <a href="/library" class="text-accent-soft-fg font-semibold">Biblioteca</a>, que enche conforme
+        os títulos entram — ou recarregue esta página: a prévia passa a dizer "já na biblioteca" para
+        o que já chegou.
+    </p>
+    {% else %}
+    <div class="grid grid-cols-1 md:grid-cols-6 gap-3 px-5 py-4">
+        <div>
+            <div class="text-xs uppercase tracking-[0.06em] text-fg-muted">Adicionados</div>
+            <div class="text-xl font-semibold text-fg-primary">{{ added }}</div>
+        </div>
+        <div>
+            <div class="text-xs uppercase tracking-[0.06em] text-fg-muted">Atualizados</div>
+            <div class="text-xl font-semibold text-fg-primary">{{ refreshed }}</div>
+        </div>
+        <div>
+            <div class="text-xs uppercase tracking-[0.06em] text-fg-muted">Arquivos</div>
+            <div class="text-xl font-semibold text-fg-primary">{{ adopted }}</div>
+        </div>
+        <div>
+            <div class="text-xs uppercase tracking-[0.06em] text-fg-muted">Já registrados</div>
+            <div class="text-xl font-semibold text-fg-primary">{{ already }}</div>
+        </div>
+        <div>
+            <div class="text-xs uppercase tracking-[0.06em] text-fg-muted">Sem mapeamento</div>
+            <div class="text-xl font-semibold {% if unmapped > 0 %}text-warning-soft-fg{% else %}text-fg-primary{% endif %}">{{ unmapped }}</div>
+        </div>
+        <div>
+            <div class="text-xs uppercase tracking-[0.06em] text-fg-muted">Não achados</div>
+            <div class="text-xl font-semibold {% if missing > 0 %}text-warning-soft-fg{% else %}text-fg-primary{% endif %}">{{ missing }}</div>
+        </div>
+    </div>
+
+    {% if unmapped > 0 %}
+    <p class="px-5 pb-4 text-xs text-warning-soft-fg">
+        <strong>{{ unmapped }} arquivo(s)</strong> ficaram sem mapeamento de raiz: o brarr não tem regra
+        que cubra o caminho que o *arr respondeu. Mapeie a raiz acima e rode de novo — nada é registrado
+        duas vezes.
+    </p>
+    {% endif %}
+    {% if missing > 0 %}
+    <p class="px-5 pb-4 text-xs text-warning-soft-fg">
+        <strong>{{ missing }} arquivo(s)</strong> foram traduzidos e não estavam lá. Ou a regra aponta para
+        o lugar errado, ou o arquivo saiu do disco — são consertos diferentes.
+    </p>
+    {% endif %}
+    {% if blocked > 0 %}
+    <p class="px-5 pb-4 text-xs text-fg-muted">
+        {{ blocked }} título(s) sem id do TMDB no *arr. Vincule-os lá e rode de novo.
+    </p>
+    {% endif %}
+
+    {% if !failures.is_empty() %}
+    <div class="h-px bg-border-default"></div>
+    <div class="px-5 py-3">
+        <div class="text-xs uppercase tracking-[0.06em] text-fg-muted mb-2">
+            Falhas ({{ failed }})
+        </div>
+        {% for f in failures %}
+        <div class="text-[11px] font-mono text-danger-soft-fg break-all">{{ f }}</div>
+        {% endfor %}
+        {% if failed > failures.len() %}
+        <div class="text-[11px] text-fg-muted mt-1.5">
+            … e mais {{ failed - failures.len() }}. Trezentas linhas iguais não ajudam a achar a causa.
+        </div>
+        {% endif %}
+    </div>
+    {% endif %}
+    {% endif %}
+
+    <div class="h-px bg-border-default"></div>
+    <footer class="flex items-center justify-end gap-2 px-5 py-3">
+        <button type="button" onclick="window.location.reload()" class="btn btn-sm btn-secondary">
+            Atualizar prévia
+        </button>
+    </footer>
+</section>

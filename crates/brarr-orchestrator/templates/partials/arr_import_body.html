@@ -1,0 +1,257 @@
+{# The *arr import, in one swap target.
+
+   Roots, preview and the run form move together: adding the mapping that
+   makes 292 folders visible is exactly the moment the preview stops
+   reading "0 pastas encontradas", and a count rendered outside the swap
+   would still be stale. Every write on this screen re-plans, which costs
+   one call to the *arr and one stat per title. #}
+<section id="arr-import-body">
+
+    {# ── Roots ─────────────────────────────────────────────────────
+       The *arr has one or two of these and thousands of files under
+       them, so this is the whole configuration surface of the import:
+       two or three choices for the entire migration. #}
+    <section class="card-hairline bg-bg-surface border border-border-default rounded-xl overflow-hidden mb-6">
+        <header class="px-5 py-4 flex items-center gap-3">
+            <h2 class="text-lg font-semibold text-fg-primary">Pastas raiz</h2>
+            {% if unmapped_roots > 0 %}
+            <span class="badge bg-warning-soft text-warning-soft-fg">{{ unmapped_roots }} sem mapeamento</span>
+            {% endif %}
+        </header>
+        <div class="h-px bg-border-default"></div>
+
+        <div class="overflow-x-auto">
+            <table class="w-full text-sm">
+                <thead class="bg-bg-muted">
+                    <tr class="text-left">
+                        <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">O {{ kind }} diz</th>
+                        <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">O brarr abre</th>
+                        <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted text-right">Títulos</th>
+                        <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted text-right">Ações</th>
+                    </tr>
+                </thead>
+                <tbody>
+                {% for r in roots %}
+                    <tr class="border-t border-border-default">
+                        <td class="px-4 py-3 font-mono text-sm text-fg-secondary">{{ r.arr_path }}</td>
+                        <td class="px-4 py-3 font-mono text-sm text-fg-primary">
+                            {% if let Some(local) = r.mapped_to %}
+                            {{ local }}
+                            {% if !r.reachable %}
+                            <div class="text-[11px] text-warning-soft-fg mt-0.5">
+                                o brarr não consegue abrir esse caminho — confira o bind mount do contêiner dele
+                            </div>
+                            {% endif %}
+                            {% else %}
+                            <span class="text-warning-soft-fg">sem mapeamento</span>
+                            {% endif %}
+                        </td>
+                        <td class="px-4 py-3 text-right font-mono text-xs text-fg-secondary">{{ r.titles }}</td>
+                        <td class="px-4 py-3">
+                            <div class="flex items-center justify-end gap-1.5">
+                                {% if let Some(mid) = r.mapping_id %}
+                                <button hx-delete="/arr-root-mappings/{{ mid }}"
+                                        hx-target="#arr-import-body"
+                                        hx-swap="outerHTML"
+                                        hx-confirm="Remover este mapeamento? Nada é apagado do disco."
+                                        class="btn btn-sm btn-danger">
+                                    remover
+                                </button>
+                                {% else %}
+                                <span class="text-fg-muted text-xs">—</span>
+                                {% endif %}
+                            </div>
+                        </td>
+                    </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </div>
+
+        {% if root_folders.is_empty() %}
+        <div class="px-5 py-4 text-xs text-warning-soft-fg">
+            Nenhuma pasta raiz cadastrada no brarr. Cadastre uma em
+            <a href="/download-clients" class="font-semibold underline">Clientes de download</a> antes de mapear.
+        </div>
+        {% else %}
+        <div class="h-px bg-border-default"></div>
+        <form hx-post="/arr-instances/{{ instance_id }}/import/mappings"
+              hx-target="#arr-import-body"
+              hx-swap="outerHTML"
+              class="grid grid-cols-1 md:grid-cols-6 gap-3 px-5 py-4">
+            <label class="block md:col-span-3">
+                <span class="block mb-1.5 text-xs font-medium uppercase tracking-[0.06em] text-fg-muted">Caminho no {{ kind }}</span>
+                <input name="arr_path" required list="arr-root-suggestions" placeholder="/data/Series"
+                       class="w-full px-3 h-10 rounded-md bg-bg-canvas border border-border-strong text-sm text-fg-primary font-mono placeholder:text-fg-muted focus:outline-none focus:border-accent-solid">
+                <datalist id="arr-root-suggestions">
+                    {% for r in roots %}
+                    <option value="{{ r.arr_path }}"></option>
+                    {% endfor %}
+                </datalist>
+            </label>
+            <label class="block md:col-span-3">
+                <span class="block mb-1.5 text-xs font-medium uppercase tracking-[0.06em] text-fg-muted">Pasta raiz do brarr</span>
+                <select name="root_folder_id" required
+                        class="w-full px-3 h-10 rounded-md bg-bg-canvas border border-border-strong text-sm text-fg-primary focus:outline-none focus:border-accent-solid">
+                    {% for f in root_folders %}
+                    <option value="{{ f.id }}">{{ f.path }}</option>
+                    {% endfor %}
+                </select>
+            </label>
+            <div class="md:col-span-6 flex justify-end">
+                <button type="submit" class="btn btn-md btn-brand w-full md:w-auto">Mapear raiz</button>
+            </div>
+        </form>
+        <div class="px-5 pb-4 text-xs text-fg-muted leading-relaxed">
+            O caminho da esquerda é o que o <strong class="text-fg-secondary">{{ kind }}</strong> responde, e não é
+            conferido no disco: ele nomeia um diretório de outro contêiner e normalmente não existe aqui.
+            O da direita é conferido, e é o caminho <strong class="text-fg-secondary">dentro do contêiner do brarr</strong>.
+            Mapeia-se a <strong class="text-fg-secondary">raiz</strong>, não o caminho: tudo abaixo dela segue junto.
+        </div>
+        {% endif %}
+    </section>
+
+    {# ── Preview ───────────────────────────────────────────────────
+       Four numbers, and the fourth is the one that matters: a mapping
+       that is wrong reads "0 pastas encontradas" here instead of
+       failing seven thousand times later. #}
+    <section class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3 mb-6">
+        <div class="card-hairline bg-bg-surface border border-border-default rounded-xl px-4 py-3">
+            <div class="text-xs uppercase tracking-[0.06em] text-fg-muted">Novos</div>
+            <div class="text-2xl font-semibold text-fg-primary">{{ new_titles }}</div>
+        </div>
+        <div class="card-hairline bg-bg-surface border border-border-default rounded-xl px-4 py-3">
+            <div class="text-xs uppercase tracking-[0.06em] text-fg-muted">Já na biblioteca</div>
+            <div class="text-2xl font-semibold text-fg-primary">{{ known_titles }}</div>
+        </div>
+        <div class="card-hairline bg-bg-surface border border-border-default rounded-xl px-4 py-3">
+            <div class="text-xs uppercase tracking-[0.06em] text-fg-muted">Bloqueados</div>
+            <div class="text-2xl font-semibold {% if blocked_titles > 0 %}text-warning-soft-fg{% else %}text-fg-primary{% endif %}">{{ blocked_titles }}</div>
+        </div>
+        <div class="card-hairline bg-bg-surface border border-border-default rounded-xl px-4 py-3">
+            <div class="text-xs uppercase tracking-[0.06em] text-fg-muted">Pastas encontradas</div>
+            <div class="text-2xl font-semibold {% if seen_folders == 0 %}text-danger-soft-fg{% else %}text-fg-primary{% endif %}">{{ seen_folders }}<span class="text-sm text-fg-muted">/{{ titles.len() }}</span></div>
+        </div>
+    </section>
+
+    {% if seen_folders == 0 && !titles.is_empty() %}
+    <div class="flex items-start gap-3 px-4 py-3 mb-6 rounded-lg bg-warning-soft border border-warning-solid">
+        <p class="text-sm text-warning-soft-fg">
+            O brarr não enxergou <strong>nenhuma</strong> pasta deste {{ kind }}. Os títulos ainda entram no
+            catálogo, mas nenhum arquivo será registrado — e no dia em que o monitoramento for ligado,
+            o brarr baixaria de novo o que já está no disco. Confira o mapeamento de raiz antes de importar.
+        </p>
+    </div>
+    {% endif %}
+
+    <section class="card-hairline bg-bg-surface border border-border-default rounded-xl overflow-hidden mb-6">
+        <div class="overflow-x-auto max-h-[420px] overflow-y-auto">
+            <table class="w-full text-sm">
+                <thead class="bg-bg-muted">
+                    <tr class="text-left">
+                        <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Título</th>
+                        <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">TMDB</th>
+                        <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">No {{ kind }}</th>
+                        <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Pasta</th>
+                        <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Situação</th>
+                    </tr>
+                </thead>
+                <tbody>
+                {% for t in titles %}
+                    <tr class="border-t border-border-default {% if t.blocked %}opacity-55{% endif %}">
+                        <td class="px-4 py-3 text-fg-primary">
+                            {{ t.title }}{% if let Some(y) = t.year %} <span class="text-fg-muted">({{ y }})</span>{% endif %}
+                        </td>
+                        <td class="px-4 py-3 font-mono text-xs text-fg-secondary">
+                            {% if t.tmdb_id > 0 %}{{ t.tmdb_id }}{% else %}<span class="text-warning-soft-fg">—</span>{% endif %}
+                        </td>
+                        <td class="px-4 py-3 text-xs">
+                            {% if t.monitored %}
+                            <span class="badge bg-success-soft text-success-soft-fg">monitorado</span>
+                            {% else %}
+                            <span class="badge bg-bg-muted text-fg-muted">pausado</span>
+                            {% endif %}
+                        </td>
+                        <td class="px-4 py-3 text-xs">
+                            {% if t.folder_seen %}
+                            <span class="text-success-soft-fg">vista</span>
+                            {% else %}
+                            <span class="text-warning-soft-fg">não vista</span>
+                            {% endif %}
+                        </td>
+                        <td class="px-4 py-3 text-xs text-fg-secondary">{{ t.status }}</td>
+                    </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </section>
+
+    {# ── Run ───────────────────────────────────────────────────────
+       The monitoring choice is a radio and not a checkbox because
+       neither answer is a default worth hiding: one of them puts two
+       agents on 468 titles. #}
+    <section class="card-hairline bg-bg-surface border border-border-default rounded-xl overflow-hidden">
+        <header class="px-5 py-4">
+            <h2 class="text-lg font-semibold text-fg-primary">Importar</h2>
+        </header>
+        <div class="h-px bg-border-default"></div>
+        <form hx-post="/arr-instances/{{ instance_id }}/import/run"
+              hx-target="#arr-import-report"
+              hx-swap="innerHTML"
+              class="flex flex-col gap-4 px-5 py-4">
+
+            <fieldset class="flex flex-col gap-2">
+                <legend class="mb-1.5 text-xs font-medium uppercase tracking-[0.06em] text-fg-muted">Monitoramento</legend>
+                <label class="flex items-start gap-2.5 cursor-pointer">
+                    <input type="radio" name="monitoring" value="paused" checked class="mt-1">
+                    <span class="text-sm text-fg-primary">
+                        Entrar tudo pausado
+                        <span class="block text-xs text-fg-secondary">
+                            O catálogo entra, o brarr não busca nada. É o que a migração pede: este {{ kind }}
+                            ainda tem indexers e clientes de download apontando para os mesmos qBittorrent e
+                            SABnzbd, então título monitorado dos dois lados vira dois downloads.
+                        </span>
+                    </span>
+                </label>
+                <label class="flex items-start gap-2.5 cursor-pointer">
+                    <input type="radio" name="monitoring" value="mirror" class="mt-1">
+                    <span class="text-sm text-fg-primary">
+                        Espelhar o {{ kind }}
+                        <span class="block text-xs text-fg-secondary">
+                            Copia os flags de item, temporada e episódio. Só faz sentido depois de tirar os
+                            indexers do {{ kind }}.
+                        </span>
+                    </span>
+                </label>
+            </fieldset>
+
+            {% if !profiles.is_empty() %}
+            <label class="block">
+                <span class="block mb-1.5 text-xs font-medium uppercase tracking-[0.06em] text-fg-muted">Quality Profile</span>
+                <select name="profile_id"
+                        class="w-full px-3 h-10 rounded-md bg-bg-canvas border border-border-strong text-sm text-fg-primary focus:outline-none focus:border-accent-solid">
+                    <option value="">— o perfil da instância</option>
+                    {% for p in profiles %}
+                    <option value="{{ p.id }}">{{ p.name }} (≥ {{ p.push_threshold }})</option>
+                    {% endfor %}
+                </select>
+            </label>
+            {% endif %}
+
+            <div class="flex justify-end">
+                <button type="submit"
+                        hx-confirm="Importar {{ titles.len() }} título(s) deste {{ kind }}? Nada é escrito no disco — só o catálogo do brarr."
+                        class="btn btn-md btn-brand w-full md:w-auto">
+                    Importar {{ titles.len() }} título(s)
+                </button>
+            </div>
+        </form>
+        <div class="px-5 pb-4 text-xs text-fg-muted leading-relaxed">
+            Cada título custa uma consulta ao TMDB, e cada série custa mais uma por temporada — uma
+            migração grande leva minutos. Ela roda em segundo plano e pode ser repetida à vontade:
+            metadado é cache, monitoramento é estado, e um arquivo já registrado não é registrado de novo.
+        </div>
+    </section>
+
+</section>

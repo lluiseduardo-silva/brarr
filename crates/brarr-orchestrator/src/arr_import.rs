@@ -282,6 +282,10 @@ pub struct PlannedRoot {
     pub arr_path: String,
     /// Where a mapping sends it. `None` when none covers it.
     pub mapped_to: Option<PathBuf>,
+    /// The mapping row that fired, so the screen can offer to remove it.
+    /// Not always the row for this exact prefix — the longest rule wins,
+    /// and a `/data` rule covers `/data/Series` too.
+    pub mapping_id: Option<Uuid>,
     /// Whether brarr can open that directory. The check that catches a
     /// wrong mapping *before* seven thousand records, not after.
     pub reachable: bool,
@@ -486,14 +490,13 @@ fn plan_roots(titles: &[ArrTitle], mappings: &[ArrRootMapping]) -> Vec<PlannedRo
         .into_iter()
         .map(|(arr_path, titles)| {
             let translated = remote_path::translate(&rules, arr_path);
-            let mapped_to = translated
-                .applied
-                .as_ref()
-                .map(|_| translated.local.clone());
+            let mapping_id = translated.applied.as_ref().map(|a| a.id);
+            let mapped_to = mapping_id.map(|_| translated.local.clone());
             PlannedRoot {
                 arr_path: arr_path.to_owned(),
                 reachable: mapped_to.as_ref().is_some_and(|p| p.is_dir()),
                 mapped_to,
+                mapping_id,
                 titles,
             }
         })

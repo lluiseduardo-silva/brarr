@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}Importar {{ instance_name }} · brarr{% endblock %}
+{% block content %}
+
+<div class="flex items-center justify-between gap-4 mb-2">
+    <div>
+        <h1 class="font-semibold text-[28px] leading-9 text-fg-primary">Importar catálogo</h1>
+        <p class="text-base text-fg-secondary mt-1">
+            <span class="font-semibold text-fg-primary">{{ instance_name }}</span> · {{ kind }} ·
+            {{ titles.len() }} título(s)
+        </p>
+    </div>
+    <a href="/arr-instances" class="btn btn-md btn-secondary">Voltar</a>
+</div>
+
+<div class="flex items-start gap-3 px-4 py-3 mb-6 rounded-lg bg-info-soft border border-info-solid">
+    <p class="text-sm text-info-soft-fg">
+        O brarr <strong>não escreve nada no disco</strong> aqui — nem vínculo, nem cópia, nem renomeação.
+        Os arquivos já estão na biblioteca do operador; o que falta é o registro deles. O
+        {{ kind }} já sabe qual arquivo é qual episódio, inclusive a numeração absoluta de anime que
+        nenhuma regex lê, e é essa correspondência que entra.
+    </p>
+</div>
+
+{# Where a run's report lands. Outside the body target because the body
+   is re-rendered by every write on this screen, and the report has to
+   survive that. #}
+<div id="arr-import-report"></div>
+
+{% include "partials/arr_import_body.html" %}
+
+{% endblock %}

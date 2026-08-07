@@ -482,6 +482,7 @@ dependencies = [
  "uuid",
  "wasmtime",
  "wat",
+ "wiremock",
 ]
 
 [[package]]

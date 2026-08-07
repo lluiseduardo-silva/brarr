@@ -91,6 +91,15 @@
 
                     <td class="px-4 py-3">
                         <span id="arr-ping-{{ a.id }}" class="text-xs italic text-fg-muted">não testado</span>
+                        {% if a.sync_source %}
+                        <div class="text-[11px] text-fg-muted mt-0.5">
+                            {% if let Some(at) = a.synced_at %}
+                            sincronizado <time data-datetime="{{ at }}">{{ at }}</time>
+                            {% else %}
+                            fonte de sincronização — ainda não lida
+                            {% endif %}
+                        </div>
+                        {% endif %}
                     </td>
 
                     <td class="px-4 py-3">
@@ -117,6 +126,18 @@
                                     title="Editar nome/URL/api key/profile"
                                     class="btn btn-sm btn-secondary">
                                 editar
+                            </button>
+                            <a href="/arr-instances/{{ a.id }}/import"
+                               title="Trazer o catálogo desta instância para a biblioteca do brarr"
+                               class="btn btn-sm btn-secondary">
+                                importar
+                            </a>
+                            <button hx-post="/arr-instances/{{ a.id }}/sync-source"
+                                    hx-target="#arr-instances-list"
+                                    hx-swap="outerHTML"
+                                    title="Quando ligado, o brarr relê este catálogo periodicamente e cataloga o que aparecer — sempre pausado, nunca buscando. Independe do 'ativar', que é o push depreciado."
+                                    class="btn btn-sm {% if a.sync_source %}btn-toggle-on{% else %}btn-secondary{% endif %}">
+                                {% if a.sync_source %}fonte: sim{% else %}fonte: não{% endif %}
                             </button>
                             <button hx-post="/arr-instances/{{ a.id }}/webhook-driven"
                                     hx-target="#arr-instances-list"

@@ -169,6 +169,10 @@ pub struct ArrInstancesTemplate {
 
 /// Single row in the *arr admin table.
 #[derive(Debug)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "these are independent axes, not a state machine — an instance can be a sync source while disabled for the deprecated push path, which is exactly the configuration the operator's three instances are in"
+)]
 pub struct ArrInstanceView {
     /// Stringified UUID.
     pub id: String,
@@ -196,6 +200,14 @@ pub struct ArrInstanceView {
     pub enabled: bool,
     /// `true` ⇒ scheduled poller skips this instance (webhook-driven).
     pub webhook_driven: bool,
+    /// `true` ⇒ brarr reads this catalogue into its own library. A
+    /// different axis from `enabled`: the operator's instances are
+    /// disabled for the deprecated push path while being exactly the
+    /// catalogues brarr syncs from.
+    pub sync_source: bool,
+    /// When the passive sweep last read it (ISO-8601), `None` until it
+    /// runs once.
+    pub synced_at: Option<String>,
     /// Ready-to-paste inbound webhook URL for this instance's Connect →
     /// Webhook setting. Empty for views that don't render the *arr table
     /// (e.g. dashboard dropdowns). Includes `?apikey=` when auth is on.
@@ -214,6 +226,166 @@ pub struct ArrInstanceView {
 pub struct ArrInstancesListPartial {
     /// All configured *arr endpoints.
     pub instances: Vec<ArrInstanceView>,
+}
+
+/// `/arr-instances/{id}/import` — the preview of what reading one \*arr
+/// catalogue would bring into brarr's library.
+///
+/// Fields are duplicated onto [`ArrImportBodyPartial`] rather than
+/// nested, because Askama renders an `{% include %}` against the
+/// *parent* context — the same arrangement as
+/// [`DownloadClientsTemplate`]. `From` is implemented so the two are
+/// built in one place and cannot drift.
+#[derive(Debug, Template)]
+#[template(path = "arr_import.html")]
+pub struct ArrImportTemplate {
+    /// Instance being imported.
+    pub instance_id: String,
+    /// Its display name, for the page header.
+    pub instance_name: String,
+    /// `Sonarr` / `Radarr`, used in the prose.
+    pub kind: String,
+    /// Roots the *arr reports, with what brarr makes of each.
+    pub roots: Vec<ArrImportRootView>,
+    /// brarr's own root folders, for the mapping select.
+    pub root_folders: Vec<ArrRootOption>,
+    /// One row per catalogued title.
+    pub titles: Vec<ArrImportTitleView>,
+    /// Quality profiles, for the run form.
+    pub profiles: Vec<ProfileView>,
+    /// Roots no mapping covers — the one thing to fix first.
+    pub unmapped_roots: usize,
+    /// Titles the run would add.
+    pub new_titles: usize,
+    /// Titles already catalogued.
+    pub known_titles: usize,
+    /// Titles nothing can be done with.
+    pub blocked_titles: usize,
+    /// Titles whose folder brarr can actually open. Zero here is what a
+    /// wrong root mapping looks like *before* it costs anything.
+    pub seen_folders: usize,
+}
+
+/// HTMX partial re-rendered after every write on the import screen.
+///
+/// The whole body is one target because its three parts move together:
+/// adding a mapping is exactly what turns "0 pastas encontradas" into a
+/// real number, and a count outside the swap would keep reading zero.
+#[derive(Debug, Template)]
+#[template(path = "partials/arr_import_body.html")]
+pub struct ArrImportBodyPartial {
+    /// Instance being imported.
+    pub instance_id: String,
+    /// `Sonarr` / `Radarr`.
+    pub kind: String,
+    /// Roots the *arr reports.
+    pub roots: Vec<ArrImportRootView>,
+    /// brarr's own root folders.
+    pub root_folders: Vec<ArrRootOption>,
+    /// One row per catalogued title.
+    pub titles: Vec<ArrImportTitleView>,
+    /// Quality profiles.
+    pub profiles: Vec<ProfileView>,
+    /// Roots no mapping covers.
+    pub unmapped_roots: usize,
+    /// Titles the run would add.
+    pub new_titles: usize,
+    /// Titles already catalogued.
+    pub known_titles: usize,
+    /// Titles nothing can be done with.
+    pub blocked_titles: usize,
+    /// Title folders brarr can open.
+    pub seen_folders: usize,
+}
+
+impl ArrImportTemplate {
+    /// Wrap a rendered body in the full page.
+    #[must_use]
+    pub fn from_body(body: ArrImportBodyPartial, instance_name: String) -> Self {
+        Self {
+            instance_id: body.instance_id,
+            instance_name,
+            kind: body.kind,
+            roots: body.roots,
+            root_folders: body.root_folders,
+            titles: body.titles,
+            profiles: body.profiles,
+            unmapped_roots: body.unmapped_roots,
+            new_titles: body.new_titles,
+            known_titles: body.known_titles,
+            blocked_titles: body.blocked_titles,
+            seen_folders: body.seen_folders,
+        }
+    }
+}
+
+/// One *arr root folder in the mapping table.
+#[derive(Debug)]
+pub struct ArrImportRootView {
+    /// Path as the *arr reports it.
+    pub arr_path: String,
+    /// Where the mapping sends it, when one covers it.
+    pub mapped_to: Option<String>,
+    /// The rule that fired, so the row can offer to remove it.
+    pub mapping_id: Option<String>,
+    /// `false` ⇒ brarr cannot open the translated directory.
+    pub reachable: bool,
+    /// Titles the *arr keeps under it.
+    pub titles: usize,
+}
+
+/// One brarr root folder in the mapping select.
+#[derive(Debug)]
+pub struct ArrRootOption {
+    /// Stringified UUID, which is the posted value.
+    pub id: String,
+    /// Absolute path, rendered mono.
+    pub path: String,
+}
+
+/// One title in the import preview.
+#[derive(Debug)]
+pub struct ArrImportTitleView {
+    /// Title as the *arr shows it.
+    pub title: String,
+    /// Year, when the *arr has one.
+    pub year: Option<i32>,
+    /// TMDB id; `0` renders as a dash and blocks the row.
+    pub tmdb_id: i64,
+    /// Whether the *arr is chasing it.
+    pub monitored: bool,
+    /// Whether brarr can open the title's folder after translation.
+    pub folder_seen: bool,
+    /// `novo` / `já na biblioteca` / the reason it is blocked.
+    pub status: String,
+    /// Drives the muted row style.
+    pub blocked: bool,
+}
+
+/// What one import run did, or that it outlived the request.
+#[derive(Debug, Default, Template)]
+#[template(path = "partials/arr_import_report.html")]
+pub struct ArrImportReportPartial {
+    /// `true` ⇒ the run is still going and the numbers are not in yet.
+    pub running: bool,
+    /// Titles added.
+    pub added: usize,
+    /// Titles already present, whose metadata was refreshed.
+    pub refreshed: usize,
+    /// Titles nothing could be done with.
+    pub blocked: usize,
+    /// Files recorded.
+    pub adopted: usize,
+    /// Files a grab already covered.
+    pub already: usize,
+    /// Files translated but not on disk.
+    pub missing: usize,
+    /// Files no mapping covered.
+    pub unmapped: usize,
+    /// Per-title failures kept verbatim.
+    pub failures: Vec<String>,
+    /// Total failures, cap included.
+    pub failed: usize,
 }
 
 /// `/download-clients` view — admin CRUD for the qBittorrent / SABnzbd

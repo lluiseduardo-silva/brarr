@@ -52,16 +52,17 @@ use crate::db::{
 use crate::search::run_tmdb_search;
 use crate::web::render::html;
 use crate::web::templates::{
-    AddOptionFolder, AddOptionProfile, ArrInstanceView, ArrInstancesListPartial,
-    ArrInstancesTemplate, DashboardTemplate, DecisionView, DownloadClientView,
-    DownloadClientsListPartial, DownloadClientsTemplate, EditArrInstanceModalPartial,
-    EditDownloadClientModalPartial, EditProviderModalPartial, EndpointHealthView,
-    EndpointRequestView, EpisodeView, ErrorTemplate, GrabView, HealthTemplate, ImportDirEntry,
-    ImportIgnoredView, ImportModalPartial, ImportOutcomeView, ImportPickEpisodePartial,
-    ImportPickTitlePartial, ImportReportPartial, ImportRowPartial, ImportRowView,
-    InteractiveReleaseView, InteractiveResultsPartial, LibraryAddOptionsModalPartial,
-    LibraryAddTemplate, LibraryDetailTemplate, LibraryDetailView, LibraryItemView,
-    LibrarySeasonPartial, LibraryTemplate, LoginTemplate, NewProfileModalPartial,
+    AddOptionFolder, AddOptionProfile, ArrImportBodyPartial, ArrImportReportPartial,
+    ArrImportRootView, ArrImportTemplate, ArrImportTitleView, ArrInstanceView,
+    ArrInstancesListPartial, ArrInstancesTemplate, ArrRootOption, DashboardTemplate, DecisionView,
+    DownloadClientView, DownloadClientsListPartial, DownloadClientsTemplate,
+    EditArrInstanceModalPartial, EditDownloadClientModalPartial, EditProviderModalPartial,
+    EndpointHealthView, EndpointRequestView, EpisodeView, ErrorTemplate, GrabView, HealthTemplate,
+    ImportDirEntry, ImportIgnoredView, ImportModalPartial, ImportOutcomeView,
+    ImportPickEpisodePartial, ImportPickTitlePartial, ImportReportPartial, ImportRowPartial,
+    ImportRowView, InteractiveReleaseView, InteractiveResultsPartial,
+    LibraryAddOptionsModalPartial, LibraryAddTemplate, LibraryDetailTemplate, LibraryDetailView,
+    LibraryItemView, LibrarySeasonPartial, LibraryTemplate, LoginTemplate, NewProfileModalPartial,
     NewSearchModalPartial, PathMappingClientOption, PathMappingView, PathMappingsPartial,
     PickEpisodeView, PickTitleView, ProfileEditorTemplate, ProfileView, ProfilesTemplate,
     ProviderHealthView, ProviderView, ProvidersListPartial, ProvidersTemplate, PushGroupView,
@@ -89,26 +90,7 @@ pub fn router(state: AppState, static_dir: &std::path::Path) -> Router {
         .route("/providers/{id}/test", post(providers_test))
         .route("/providers/{id}/probe", get(providers_probe))
         .route("/providers/{id}/toggle", post(providers_toggle))
-        .route(
-            "/arr-instances",
-            get(arr_instances_index).post(arr_instances_create),
-        )
-        .route(
-            "/arr-instances/{id}",
-            delete(arr_instances_delete).put(arr_instances_update),
-        )
-        .route("/arr-instances/{id}/edit", get(arr_instances_edit))
-        .route("/arr-instances/{id}/test", post(arr_instances_test))
-        .route("/arr-instances/{id}/poll-now", post(arr_instances_poll_now))
-        .route("/arr-instances/{id}/toggle", post(arr_instances_toggle))
-        .route(
-            "/arr-instances/{id}/webhook-driven",
-            post(arr_instances_webhook_driven_toggle),
-        )
-        .route(
-            "/arr-instances/{id}/threshold",
-            post(arr_instances_update_threshold),
-        )
+        .merge(arr_routes())
         .merge(download_client_routes())
         .route("/decisions/{id}/push/{arr_id}", post(decisions_push))
         .route("/pushes", get(pushes_index))
@@ -212,6 +194,46 @@ fn import_routes() -> Router<AppState> {
         .route("/library/import/row", get(library_import_row))
         .route("/library/import/bulk", post(library_import_bulk))
         .route("/library/adoption/{grab_id}", delete(library_adopt_undo))
+}
+
+/// Everything hanging off a configured Sonarr/Radarr.
+///
+/// Two eras in one group: the push/poll surface, deprecated since brarr
+/// took over the download side, and the import — which is why the *arr
+/// are still configured at all.
+fn arr_routes() -> Router<AppState> {
+    Router::new()
+        .route(
+            "/arr-instances",
+            get(arr_instances_index).post(arr_instances_create),
+        )
+        .route(
+            "/arr-instances/{id}",
+            delete(arr_instances_delete).put(arr_instances_update),
+        )
+        .route("/arr-instances/{id}/edit", get(arr_instances_edit))
+        .route("/arr-instances/{id}/test", post(arr_instances_test))
+        .route("/arr-instances/{id}/poll-now", post(arr_instances_poll_now))
+        .route("/arr-instances/{id}/toggle", post(arr_instances_toggle))
+        .route(
+            "/arr-instances/{id}/webhook-driven",
+            post(arr_instances_webhook_driven_toggle),
+        )
+        .route(
+            "/arr-instances/{id}/threshold",
+            post(arr_instances_update_threshold),
+        )
+        .route(
+            "/arr-instances/{id}/sync-source",
+            post(arr_instances_sync_source_toggle),
+        )
+        .route("/arr-instances/{id}/import", get(arr_import_index))
+        .route(
+            "/arr-instances/{id}/import/mappings",
+            post(arr_import_add_mapping),
+        )
+        .route("/arr-instances/{id}/import/run", post(arr_import_run))
+        .route("/arr-root-mappings/{id}", delete(arr_root_mapping_delete))
 }
 
 fn download_client_routes() -> Router<AppState> {
@@ -3017,6 +3039,8 @@ fn arr_instance_view(row: crate::db::arr_instances::ArrInstanceRow) -> ArrInstan
         profile_threshold: None,
         enabled: row.enabled,
         webhook_driven: row.webhook_driven,
+        sync_source: row.sync_source,
+        synced_at: row.synced_at.and_then(|t| t.format(&Iso8601::DEFAULT).ok()),
         // Filled by `fill_webhook_urls` at the *arr-table render sites
         // (needs the request origin + auth token, which the row lacks).
         webhook_url: String::new(),
@@ -4550,6 +4574,215 @@ async fn arr_instances_webhook_driven_toggle(
     let current = arr_instances::get_by_id(state.pool(), uuid).await?;
     arr_instances::set_webhook_driven(state.pool(), uuid, !current.webhook_driven).await?;
     render_arr_instances_partial(&state).await
+}
+
+/// `POST /arr-instances/{id}/sync-source` — flip whether brarr reads
+/// this catalogue into its own library.
+///
+/// Deliberately separate from the enabled toggle: they are different
+/// questions, and the operator's three instances answer them differently
+/// — disabled for the deprecated push path, on as a source.
+async fn arr_instances_sync_source_toggle(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, AppError> {
+    let uuid = Uuid::parse_str(&id)
+        .map_err(|e| AppError::InvalidInput(format!("invalid arr_instance id: {e}")))?;
+    let current = arr_instances::get_by_id(state.pool(), uuid).await?;
+    arr_instances::set_sync_source(state.pool(), uuid, !current.sync_source).await?;
+    render_arr_instances_partial(&state).await
+}
+
+/// How long a manual import is waited on before the answer becomes "it
+/// is still running". A 468-title migration costs one TMDB call per
+/// title plus one per season, so it will not fit — the wait exists for
+/// the small instance that does.
+const MANUAL_IMPORT_WAIT: Duration = Duration::from_secs(20);
+
+/// Build the preview once. Every write on the import screen re-runs it,
+/// which is the point: adding the mapping that makes 292 folders visible
+/// has to change the number on screen.
+async fn arr_import_body(
+    state: &AppState,
+    instance_id: Uuid,
+) -> Result<ArrImportBodyPartial, AppError> {
+    let plan = crate::arr_import::plan(state, instance_id).await?;
+    let folders = root_folders::list_all(state.pool()).await?;
+    let profiles = quality_profiles::list_all(state.pool())
+        .await?
+        .into_iter()
+        .map(|p| ProfileView {
+            id: p.id.to_string(),
+            name: p.name,
+            description: p.description,
+            push_threshold: p.push_threshold,
+            is_preset: p.is_preset,
+        })
+        .collect();
+
+    Ok(ArrImportBodyPartial {
+        instance_id: plan.instance_id.to_string(),
+        kind: match plan.kind {
+            brarr_arr::ArrKind::Sonarr => "Sonarr".to_owned(),
+            brarr_arr::ArrKind::Radarr => "Radarr".to_owned(),
+        },
+        unmapped_roots: plan.roots.iter().filter(|r| r.mapped_to.is_none()).count(),
+        new_titles: plan.new_titles(),
+        known_titles: plan.known_titles(),
+        blocked_titles: plan.blocked_titles(),
+        seen_folders: plan.seen_folders(),
+        roots: plan
+            .roots
+            .iter()
+            .map(|r| ArrImportRootView {
+                arr_path: r.arr_path.clone(),
+                mapped_to: r
+                    .mapped_to
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().into_owned()),
+                mapping_id: r.mapping_id.map(|id| id.to_string()),
+                reachable: r.reachable,
+                titles: r.titles,
+            })
+            .collect(),
+        titles: plan
+            .titles
+            .iter()
+            .map(|t| ArrImportTitleView {
+                title: t.title.clone(),
+                year: t.year,
+                tmdb_id: t.tmdb_id,
+                monitored: t.monitored,
+                folder_seen: t.folder_seen,
+                status: t.status.label().to_owned(),
+                blocked: !t.status.actionable(),
+            })
+            .collect(),
+        root_folders: folders
+            .into_iter()
+            .map(|f| ArrRootOption {
+                id: f.id.to_string(),
+                path: f.path.to_string_lossy().into_owned(),
+            })
+            .collect(),
+        profiles,
+    })
+}
+
+/// `GET /arr-instances/{id}/import` — the preview screen.
+async fn arr_import_index(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, AppError> {
+    let uuid = Uuid::parse_str(&id)
+        .map_err(|e| AppError::InvalidInput(format!("invalid arr_instance id: {e}")))?;
+    let row = arr_instances::get_by_id(state.pool(), uuid).await?;
+    let body = arr_import_body(&state, uuid).await?;
+    html(&ArrImportTemplate::from_body(body, row.name))
+}
+
+#[derive(Debug, Deserialize)]
+struct ArrRootMappingForm {
+    arr_path: String,
+    root_folder_id: String,
+}
+
+/// `POST /arr-instances/{id}/import/mappings` — map one \*arr root onto
+/// one of brarr's.
+async fn arr_import_add_mapping(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Form(form): Form<ArrRootMappingForm>,
+) -> Result<Response, AppError> {
+    let uuid = Uuid::parse_str(&id)
+        .map_err(|e| AppError::InvalidInput(format!("invalid arr_instance id: {e}")))?;
+    let root_folder_id = Uuid::parse_str(form.root_folder_id.trim())
+        .map_err(|e| AppError::InvalidInput(format!("pasta raiz inválida: {e}")))?;
+    crate::db::arr_root_mappings::insert(state.pool(), uuid, form.arr_path.trim(), root_folder_id)
+        .await?;
+    html(&arr_import_body(&state, uuid).await?)
+}
+
+/// `DELETE /arr-root-mappings/{id}` — forget one rule.
+///
+/// The mapping carries its instance, so the screen it re-renders is the
+/// one the rule belongs to rather than whichever page issued the delete.
+async fn arr_root_mapping_delete(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, AppError> {
+    let uuid = Uuid::parse_str(&id)
+        .map_err(|e| AppError::InvalidInput(format!("invalid mapping id: {e}")))?;
+    let all = crate::db::arr_root_mappings::list_all(state.pool()).await?;
+    let Some(row) = all.into_iter().find(|m| m.id == uuid) else {
+        return Err(AppError::NotFound(format!("arr_root_mapping {uuid}")));
+    };
+    let instance_id = row.arr_instance_id;
+    crate::db::arr_root_mappings::delete_by_id(state.pool(), uuid).await?;
+    html(&arr_import_body(&state, instance_id).await?)
+}
+
+#[derive(Debug, Deserialize)]
+struct ArrImportRunForm {
+    #[serde(default)]
+    monitoring: String,
+    #[serde(default)]
+    profile_id: Option<String>,
+}
+
+/// `POST /arr-instances/{id}/import/run` — read the catalogue in.
+///
+/// Spawned and waited on briefly, like `/library/{id}/scan`: a real
+/// migration outlives any request, and the honest answer is "still
+/// running, the library fills as it goes". Re-running is safe, so the
+/// operator never has to know which of the two happened.
+async fn arr_import_run(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Form(form): Form<ArrImportRunForm>,
+) -> Result<Response, AppError> {
+    let uuid = Uuid::parse_str(&id)
+        .map_err(|e| AppError::InvalidInput(format!("invalid arr_instance id: {e}")))?;
+    let profile_id = form
+        .profile_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(Uuid::parse_str)
+        .transpose()
+        .map_err(|e| AppError::InvalidInput(format!("profile_id deve ser uuid: {e}")))?;
+    let options = crate::arr_import::ImportOptions {
+        monitoring: crate::arr_import::MonitorChoice::from_label(&form.monitoring),
+        profile_id,
+    };
+
+    let task_state = state.clone();
+    let handle =
+        tokio::spawn(async move { crate::arr_import::run(&task_state, uuid, options).await });
+    let report = match tokio::time::timeout(MANUAL_IMPORT_WAIT, handle).await {
+        Ok(Ok(Ok(report))) => report,
+        Ok(Ok(Err(e))) => return Err(e),
+        Ok(Err(join)) => return Err(AppError::InvalidInput(format!("importação falhou: {join}"))),
+        Err(_elapsed) => {
+            // The task owns itself now; its results land in the library.
+            return html(&ArrImportReportPartial {
+                running: true,
+                ..ArrImportReportPartial::default()
+            });
+        }
+    };
+    html(&ArrImportReportPartial {
+        running: false,
+        added: report.added,
+        refreshed: report.refreshed,
+        blocked: report.blocked,
+        adopted: report.files.adopted,
+        already: report.files.already,
+        missing: report.files.missing,
+        unmapped: report.files.unmapped,
+        failures: report.failures,
+        failed: report.failed,
+    })
 }
 
 /// `GET /arr-instances/{id}/edit` — return the edit modal partial.
