@@ -1,0 +1,79 @@
+{
+  "description": "",
+  "episode_count": 5,
+  "group_count": 1,
+  "groups": [
+    {
+      "id": "5f8d2a3b1c9d440038b1a2c5",
+      "name": "Absolute",
+      "order": 1,
+      "episodes": [
+        {
+          "air_date": "2015-07-05",
+          "episode_number": 1,
+          "id": 1084258,
+          "name": "A Paz Recompensa de Goku",
+          "order": 0,
+          "season_number": 1,
+          "show_id": 62715,
+          "still_path": "/aaa.jpg",
+          "vote_average": 7.0,
+          "vote_count": 4
+        },
+        {
+          "air_date": "2015-07-12",
+          "episode_number": 2,
+          "id": 1084259,
+          "name": "Onde Está o Sonho de Vegeta?",
+          "order": 1,
+          "season_number": 1,
+          "show_id": 62715,
+          "still_path": "/bbb.jpg",
+          "vote_average": 7.1,
+          "vote_count": 4
+        },
+        {
+          "air_date": "2017-02-05",
+          "episode_number": 1,
+          "id": 1348892,
+          "name": "O Torneio do Poder Começa",
+          "order": 76,
+          "season_number": 5,
+          "show_id": 62715,
+          "still_path": "/ccc.jpg",
+          "vote_average": 8.2,
+          "vote_count": 9
+        },
+        {
+          "air_date": "2017-02-12",
+          "episode_number": 2,
+          "id": 1348893,
+          "name": "O Rugido de Toppo",
+          "order": 77,
+          "season_number": 5,
+          "show_id": 62715,
+          "still_path": "/ddd.jpg",
+          "vote_average": 8.0,
+          "vote_count": 7
+        },
+        {
+          "air_date": "",
+          "episode_number": 3,
+          "id": 1348894,
+          "name": "",
+          "order": 78,
+          "season_number": 5,
+          "show_id": 62715,
+          "still_path": null,
+          "vote_average": 0.0,
+          "vote_count": 0
+        }
+      ],
+      "locked": true
+    }
+  ],
+  "id": "5f8d2a3b1c9d440038b1a2c4",
+  "name": "Absolute Order",
+  "network": null,
+  "type": 2
+}

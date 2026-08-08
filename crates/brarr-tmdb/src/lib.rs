@@ -44,8 +44,8 @@ mod retry;
 pub use client::TmdbClient;
 pub use error::TmdbError;
 pub use model::{
-    Episode, FindResults, MovieDetails, MovieSummary, SeasonDetails, SeasonSummary, TvDetails,
-    TvSummary,
+    Episode, EpisodeGroup, EpisodeGroupKind, EpisodeGroupPart, EpisodeGroupSummary, FindResults,
+    GroupEpisode, MovieDetails, MovieSummary, SeasonDetails, SeasonSummary, TvDetails, TvSummary,
 };
 pub use retry::RetryConfig;
 

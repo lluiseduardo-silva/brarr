@@ -175,6 +175,24 @@
                     </svg>
                 </button>
 
+                {# Só para séries, e só leitura: pergunta ao TMDB quais
+                   numerações ele conhece para este título. Um filme não
+                   tem numeração alternativa, então o botão não existe
+                   lá em vez de existir desabilitado. #}
+                {% if item.is_series %}
+                <button hx-get="/library/{{ item.id }}/groups"
+                        hx-target="#modal-target"
+                        hx-swap="innerHTML"
+                        title="Numerações que o TMDB conhece para esta série (arco, absoluta, DVD)"
+                        aria-label="Ver numerações conhecidas"
+                        class="btn btn-md btn-icon btn-ghost">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/>
+                        <line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/>
+                    </svg>
+                </button>
+                {% endif %}
+
                 {# O alvo do badge do scan. Fica na fileira, não abaixo
                    dela, para o veredito nascer ao lado do botão que o
                    pediu. #}

@@ -1,0 +1,78 @@
+{# Quais numerações o TMDB conhece para esta série.
+
+   Só leitura, de propósito. Não grava nada, não troca numeração nenhuma
+   e custa uma chamada ao TMDB. A pergunta que ele responde — "quais dos
+   meus títulos têm arco ou ordem absoluta definidos" — precisa ser
+   respondível *antes* de qualquer decisão sobre renumerar, e a resposta
+   mais comum é "nenhum".
+
+   A ordem original de exibição aparece na lista mas não conta como
+   alternativa: ela é a forma canônica, a mesma que a árvore já usa.
+
+   Cancelar é `type="button"` + `close()`. `<form method="dialog">`
+   aninhado é removido pelo parser e vira submit do form de fora. #}
+<dialog id="groups-dialog" class="w-[640px] max-w-full rounded-xl bg-bg-surface border border-border-default p-0">
+    <div class="px-6 py-5 border-b border-border-default">
+        <h2 class="text-lg font-semibold text-fg-primary">Numerações conhecidas</h2>
+        <p class="text-sm text-fg-secondary mt-1 truncate" title="{{ item_title }}">{{ item_title }}</p>
+    </div>
+
+    <div class="px-6 py-5">
+        {% if rows.is_empty() %}
+        <p class="text-sm text-fg-secondary">
+            O TMDB não registra nenhuma numeração alternativa para esta série. A árvore da
+            biblioteca já é a única que existe.
+        </p>
+        {% else %}
+        <div class="overflow-x-auto">
+            <table class="w-full text-sm">
+                <thead>
+                    <tr class="text-xs uppercase tracking-[0.06em] text-fg-muted">
+                        <th class="text-left font-medium px-3 py-2">Nome</th>
+                        <th class="text-left font-medium px-3 py-2">Tipo</th>
+                        <th class="text-right font-medium px-3 py-2">Blocos</th>
+                        <th class="text-right font-medium px-3 py-2">Episódios</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for r in rows %}
+                    <tr class="border-t border-border-default">
+                        <td class="px-3 py-2 text-fg-primary">{{ r.name }}</td>
+                        <td class="px-3 py-2">
+                            {% if r.alternate %}
+                            <span class="badge bg-info-soft text-info-soft-fg">{{ r.kind }}</span>
+                            {% else %}
+                            <span class="text-fg-muted">{{ r.kind }}</span>
+                            {% endif %}
+                        </td>
+                        <td class="px-3 py-2 text-right text-fg-secondary">{{ r.group_count }}</td>
+                        <td class="px-3 py-2 text-right text-fg-secondary">{{ r.episode_count }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+
+        <p class="text-xs text-fg-muted mt-4">
+            {% if alternates == 0 %}
+            Nenhuma delas renumera os episódios — todas seguem a ordem canônica que a biblioteca
+            já usa.
+            {% else %}
+            {{ alternates }} numeração(ões) alternativa(s). O brarr ainda <strong>não</strong> busca por elas:
+            hoje ele pede <span class="font-mono">S01E02</span> ao indexador e exige esse marcador
+            no título da release. Numeração absoluta é justamente o caso em que a release se chama
+            <span class="font-mono">Série - 224</span> e não carrega marcador nenhum, então o que
+            falta é o casador, não o rótulo.
+            {% endif %}
+        </p>
+        {% endif %}
+    </div>
+
+    <div class="h-px bg-border-default"></div>
+    <footer class="flex items-center justify-end gap-2 px-6 py-4">
+        <button type="button" class="btn btn-md btn-secondary"
+                onclick="document.getElementById('groups-dialog').close()">
+            Fechar
+        </button>
+    </footer>
+</dialog>

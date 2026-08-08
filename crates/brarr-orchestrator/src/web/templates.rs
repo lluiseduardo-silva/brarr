@@ -1626,6 +1626,34 @@ pub struct EpisodeView {
     pub percent: Option<u8>,
 }
 
+/// One ordering, as the panel renders it.
+#[derive(Debug, Clone)]
+pub struct GroupRow {
+    /// Name the TMDB contributor gave it.
+    pub name: String,
+    /// Kind, in Portuguese.
+    pub kind: String,
+    /// Whether it renumbers away from the canonical `(season, episode)`.
+    pub alternate: bool,
+    /// How many buckets.
+    pub group_count: i32,
+    /// How many episodes it covers.
+    pub episode_count: i32,
+}
+
+/// `/library/{id}/groups` — read-only discovery of the alternate
+/// orderings TMDB knows for a series.
+#[derive(Debug, Template)]
+#[template(path = "partials/library_groups_modal.html")]
+pub struct LibraryGroupsModalPartial {
+    /// Series being asked about.
+    pub item_title: String,
+    /// Orderings, alternates first.
+    pub rows: Vec<GroupRow>,
+    /// How many of them renumber. Zero is the common answer.
+    pub alternates: usize,
+}
+
 /// "Where and how" for one title, in a dialog.
 ///
 /// The two `<select>`s used to sit loose in the detail page's control

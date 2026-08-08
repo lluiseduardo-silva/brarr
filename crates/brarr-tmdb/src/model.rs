@@ -178,6 +178,126 @@ pub struct SeasonDetails {
     pub episodes: Vec<Episode>,
 }
 
+/// What kind of ordering an episode group expresses.
+///
+/// TMDB's `type` is an integer with seven documented values. Two matter
+/// to brarr: [`Self::Absolute`], which is how an anime release is
+/// numbered (`Yu-Gi-Oh! - 224`, no `SxxEyy` anywhere), and
+/// [`Self::StoryArc`], which is how a long-running series is sometimes
+/// published. The rest are recorded rather than dropped so the screen
+/// can say what it found instead of hiding it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EpisodeGroupKind {
+    /// 1 — original air date.
+    OriginalAirDate,
+    /// 2 — absolute numbering, one run from episode 1.
+    Absolute,
+    /// 3 — DVD ordering.
+    Dvd,
+    /// 4 — digital ordering.
+    Digital,
+    /// 5 — story arc.
+    StoryArc,
+    /// 6 — production order.
+    Production,
+    /// 7 — TV ordering.
+    Tv,
+    /// A value added upstream after this was written. Kept rather than
+    /// collapsed into a default, so an unknown ordering is visible as
+    /// unknown.
+    Other(i64),
+}
+
+impl EpisodeGroupKind {
+    /// Map TMDB's integer.
+    #[must_use]
+    pub fn from_code(code: i64) -> Self {
+        match code {
+            1 => Self::OriginalAirDate,
+            2 => Self::Absolute,
+            3 => Self::Dvd,
+            4 => Self::Digital,
+            5 => Self::StoryArc,
+            6 => Self::Production,
+            7 => Self::Tv,
+            other => Self::Other(other),
+        }
+    }
+
+    /// Whether this ordering renumbers episodes away from the canonical
+    /// `(season, episode)` — i.e. whether it is one brarr could search
+    /// under. Original air date and TV order are the canonical shape.
+    #[must_use]
+    pub fn is_alternate_ordering(self) -> bool {
+        matches!(
+            self,
+            Self::Absolute | Self::StoryArc | Self::Dvd | Self::Digital | Self::Production
+        )
+    }
+}
+
+/// One ordering TMDB knows for a series, as the list endpoint gives it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EpisodeGroupSummary {
+    /// TMDB's id for the group — a hex string, not an integer.
+    pub id: String,
+    /// Name the contributor gave it.
+    pub name: Option<String>,
+    /// Free-text description, often empty.
+    pub description: Option<String>,
+    /// What kind of ordering it is.
+    pub kind: EpisodeGroupKind,
+    /// How many buckets it has.
+    pub group_count: i32,
+    /// How many episodes it covers.
+    pub episode_count: i32,
+}
+
+/// One ordering with its contents.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EpisodeGroup {
+    /// TMDB's id for the group.
+    pub id: String,
+    /// Name the contributor gave it.
+    pub name: Option<String>,
+    /// What kind of ordering it is.
+    pub kind: EpisodeGroupKind,
+    /// Its buckets, in the order TMDB returned them.
+    pub groups: Vec<EpisodeGroupPart>,
+}
+
+/// One bucket inside an ordering.
+///
+/// **Not a TMDB season.** It has no season id, which is why an alternate
+/// ordering cannot simply be keyed onto `library_seasons`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EpisodeGroupPart {
+    /// Bucket name — an arc title, or "Season 1" in DVD order.
+    pub name: Option<String>,
+    /// Position of the bucket within the group.
+    pub order: i32,
+    /// Episodes in it.
+    pub episodes: Vec<GroupEpisode>,
+}
+
+/// An episode as it appears inside a group.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupEpisode {
+    /// **TMDB's own episode id.** The identity that is stable across
+    /// orderings — and the one `EpisodeDto` discards on the season
+    /// endpoint, which is why re-numbering a series is currently a
+    /// rebuild rather than a relabel.
+    pub id: i64,
+    /// Canonical season, as `/tv/{id}/season/{n}` numbers it.
+    pub season_number: i32,
+    /// Canonical number within that season.
+    pub episode_number: i32,
+    /// Position within this group — the alternate numbering.
+    pub order: i32,
+    /// Episode title.
+    pub title: Option<String>,
+}
+
 /// What `/find` matched for an external id.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FindResults {
@@ -185,6 +305,48 @@ pub struct FindResults {
     pub movies: Vec<MovieSummary>,
     /// Series matching the external id.
     pub series: Vec<TvSummary>,
+}
+
+impl EpisodeGroupSummary {
+    pub(crate) fn from_dto(dto: dto::EpisodeGroupSummaryDto) -> Self {
+        Self {
+            id: dto.id,
+            name: dto.name,
+            description: dto.description,
+            kind: EpisodeGroupKind::from_code(dto.kind),
+            group_count: i32::try_from(dto.group_count).unwrap_or(0),
+            episode_count: i32::try_from(dto.episode_count).unwrap_or(0),
+        }
+    }
+}
+
+impl EpisodeGroup {
+    pub(crate) fn from_dto(dto: dto::EpisodeGroupDto) -> Self {
+        Self {
+            id: dto.id,
+            name: dto.name,
+            kind: EpisodeGroupKind::from_code(dto.kind),
+            groups: dto
+                .groups
+                .into_iter()
+                .map(|g| EpisodeGroupPart {
+                    name: g.name,
+                    order: i32::try_from(g.order).unwrap_or(0),
+                    episodes: g
+                        .episodes
+                        .into_iter()
+                        .map(|e| GroupEpisode {
+                            id: e.id,
+                            season_number: i32::try_from(e.season_number).unwrap_or(0),
+                            episode_number: i32::try_from(e.episode_number).unwrap_or(0),
+                            order: i32::try_from(e.order).unwrap_or(0),
+                            title: e.name,
+                        })
+                        .collect(),
+                })
+                .collect(),
+        }
+    }
 }
 
 /// Pick the best translation for a field, walking pt-BR → pt-PT → en-US.

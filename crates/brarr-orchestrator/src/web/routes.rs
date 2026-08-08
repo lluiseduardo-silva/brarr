@@ -118,6 +118,7 @@ pub fn router(state: AppState, static_dir: &std::path::Path) -> Router {
         .route("/library/{id}/monitor", post(library_toggle_monitor))
         .route("/library/{id}/profile", post(library_set_profile))
         .route("/library/{id}/placement", get(library_placement))
+        .route("/library/{id}/groups", get(library_groups))
         .route("/library/{id}/refresh", post(library_refresh))
         .route("/library/{id}/scan", post(library_scan_now))
         .route("/library/{id}/scan/status", get(library_scan_status))
@@ -2786,6 +2787,70 @@ async fn library_placement(
         root_folders,
         root_folder: item.root_folder.unwrap_or_default(),
     })
+}
+
+/// `GET /library/{id}/groups` — what alternate orderings TMDB knows for
+/// this series.
+///
+/// **Read-only, and deliberately so.** It writes nothing, changes no
+/// numbering, and costs one TMDB call: the question it answers is
+/// "which of my titles even have an arc or an absolute order defined",
+/// which has to be answerable *before* anything is decided about
+/// re-numbering. The mapping between the two numberings comes back
+/// inside the same response, so the panel can show it rather than
+/// promise it.
+async fn library_groups(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, AppError> {
+    let uuid = Uuid::parse_str(&id)
+        .map_err(|e| AppError::InvalidInput(format!("invalid library id: {e}")))?;
+    let item = library::get_by_id(state.pool(), uuid).await?;
+    if item.media_type != library::MediaType::Tv {
+        return Err(AppError::InvalidInput(
+            "agrupamentos só existem para séries".to_owned(),
+        ));
+    }
+    let tmdb = crate::tmdb_sync::client(state.pool()).await?;
+    let groups = tmdb.episode_groups(item.tmdb_id).await?;
+
+    let mut rows: Vec<crate::web::templates::GroupRow> = groups
+        .into_iter()
+        .map(|g| crate::web::templates::GroupRow {
+            name: g.name.unwrap_or_else(|| "sem nome".to_owned()),
+            kind: group_kind_label(g.kind).to_owned(),
+            alternate: g.kind.is_alternate_ordering(),
+            group_count: g.group_count,
+            episode_count: g.episode_count,
+        })
+        .collect();
+    // Alternates first: they are the reason anyone opened this.
+    rows.sort_by_key(|r| !r.alternate);
+
+    html(&crate::web::templates::LibraryGroupsModalPartial {
+        item_title: item.title,
+        alternates: rows.iter().filter(|r| r.alternate).count(),
+        rows,
+    })
+}
+
+/// Portuguese for [`brarr_tmdb::EpisodeGroupKind`].
+///
+/// The label lives here rather than on the enum because `brarr-tmdb` is
+/// a plain API client and has no business carrying this app's
+/// user-facing language.
+fn group_kind_label(kind: brarr_tmdb::EpisodeGroupKind) -> &'static str {
+    use brarr_tmdb::EpisodeGroupKind as K;
+    match kind {
+        K::OriginalAirDate => "exibição original",
+        K::Absolute => "absoluta",
+        K::Dvd => "DVD",
+        K::Digital => "digital",
+        K::StoryArc => "arco narrativo",
+        K::Production => "produção",
+        K::Tv => "TV",
+        K::Other(_) => "desconhecida",
+    }
 }
 
 /// How often the badge asks whether its sweep has finished.

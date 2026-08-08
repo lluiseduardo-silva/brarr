@@ -262,6 +262,73 @@ pub(crate) struct SeasonDetailsDto {
     pub episodes: Vec<EpisodeDto>,
 }
 
+/// `/tv/{id}/episode_groups` — the orderings TMDB knows for a series.
+#[derive(Debug, Deserialize)]
+pub(crate) struct EpisodeGroupsDto {
+    #[serde(default)]
+    pub results: Vec<EpisodeGroupSummaryDto>,
+}
+
+/// One ordering, as the list endpoint describes it. `id` is a Mongo-style
+/// hex string here and everywhere else — **not** an integer, unlike every
+/// other id in this API.
+#[derive(Debug, Deserialize)]
+pub(crate) struct EpisodeGroupSummaryDto {
+    pub id: String,
+    #[serde(default, deserialize_with = "de_opt_string")]
+    pub name: Option<String>,
+    #[serde(default, deserialize_with = "de_opt_string")]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub episode_count: i64,
+    #[serde(default)]
+    pub group_count: i64,
+    #[serde(rename = "type", default)]
+    pub kind: i64,
+}
+
+/// `/tv/episode_group/{id}` — one ordering, with its contents.
+#[derive(Debug, Deserialize)]
+pub(crate) struct EpisodeGroupDto {
+    pub id: String,
+    #[serde(default, deserialize_with = "de_opt_string")]
+    pub name: Option<String>,
+    #[serde(rename = "type", default)]
+    pub kind: i64,
+    #[serde(default)]
+    pub groups: Vec<EpisodeGroupPartDto>,
+}
+
+/// One bucket inside an ordering — an arc, or a "season" in DVD order.
+/// It is **not** a TMDB season and carries no season id.
+#[derive(Debug, Deserialize)]
+pub(crate) struct EpisodeGroupPartDto {
+    #[serde(default, deserialize_with = "de_opt_string")]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub order: i64,
+    #[serde(default)]
+    pub episodes: Vec<GroupEpisodeDto>,
+}
+
+/// An episode as it appears inside a group.
+///
+/// It carries the **canonical** `season_number`/`episode_number` next to
+/// its position in the group, so the response is itself the translation
+/// table between the two numberings — nothing has to be inferred.
+#[derive(Debug, Deserialize)]
+pub(crate) struct GroupEpisodeDto {
+    pub id: i64,
+    #[serde(default)]
+    pub season_number: i64,
+    #[serde(default)]
+    pub episode_number: i64,
+    #[serde(default)]
+    pub order: i64,
+    #[serde(default, deserialize_with = "de_opt_string")]
+    pub name: Option<String>,
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,

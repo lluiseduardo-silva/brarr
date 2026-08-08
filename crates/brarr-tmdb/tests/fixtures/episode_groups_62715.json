@@ -1,0 +1,37 @@
+{
+  "results": [
+    {
+      "description": "",
+      "episode_count": 131,
+      "group_count": 5,
+      "id": "5b11ba820e0a265e2c00000e",
+      "name": "Story Arcs",
+      "network": {
+        "id": 98,
+        "logo_path": "/8VCV78prwd9QzZnEm0ReO6NoDun.png",
+        "name": "Fuji TV",
+        "origin_country": "JP"
+      },
+      "type": 5
+    },
+    {
+      "description": "",
+      "episode_count": 131,
+      "group_count": 1,
+      "id": "5f8d2a3b1c9d440038b1a2c4",
+      "name": "Absolute Order",
+      "network": null,
+      "type": 2
+    },
+    {
+      "description": "",
+      "episode_count": 131,
+      "group_count": 5,
+      "id": "6001b4c3d2f1e50041aa7712",
+      "name": "Original Air Date",
+      "network": null,
+      "type": 1
+    }
+  ],
+  "id": 62715
+}

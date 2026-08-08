@@ -11,7 +11,7 @@
     reason = "tests assert on happy paths"
 )]
 
-use brarr_tmdb::{RetryConfig, TmdbClient, TmdbError};
+use brarr_tmdb::{EpisodeGroupKind, RetryConfig, TmdbClient, TmdbError};
 use time::macros::date;
 use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -582,4 +582,72 @@ async fn language_override_reaches_the_wire() {
         .search_movies("duna", None)
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn episode_groups_are_listed_with_their_kind() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/tv/62715/episode_groups"))
+        .respond_with(json(&fixture("episode_groups_62715.json")))
+        .mount(&server)
+        .await;
+
+    let groups = client(&server).episode_groups(62_715).await.unwrap();
+
+    assert_eq!(groups.len(), 3);
+    assert_eq!(groups[0].kind, EpisodeGroupKind::StoryArc);
+    assert_eq!(groups[0].group_count, 5);
+    assert_eq!(groups[1].kind, EpisodeGroupKind::Absolute);
+    // Original air date is the canonical shape — listing it is right,
+    // offering it as an alternative ordering would not be.
+    assert_eq!(groups[2].kind, EpisodeGroupKind::OriginalAirDate);
+    assert!(!groups[2].kind.is_alternate_ordering());
+    assert_eq!(
+        groups
+            .iter()
+            .filter(|g| g.kind.is_alternate_ordering())
+            .count(),
+        2
+    );
+    // The id is a hex string, not an integer, unlike every other id here.
+    assert_eq!(groups[1].id, "5f8d2a3b1c9d440038b1a2c4");
+}
+
+#[tokio::test]
+async fn a_group_carries_both_numberings_so_nothing_has_to_be_inferred() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/tv/episode_group/5f8d2a3b1c9d440038b1a2c4"))
+        .respond_with(json(&fixture("episode_group_absolute.json")))
+        .mount(&server)
+        .await;
+
+    let group = client(&server)
+        .episode_group("5f8d2a3b1c9d440038b1a2c4")
+        .await
+        .unwrap();
+
+    assert_eq!(group.kind, EpisodeGroupKind::Absolute);
+    assert_eq!(group.groups.len(), 1);
+    let episodes = &group.groups[0].episodes;
+    assert_eq!(episodes.len(), 5);
+
+    // The whole point: canonical coordinates *and* the position in the
+    // group travel together, so the mapping is read, never guessed.
+    // Absolute 77 is S05E01 — which no release title would ever say.
+    let e = &episodes[2];
+    assert_eq!(e.order, 76);
+    assert_eq!(e.season_number, 5);
+    assert_eq!(e.episode_number, 1);
+
+    // TMDB's own episode id — the identity stable across orderings, and
+    // the one the season endpoint's DTO still discards.
+    assert_eq!(episodes[0].id, 1_084_258);
+    assert_eq!(e.id, 1_348_892);
+
+    // An unaired entry keeps its slot: blank name and date degrade to
+    // None rather than failing the record.
+    assert_eq!(episodes[4].title, None);
+    assert_eq!(episodes[4].order, 78);
 }

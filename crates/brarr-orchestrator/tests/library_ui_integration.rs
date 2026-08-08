@@ -1466,3 +1466,56 @@ async fn a_movie_not_out_yet_is_upcoming_rather_than_missing() {
     assert!(body.contains("lib-status-upcoming"), "{body}");
     assert!(!body.contains("lib-status-missing"), "{body}");
 }
+
+/// The orderings panel renders what TMDB answered, and says plainly
+/// when nothing renumbers — which is the common answer and the one an
+/// operator most needs stated rather than implied by an empty table.
+#[test]
+fn the_orderings_panel_separates_alternates_from_the_canonical_order() {
+    use askama::Template;
+    use brarr_orchestrator::web::templates::{GroupRow, LibraryGroupsModalPartial};
+
+    let canonical_only = LibraryGroupsModalPartial {
+        item_title: "The Boys".to_owned(),
+        rows: vec![GroupRow {
+            name: "Original Air Date".to_owned(),
+            kind: "exibição original".to_owned(),
+            alternate: false,
+            group_count: 4,
+            episode_count: 32,
+        }],
+        alternates: 0,
+    };
+    let html = canonical_only.render().unwrap();
+    assert!(html.contains("Original Air Date"));
+    assert!(
+        html.contains("Nenhuma delas renumera"),
+        "a table of one canonical ordering must not read as an option"
+    );
+
+    let with_absolute = LibraryGroupsModalPartial {
+        item_title: "Dragon Ball Super".to_owned(),
+        rows: vec![GroupRow {
+            name: "Absolute Order".to_owned(),
+            kind: "absoluta".to_owned(),
+            alternate: true,
+            group_count: 1,
+            episode_count: 131,
+        }],
+        alternates: 1,
+    };
+    let html = with_absolute.render().unwrap();
+    assert!(html.contains("Absolute Order"));
+    assert!(html.contains("131"));
+    assert!(
+        html.contains("falta é o casador"),
+        "the panel has to say brarr cannot search these yet, or it promises a feature"
+    );
+
+    let none = LibraryGroupsModalPartial {
+        item_title: "Um filme qualquer".to_owned(),
+        rows: Vec::new(),
+        alternates: 0,
+    };
+    assert!(none.render().unwrap().contains("não registra nenhuma"));
+}

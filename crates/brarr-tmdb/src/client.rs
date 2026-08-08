@@ -8,7 +8,10 @@ use url::Url;
 
 use crate::dto;
 use crate::error::TmdbError;
-use crate::model::{FindResults, MovieDetails, MovieSummary, SeasonDetails, TvDetails, TvSummary};
+use crate::model::{
+    EpisodeGroup, EpisodeGroupSummary, FindResults, MovieDetails, MovieSummary, SeasonDetails,
+    TvDetails, TvSummary,
+};
 use crate::retry::{RetryConfig, run_with_retry};
 
 /// Public TMDB v3 base. Overridable so tests can point at a mock.
@@ -425,6 +428,49 @@ impl TmdbClient {
         let details: dto::SeasonDetailsDto =
             run_with_retry(self.retry, "season", || self.get(&path, &[])).await?;
         Ok(SeasonDetails::from_dto(details))
+    }
+
+    /// The alternate orderings TMDB knows for a series.
+    ///
+    /// Cheap: one call, and most series have none. The interesting kinds
+    /// are [`EpisodeGroupKind::Absolute`] and
+    /// [`EpisodeGroupKind::StoryArc`] — see
+    /// [`EpisodeGroupKind::is_alternate_ordering`].
+    ///
+    /// # Errors
+    ///
+    /// See [`TmdbError`].
+    pub async fn episode_groups(
+        &self,
+        tmdb_id: i64,
+    ) -> Result<Vec<EpisodeGroupSummary>, TmdbError> {
+        let path = format!("tv/{tmdb_id}/episode_groups");
+        let list: dto::EpisodeGroupsDto =
+            run_with_retry(self.retry, "episode_groups", || self.get(&path, &[])).await?;
+        Ok(list
+            .results
+            .into_iter()
+            .map(EpisodeGroupSummary::from_dto)
+            .collect())
+    }
+
+    /// One ordering with its contents.
+    ///
+    /// Each episode inside carries its **canonical** season and episode
+    /// number alongside its position in the group, so the response is
+    /// itself the translation table between the two numberings.
+    ///
+    /// `group_id` is a hex string, not an integer — unlike every other
+    /// id in this API.
+    ///
+    /// # Errors
+    ///
+    /// See [`TmdbError`].
+    pub async fn episode_group(&self, group_id: &str) -> Result<EpisodeGroup, TmdbError> {
+        let path = format!("tv/episode_group/{group_id}");
+        let group: dto::EpisodeGroupDto =
+            run_with_retry(self.retry, "episode_group", || self.get(&path, &[])).await?;
+        Ok(EpisodeGroup::from_dto(group))
     }
 
     /// Cheap round-trip that proves the token works. Backs the "testar
