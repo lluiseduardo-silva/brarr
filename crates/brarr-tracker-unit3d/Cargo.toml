@@ -8,8 +8,8 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
-brarr-core = { version = "0.11.1", path = "../brarr-core" }
-brarr-mediainfo = { version = "0.11.1", path = "../brarr-mediainfo" }
+brarr-core = { version = "0.11.2", path = "../brarr-core" }
+brarr-mediainfo = { version = "0.11.2", path = "../brarr-mediainfo" }
 reqwest = { version = "0.13.3", default-features = false, features = ["json", "default-tls", "http2", "charset", "stream", "query", "gzip", "deflate", "brotli"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"

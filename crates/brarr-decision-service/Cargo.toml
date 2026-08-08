@@ -8,7 +8,7 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
-brarr-core = { version = "0.11.1", path = "../brarr-core" }
+brarr-core = { version = "0.11.2", path = "../brarr-core" }
 regex = "1.12"
 serde = { version = "1.0.228", features = ["derive"] }
 thiserror = "2.0.18"
