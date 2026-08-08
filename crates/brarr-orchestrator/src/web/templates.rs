@@ -1266,6 +1266,8 @@ pub struct LibraryTemplate {
     pub filter: String,
     /// What the operator typed.
     pub query: String,
+    /// Active ordering.
+    pub sort: String,
     /// `(id, name)` for the bulk profile picker.
     pub profiles: Vec<(String, String)>,
     /// `(path, label)` for the bulk root-folder picker.
@@ -1294,6 +1296,8 @@ pub struct LibraryItemsPartial {
     pub filter: String,
     /// What the operator typed, echoed so a swap does not clear the box.
     pub query: String,
+    /// Active ordering, echoed so the picker keeps its choice.
+    pub sort: String,
     /// `(id, name)` for the bulk profile picker.
     pub profiles: Vec<(String, String)>,
     /// `(path, label)` for the bulk root-folder picker.

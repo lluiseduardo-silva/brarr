@@ -1033,6 +1033,11 @@ struct LibraryQuery {
     /// bounded number of typos — see [`crate::fuzzy`].
     #[serde(default)]
     q: Option<String>,
+    /// `title_asc`, `title_desc`, `added_asc`, `added_desc`, or absent
+    /// for the default — match order while searching, newest added
+    /// otherwise.
+    #[serde(default)]
+    sort: Option<String>,
 }
 
 /// Query string of `GET /library/add`.
@@ -1113,6 +1118,15 @@ async fn library_items(
     library_page(state, q, true, String::new()).await
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "one linear pipeline — read the query, take four bulk reads, \
+              fold each row through coverage, order, render. Cutting it up \
+              means helpers taking eight parameters each, which hides the \
+              sequence instead of clarifying it; the pieces that *are* \
+              self-contained (tree_summary, passes_filter, rank_items) are \
+              already out."
+)]
 async fn library_page(
     state: AppState,
     q: LibraryQuery,
@@ -1125,6 +1139,7 @@ async fn library_page(
     };
     let filter = q.filter.unwrap_or_default();
     let query = q.q.unwrap_or_default().trim().to_owned();
+    let sort = normalise_sort(q.sort.as_deref());
 
     let counts = library::counts(state.pool()).await?;
     let all = library::list(state.pool()).await?;
@@ -1145,7 +1160,7 @@ async fn library_page(
     let trees = library::tree_counts(state.pool()).await?;
     let series_progress = crate::coverage::summarise(&monitored_episodes, &coverage, now);
 
-    let mut items: Vec<(u32, LibraryItemView)> = Vec::with_capacity(all.len());
+    let mut items: Vec<Sortable> = Vec::with_capacity(all.len());
     for item in all {
         // The search runs before the coverage work, so a query narrows
         // what has to be summarised rather than summarising everything
@@ -1180,9 +1195,10 @@ async fn library_page(
             .and_then(|pid| profile_names.get(&pid).cloned())
             .unwrap_or_else(|| "—".to_owned());
 
-        items.push((
+        items.push(Sortable {
             rank,
-            LibraryItemView {
+            added_at: item.added_at,
+            view: LibraryItemView {
                 id: item.id.to_string(),
                 title: item.title,
                 year: item.year.map_or_else(|| "—".to_owned(), |y| y.to_string()),
@@ -1203,10 +1219,10 @@ async fn library_page(
                 upcoming,
                 percent: progress.percent(),
             },
-        ));
+        });
     }
 
-    let items = rank_items(items, &query);
+    let items = rank_items(items, &query, &sort);
 
     let tmdb_ready = crate::tmdb_sync::load_config(state.pool())
         .await?
@@ -1223,6 +1239,7 @@ async fn library_page(
             view,
             filter,
             query,
+            sort,
             profiles,
             root_folders,
             notice,
@@ -1239,6 +1256,7 @@ async fn library_page(
         view,
         filter,
         query,
+        sort,
         profiles,
         root_folders,
         notice,
@@ -1332,6 +1350,7 @@ async fn library_bulk(
             view: value("view"),
             filter: value("filter"),
             q: value("q"),
+            sort: value("sort"),
         },
         true,
         notice,
@@ -1924,15 +1943,63 @@ async fn root_folder_options(
         .collect())
 }
 
-/// Drop the match ranks, best first when there was a query.
+/// Accept only an ordering the screen offers; anything else is the
+/// default.
 ///
-/// Without one the SQL order stands — newest added, then title — which
-/// is what the operator expects from an unfiltered catalogue.
-fn rank_items(mut items: Vec<(u32, LibraryItemView)>, query: &str) -> Vec<LibraryItemView> {
-    if !query.is_empty() {
-        items.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.title.cmp(&b.1.title)));
+/// Falling back rather than erroring because the value arrives in a URL
+/// the operator can edit and share. A typo there should reorder nothing,
+/// not answer 400.
+fn normalise_sort(raw: Option<&str>) -> String {
+    match raw {
+        Some(s @ ("title_asc" | "title_desc" | "added_asc" | "added_desc")) => s.to_owned(),
+        _ => String::new(),
     }
-    items.into_iter().map(|(_, v)| v).collect()
+}
+
+/// One catalogue row plus the two keys it can be ordered by.
+///
+/// `added_at` travels as the timestamp rather than the `dd/mm/aaaa` the
+/// view carries — sorting the formatted string would order by day of the
+/// month.
+struct Sortable {
+    /// Search match rank; `0` when there is no query.
+    rank: u32,
+    /// When the operator added it.
+    added_at: OffsetDateTime,
+    /// The row itself.
+    view: LibraryItemView,
+}
+
+/// Put the rows in order and drop the keys.
+///
+/// An explicit choice always wins. With none, a search orders by match
+/// and an unfiltered catalogue keeps the SQL order — newest added first,
+/// which is what the operator expects to open the screen to.
+///
+/// Titles sort on [`crate::fuzzy::normalise`], not on the raw string:
+/// byte order puts every uppercase title before every lowercase one and
+/// files "Ávatar" after "Zulu", which is not what anyone means by
+/// alphabetical in Portuguese.
+fn rank_items(mut items: Vec<Sortable>, query: &str, sort: &str) -> Vec<LibraryItemView> {
+    match sort {
+        "title_asc" => items.sort_by_key(|i| crate::fuzzy::normalise(&i.view.title)),
+        "title_desc" => {
+            items.sort_by_key(|i| crate::fuzzy::normalise(&i.view.title));
+            items.reverse();
+        }
+        "added_asc" => items.sort_by_key(|i| i.added_at),
+        "added_desc" => {
+            items.sort_by_key(|i| i.added_at);
+            items.reverse();
+        }
+        _ if !query.is_empty() => items.sort_by(|a, b| {
+            b.rank.cmp(&a.rank).then_with(|| {
+                crate::fuzzy::normalise(&a.view.title).cmp(&crate::fuzzy::normalise(&b.view.title))
+            })
+        }),
+        _ => {}
+    }
+    items.into_iter().map(|i| i.view).collect()
 }
 
 /// Root folders for the bulk picker: **every** one, whatever it serves.

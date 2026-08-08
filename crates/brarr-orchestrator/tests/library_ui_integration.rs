@@ -857,6 +857,95 @@ async fn a_bulk_action_skips_ids_that_no_longer_exist() {
     );
 }
 
+/// Four orderings, and the default depends on whether there is a query.
+#[tokio::test]
+async fn the_catalogue_can_be_ordered_by_name_and_by_date() {
+    let (addr, state) = spawn().await;
+    // Added oldest-first so "recently added" and "A → Z" disagree.
+    for (tmdb, title) in [(1, "Zulu"), (2, "Ávatar"), (3, "melancolia")] {
+        library::upsert(
+            state.pool(),
+            &NewLibraryItem {
+                media_type: Some(MediaType::Movie),
+                tmdb_id: tmdb,
+                title: title.to_owned(),
+                ..NewLibraryItem::default()
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    let order = |body: &str| -> Vec<String> {
+        ["Zulu", "Ávatar", "melancolia"]
+            .into_iter()
+            .filter_map(|t| body.find(t).map(|at| (at, t.to_owned())))
+            .collect::<std::collections::BTreeMap<_, _>>()
+            .into_values()
+            .collect()
+    };
+
+    // Alphabetical folds accents and case: byte order would put every
+    // capital before every lowercase and file "Ávatar" after "Zulu".
+    let asc = order(&get(addr, "/library?sort=title_asc").await);
+    assert_eq!(asc, vec!["Ávatar", "melancolia", "Zulu"], "{asc:?}");
+
+    let desc = order(&get(addr, "/library?sort=title_desc").await);
+    assert_eq!(desc, vec!["Zulu", "melancolia", "Ávatar"], "{desc:?}");
+
+    // The three land within the same instant, so their `added_at` can
+    // tie and the order among ties is arbitrary. The invariant that
+    // holds regardless is that the two directions are each other's
+    // reverse — which is what "crescente e decrescente" means.
+    let oldest = order(&get(addr, "/library?sort=added_asc").await);
+    let newest = order(&get(addr, "/library?sort=added_desc").await);
+    assert_eq!(oldest.len(), 3);
+    assert_eq!(
+        oldest.iter().rev().cloned().collect::<Vec<_>>(),
+        newest,
+        "asc must be desc backwards: {oldest:?} vs {newest:?}"
+    );
+}
+
+/// A value the operator can mistype in the URL must reorder nothing,
+/// not answer 400.
+#[tokio::test]
+async fn an_unknown_sort_falls_back_to_the_default() {
+    let (addr, state) = spawn().await;
+    seed_series(&state).await;
+
+    let resp = reqwest::get(format!("http://{addr}/library?sort=banana"))
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("The Boys"), "{body}");
+    // And the picker shows the default as chosen, not the bad value.
+    assert!(body.contains(r#"<option value="" selected>"#), "{body}");
+}
+
+/// Choosing an order must survive a filter change and a search, or the
+/// two controls fight each other.
+#[tokio::test]
+async fn the_ordering_travels_with_the_filter_and_the_search() {
+    let (addr, state) = spawn().await;
+    seed_series(&state).await;
+
+    let page = get(addr, "/library?sort=title_asc").await;
+    // Six chips plus two view links, each carrying the choice — a chip
+    // that dropped it would silently reset the order on every click.
+    assert!(
+        page.matches("sort=title_asc").count() >= 8,
+        "every navigation link has to carry it: {page}"
+    );
+    assert!(page.contains("filter=tv"), "{page}");
+    // The search form sends it too, so typing does not undo the choice.
+    assert!(
+        page.contains(r#"<input type="hidden" name="sort" value="title_asc">"#),
+        "{page}"
+    );
+}
+
 /// The bulk picker offers **every** root, not one media type's.
 ///
 /// It was hard-coded to `Tv`, so an operator with `/midias/Filmes`,

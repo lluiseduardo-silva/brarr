@@ -57,6 +57,9 @@
       hx-trigger="keyup changed delay:300ms from:find input[name='q'], search from:find input[name='q']">
     <input type="hidden" name="view" value="{{ view }}">
     <input type="hidden" name="filter" value="{{ filter }}">
+    {# A ordenação viaja com a busca: digitar não pode desfazer a
+       escolha de ordem. O `<select>` lá embaixo manda a dele. #}
+    <input type="hidden" name="sort" value="{{ sort }}">
     {# Flex em vez de ícone posicionado por `absolute`: a borda mora no
        invólucro e o input entra sem a dele, o que dá o mesmo desenho
        sem precisar de meia dúzia de utilitários de posicionamento. #}

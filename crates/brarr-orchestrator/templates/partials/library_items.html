@@ -12,21 +12,21 @@
    e não há estado para sincronizar no cliente. Cada um leva o `q` atual
    junto para trocar de filtro não jogar a busca fora. #}
 <div class="flex items-center gap-2 mb-4 flex-wrap">
-    <a href="/library?view={{ view }}{% if !query.is_empty() %}&q={{ query }}{% endif %}"
+    <a href="/library?view={{ view }}{% if !query.is_empty() %}&q={{ query }}{% endif %}{% if !sort.is_empty() %}&sort={{ sort }}{% endif %}"
        class="lib-chip{% if filter.is_empty() %} lib-chip-on{% endif %}">Todos</a>
-    <a href="/library?view={{ view }}&filter=movie{% if !query.is_empty() %}&q={{ query }}{% endif %}"
+    <a href="/library?view={{ view }}&filter=movie{% if !query.is_empty() %}&q={{ query }}{% endif %}{% if !sort.is_empty() %}&sort={{ sort }}{% endif %}"
        class="lib-chip{% if filter == "movie" %} lib-chip-on{% endif %}">Filmes</a>
-    <a href="/library?view={{ view }}&filter=tv{% if !query.is_empty() %}&q={{ query }}{% endif %}"
+    <a href="/library?view={{ view }}&filter=tv{% if !query.is_empty() %}&q={{ query }}{% endif %}{% if !sort.is_empty() %}&sort={{ sort }}{% endif %}"
        class="lib-chip{% if filter == "tv" %} lib-chip-on{% endif %}">Séries</a>
     {# "Faltando" é o que o operador pode agir sobre: monitorado, já
        estreou, e não está aqui. Um título pausado com buracos fica de
        fora — o brarr não vai atrás dele, então listá-lo aqui seria
        chamar para uma ação que não existe. #}
-    <a href="/library?view={{ view }}&filter=missing{% if !query.is_empty() %}&q={{ query }}{% endif %}"
+    <a href="/library?view={{ view }}&filter=missing{% if !query.is_empty() %}&q={{ query }}{% endif %}{% if !sort.is_empty() %}&sort={{ sort }}{% endif %}"
        class="lib-chip{% if filter == "missing" %} lib-chip-on{% endif %}">Episódios faltando</a>
-    <a href="/library?view={{ view }}&filter=complete{% if !query.is_empty() %}&q={{ query }}{% endif %}"
+    <a href="/library?view={{ view }}&filter=complete{% if !query.is_empty() %}&q={{ query }}{% endif %}{% if !sort.is_empty() %}&sort={{ sort }}{% endif %}"
        class="lib-chip{% if filter == "complete" %} lib-chip-on{% endif %}">Completas</a>
-    <a href="/library?view={{ view }}&filter=unmonitored{% if !query.is_empty() %}&q={{ query }}{% endif %}"
+    <a href="/library?view={{ view }}&filter=unmonitored{% if !query.is_empty() %}&q={{ query }}{% endif %}{% if !sort.is_empty() %}&sort={{ sort }}{% endif %}"
        class="lib-chip{% if filter == "unmonitored" %} lib-chip-on{% endif %}">Pausados</a>
 
     <div class="flex-1"></div>
@@ -35,8 +35,31 @@
     <span class="text-xs text-fg-muted">{{ matched }} título(s)</span>
     {% endif %}
 
+    {# Ordenação. Troca o corpo por htmx em vez de navegar, para não
+       perder o que está escrito na busca; o `hx-include` leva o `q`
+       junto e o próprio `<select>` manda o `sort`.
+
+       A opção vazia não é "sem ordem": é a padrão, que muda de sentido
+       conforme o contexto — relevância enquanto há busca, mais recentes
+       primeiro quando não há. #}
+    <select name="sort"
+            hx-get="/library/items"
+            hx-target="#library-body"
+            hx-swap="outerHTML"
+            hx-trigger="change"
+            hx-include="[name='q']"
+            hx-vals='{"view": "{{ view }}", "filter": "{{ filter }}"}'
+            aria-label="Ordenar a biblioteca"
+            class="h-7 px-2 rounded-md bg-bg-surface border border-border-default text-xs text-fg-secondary focus:outline-none focus:border-accent-solid">
+        <option value="" {% if sort.is_empty() %}selected{% endif %}>{% if query.is_empty() %}Adicionados recentemente{% else %}Mais relevantes{% endif %}</option>
+        <option value="title_asc"   {% if sort == "title_asc" %}selected{% endif %}>Nome (A → Z)</option>
+        <option value="title_desc"  {% if sort == "title_desc" %}selected{% endif %}>Nome (Z → A)</option>
+        <option value="added_desc"  {% if sort == "added_desc" %}selected{% endif %}>Adicionados — mais novos</option>
+        <option value="added_asc"   {% if sort == "added_asc" %}selected{% endif %}>Adicionados — mais antigos</option>
+    </select>
+
     <div class="inline-flex items-center gap-0.5 p-0.5 rounded-md bg-bg-muted">
-        <a href="/library?view=grid{% if !filter.is_empty() %}&filter={{ filter }}{% endif %}{% if !query.is_empty() %}&q={{ query }}{% endif %}"
+        <a href="/library?view=grid{% if !filter.is_empty() %}&filter={{ filter }}{% endif %}{% if !query.is_empty() %}&q={{ query }}{% endif %}{% if !sort.is_empty() %}&sort={{ sort }}{% endif %}"
            title="grade"
            class="inline-flex items-center justify-center w-8 h-7 rounded {% if view != "list" %}bg-bg-surface text-fg-primary{% else %}text-fg-muted hover:text-fg-primary{% endif %}">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -44,7 +67,7 @@
                 <rect x="3" y="13.5" width="7.5" height="7.5" rx="1.5"/><rect x="13.5" y="13.5" width="7.5" height="7.5" rx="1.5"/>
             </svg>
         </a>
-        <a href="/library?view=list{% if !filter.is_empty() %}&filter={{ filter }}{% endif %}{% if !query.is_empty() %}&q={{ query }}{% endif %}"
+        <a href="/library?view=list{% if !filter.is_empty() %}&filter={{ filter }}{% endif %}{% if !query.is_empty() %}&q={{ query }}{% endif %}{% if !sort.is_empty() %}&sort={{ sort }}{% endif %}"
            title="lista"
            class="inline-flex items-center justify-center w-8 h-7 rounded {% if view == "list" %}bg-bg-surface text-fg-primary{% else %}text-fg-muted hover:text-fg-primary{% endif %}">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
@@ -66,7 +89,7 @@
       hx-post="/library/bulk"
       hx-target="#library-body"
       hx-swap="outerHTML"
-      hx-vals='{"view": "{{ view }}", "filter": "{{ filter }}", "q": "{{ query }}"}'>
+      hx-vals='{"view": "{{ view }}", "filter": "{{ filter }}", "q": "{{ query }}", "sort": "{{ sort }}"}'>
 <div class="lib-bulk" data-bulk-bar>
     <label class="flex items-center gap-2 text-sm text-fg-primary cursor-pointer">
         <input type="checkbox" data-bulk-all class="lib-check">
