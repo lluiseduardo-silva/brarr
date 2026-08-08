@@ -170,7 +170,7 @@ pub fn router(state: AppState, static_dir: &std::path::Path) -> Router {
         .merge(webhooks)
         .route("/login", get(login_get).post(login_post))
         .route("/healthz", get(healthz))
-        .nest_service("/static", ServeDir::new(static_dir))
+        .nest_service("/static", static_files(static_dir))
         // Branded 404. Without this axum returns a bare `Nothing
         // matched` text body; the fallback lets us reuse the same
         // template that powers other error surfaces.
@@ -1325,6 +1325,34 @@ async fn library_bulk(
         true,
     )
     .await
+}
+
+/// The `/static` tree, with revalidation forced.
+///
+/// `no-cache` means "revalidate", not "do not store": the browser keeps
+/// the file and asks with `If-Modified-Since`, so the ordinary answer is
+/// a 304 with no body.
+///
+/// It is here because `ServeDir` sends only `Last-Modified`, and a
+/// response carrying no explicit directive is **heuristically**
+/// cacheable — the browser invents an expiry from the file's age. A
+/// hand-authored stylesheet that changes every release is the worst
+/// possible thing to guess about, and the failure is silent in the ugly
+/// direction: the operator gets fresh markup rendered against days-old
+/// CSS, so every new class is simply inert. That is what "the filters
+/// lost their padding" was.
+///
+/// Wrapped in its own `Router` rather than layered onto the outer one,
+/// so the header lands on the static tree and nowhere near the Torznab
+/// feeds. Belt to the `?v=` braces on the `<link>` tags, which give a
+/// changed URL per release.
+fn static_files(dir: &std::path::Path) -> Router {
+    Router::new().fallback_service(ServeDir::new(dir)).layer(
+        tower_http::set_header::SetResponseHeaderLayer::overriding(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("no-cache"),
+        ),
+    )
 }
 
 /// "5 temporadas · 40 episódios · 76 especiais", or empty for a movie.

@@ -34,7 +34,7 @@
     {# CSS artesanal, versionado. Não há build step e não há Tailwind:
        `tests/css_coverage.rs` é o que substitui a checagem que o build
        do Tailwind fazia. #}
-    <link rel="stylesheet" href="/static/app.css">
+    <link rel="stylesheet" href="/static/app.css?v={{ crate::web::ASSET_VERSION }}">
 
     {# HTMX 2.0.10 — o `latest` do 2.x. O htmx 4 está em beta e o autor
        promete suporte ao 2.x "in perpetuity", então não há pressa.
@@ -45,11 +45,11 @@
 
     {# Theme toggle + nav active-link helpers. `defer` ensures DOM is
        parsed before they run; both register handlers on DOMContentLoaded. #}
-    <script src="/static/theme.js" defer></script>
-    <script src="/static/nav.js" defer></script>
-    <script src="/static/datetime.js" defer></script>
-    <script src="/static/copy.js" defer></script>
-    <script src="/static/library.js" defer></script>
+    <script src="/static/theme.js?v={{ crate::web::ASSET_VERSION }}" defer></script>
+    <script src="/static/nav.js?v={{ crate::web::ASSET_VERSION }}" defer></script>
+    <script src="/static/datetime.js?v={{ crate::web::ASSET_VERSION }}" defer></script>
+    <script src="/static/copy.js?v={{ crate::web::ASSET_VERSION }}" defer></script>
+    <script src="/static/library.js?v={{ crate::web::ASSET_VERSION }}" defer></script>
 </head>
 <body class="bg-bg-canvas text-fg-primary min-h-screen flex flex-col">
 
@@ -168,7 +168,7 @@
        mean closing the picker empties the importer underneath it, and
        with it every assignment already made. #}
     <div id="modal-target-2"></div>
-    <script src="/static/modal.js" defer></script>
+    <script src="/static/modal.js?v={{ crate::web::ASSET_VERSION }}" defer></script>
 
 </body>
 </html>

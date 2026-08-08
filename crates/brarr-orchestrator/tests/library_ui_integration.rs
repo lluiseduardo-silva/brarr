@@ -619,7 +619,73 @@ async fn placement_moved_into_a_dialog() {
     );
 }
 
+/// The stale-stylesheet bug, closed from both ends.
+///
+/// `ServeDir` sends only `Last-Modified`, and a response with no
+/// explicit directive is *heuristically* cacheable — the browser invents
+/// an expiry. That is how fresh markup ended up rendered against a
+/// days-old `app.css`, with every new class silently inert.
+#[tokio::test]
+async fn static_assets_are_versioned_and_must_be_revalidated() {
+    let (addr, _state) = spawn().await;
+
+    let page = get(addr, "/library").await;
+    let stamp = format!("?v={}", brarr_orchestrator::web::ASSET_VERSION);
+    assert!(
+        page.contains(&format!("/static/app.css{stamp}")),
+        "the stylesheet needs a URL that changes with the release: {page}"
+    );
+    assert!(
+        page.contains(&format!("/static/library.js{stamp}")),
+        "and so does every script: {page}"
+    );
+
+    let resp = reqwest::get(format!("http://{addr}/static/app.css"))
+        .await
+        .expect("send");
+    assert_eq!(
+        resp.headers()
+            .get("cache-control")
+            .and_then(|v| v.to_str().ok()),
+        Some("no-cache"),
+        "without a directive the browser is free to invent an expiry"
+    );
+}
+
 // ---------- the catalogue: filters, search, bulk ----------
+
+/// Selection is a mode, and a chosen title says so with its border.
+///
+/// 360 native checkboxes are noise on a grid whose job is being read at
+/// a glance, and a bare `input[type=checkbox]` has no identity. The box
+/// stays in the DOM — it is what the form submits — and is never drawn.
+#[tokio::test]
+async fn selection_is_a_mode_and_the_box_is_never_drawn() {
+    let (addr, state) = spawn().await;
+    seed_series(&state).await;
+
+    let page = get(addr, "/library").await;
+    assert!(
+        page.contains("data-select-toggle"),
+        "there has to be a way into the mode: {page}"
+    );
+    assert!(page.contains("data-select-off"), "and a way out: {page}");
+    // The card is the click target and carries the selected styling.
+    assert!(page.contains("lib-pick card-hairline"), "{page}");
+    assert!(page.contains(r#"class="lib-pick-box""#), "{page}");
+    // The old visible checkbox is gone from the rows; `.lib-check` now
+    // dresses only the "select all" control in the bar.
+    assert_eq!(
+        page.matches("lib-check").count(),
+        1,
+        "only the master box is drawn: {page}"
+    );
+    // Screen readers still get a name for it.
+    assert!(
+        page.contains("aria-label=\"Selecionar The Boys\""),
+        "{page}"
+    );
+}
 
 /// The two new chips read a status `coverage` computes, not a column.
 ///

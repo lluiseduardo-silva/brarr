@@ -19,14 +19,14 @@ anyhow = "1.0.102"
 arc-swap = "1.9.1"
 askama = "0.14.0"
 axum = { version = "0.8.9", default-features = false, features = ["macros", "http1", "tokio", "json", "query", "tracing", "form"] }
-brarr-arr = { version = "0.11.0", path = "../brarr-arr" }
-brarr-core = { version = "0.11.0", path = "../brarr-core" }
-brarr-decision-service = { version = "0.11.0", path = "../brarr-decision-service" }
-brarr-download-client = { version = "0.11.0", path = "../brarr-download-client" }
-brarr-plugin-host = { version = "0.11.0", path = "../brarr-plugin-host" }
-brarr-tracker-newznab = { version = "0.11.0", path = "../brarr-tracker-newznab" }
-brarr-tmdb = { version = "0.11.0", path = "../brarr-tmdb" }
-brarr-tracker-unit3d = { version = "0.11.0", path = "../brarr-tracker-unit3d" }
+brarr-arr = { version = "0.11.1", path = "../brarr-arr" }
+brarr-core = { version = "0.11.1", path = "../brarr-core" }
+brarr-decision-service = { version = "0.11.1", path = "../brarr-decision-service" }
+brarr-download-client = { version = "0.11.1", path = "../brarr-download-client" }
+brarr-plugin-host = { version = "0.11.1", path = "../brarr-plugin-host" }
+brarr-tracker-newznab = { version = "0.11.1", path = "../brarr-tracker-newznab" }
+brarr-tmdb = { version = "0.11.1", path = "../brarr-tmdb" }
+brarr-tracker-unit3d = { version = "0.11.1", path = "../brarr-tracker-unit3d" }
 # Free space per root folder — `std::fs` exposes no such thing, and the
 # import path has to know before it commits to a destination.
 fs4 = "0.13.1"
@@ -46,7 +46,7 @@ tokio = { version = "1.52.3", default-features = false, features = ["macros", "r
 tonic = "0.14.5"
 tonic-prost = "0.14.5"
 tower = { version = "0.5.3", default-features = false, features = ["util"] }
-tower-http = { version = "0.6.10", default-features = false, features = ["trace", "fs"] }
+tower-http = { version = "0.6.10", default-features = false, features = ["trace", "fs", "set-header"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 url = { version = "2.5.8", features = ["serde"] }

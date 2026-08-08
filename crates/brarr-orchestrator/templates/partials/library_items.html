@@ -54,10 +54,11 @@
     </div>
 </div>
 
-{# A barra de lote. Fica no DOM sempre e some por CSS quando nada está
-   marcado — `library.js` só liga `data-any` e a contagem. Renderizá-la
-   condicionalmente exigiria um round-trip por caixinha marcada, que é
-   exatamente o tipo de coisa que o DOM já sabe fazer sozinho.
+{# A barra de lote aparece junto com o modo de seleção, não com a
+   primeira marcação: é nela que o operador sai do modo, então precisa
+   existir antes de haver o que fazer. As ações ficam desabilitadas
+   enquanto nada está escolhido — `library.js` só liga o `disabled` e a
+   contagem, que é estado do DOM e não vale um round-trip por clique.
 
    O formulário embrulha as linhas: as caixinhas são o estado, como na
    tela de importação. Cada ação manda `sel` repetido. #}
@@ -74,22 +75,24 @@
 
     <div class="flex-1"></div>
 
-    <button type="submit" name="action" value="monitor" class="btn btn-sm btn-toggle-on">monitorar</button>
-    <button type="submit" name="action" value="unmonitor" class="btn btn-sm btn-secondary">pausar</button>
+    <button type="submit" name="action" value="monitor" data-bulk-action class="btn btn-sm btn-toggle-on">monitorar</button>
+    <button type="submit" name="action" value="unmonitor" data-bulk-action class="btn btn-sm btn-secondary">pausar</button>
 
     <select name="profile_id" class="h-7 px-2 rounded-md bg-bg-canvas border border-border-strong text-xs text-fg-primary focus:outline-none">
         <option value="">— perfil —</option>
         {% for p in profiles %}<option value="{{ p.0 }}">{{ p.1 }}</option>{% endfor %}
     </select>
-    <button type="submit" name="action" value="profile" class="btn btn-sm btn-secondary">aplicar perfil</button>
+    <button type="submit" name="action" value="profile" data-bulk-action class="btn btn-sm btn-secondary">aplicar perfil</button>
 
     {% if !root_folders.is_empty() %}
     <select name="root_folder" class="h-7 px-2 rounded-md bg-bg-canvas border border-border-strong text-xs text-fg-primary focus:outline-none">
         <option value="">— pasta raiz —</option>
         {% for f in root_folders %}<option value="{{ f.0 }}">{{ f.1 }}</option>{% endfor %}
     </select>
-    <button type="submit" name="action" value="root" class="btn btn-sm btn-secondary">aplicar pasta</button>
+    <button type="submit" name="action" value="root" data-bulk-action class="btn btn-sm btn-secondary">aplicar pasta</button>
     {% endif %}
+
+    <button type="button" data-select-off class="btn btn-sm btn-ghost">sair da seleção</button>
 </div>
 {% if items.is_empty() %}
 <div class="card-hairline bg-bg-surface border border-border-default rounded-xl px-5 py-16 text-center">
@@ -148,10 +151,8 @@
         <div class="px-4 w-44 text-[10px] font-medium uppercase tracking-[0.06em] text-fg-muted text-right">Ações</div>
     </div>
     {% for it in items %}
-    <div class="flex items-center border-t border-border-default" id="lib-{{ it.id }}">
-        <label class="px-4 shrink-0 flex items-center cursor-pointer">
-            <input type="checkbox" name="sel" value="{{ it.id }}" data-bulk-item class="lib-check">
-        </label>
+    <div class="lib-row lib-pick flex items-center border-t border-border-default" id="lib-{{ it.id }}">
+        <input type="checkbox" name="sel" value="{{ it.id }}" data-bulk-item class="lib-pick-box" aria-label="Selecionar {{ it.title }}">
         <div class="px-4 py-2.5 flex-1 flex items-center gap-3 min-w-0">
             {% if let Some(url) = it.poster_url %}
             <img src="{{ url }}" alt="" width="30" height="44" loading="lazy" class="shrink-0 w-[18px] h-[26px] rounded object-cover" style="width:30px;height:44px;">
@@ -200,14 +201,11 @@
    indicator you can read across a whole grid without focusing on any one
    card. The card's own `p-4` already clears the 4px bar, so no extra
    padding is needed. #}
-<div class="card-hairline bg-bg-surface border border-border-default rounded-xl relative overflow-hidden p-4 flex items-start gap-3.5" id="lib-{{ it.id }}">
+<div class="lib-pick card-hairline bg-bg-surface border border-border-default rounded-xl relative overflow-hidden p-4 flex items-start gap-3.5" id="lib-{{ it.id }}">
     <span class="lib-spine lib-spine-{{ it.tone }}" aria-hidden="true"></span>
-    {# A caixinha some visualmente até o card ser tocado ou marcado (ver
-       `.lib-check` no app.css): 360 quadradinhos sempre visíveis viram
-       ruído numa grade cuja função é ser lida de relance. #}
-    <label class="shrink-0 flex items-center cursor-pointer pt-1">
-        <input type="checkbox" name="sel" value="{{ it.id }}" data-bulk-item class="lib-check">
-    </label>
+    {# Nunca desenhada: o card inteiro é o alvo no modo de seleção, e o
+       escolhido se anuncia pela borda. Ver `.lib-pick` no app.css. #}
+    <input type="checkbox" name="sel" value="{{ it.id }}" data-bulk-item class="lib-pick-box" aria-label="Selecionar {{ it.title }}">
     {% if let Some(url) = it.poster_url %}
     <img src="{{ url }}" alt="" loading="lazy" class="shrink-0 rounded-md object-cover" style="width:100px;height:150px;">
     {% else %}

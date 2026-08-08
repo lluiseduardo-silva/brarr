@@ -739,7 +739,8 @@ body, body * {
 }
 .lib-chip-on:hover { color: var(--color-accent-fg); }
 
-/* A caixinha de seleção. O reset zera a aparência de todo input, então
+/* Só a caixinha "selecionar tudo" da barra é desenhada — ela é um
+   controle, não um card. O reset zera a aparência de todo input, então
    ela precisa recuperar a nativa explicitamente. */
 .lib-check {
   appearance: auto;
@@ -749,9 +750,60 @@ body, body * {
   cursor: pointer;
 }
 
-/* A barra de lote mora no DOM o tempo todo e some por CSS: `library.js`
-   só liga `data-any`. Renderizá-la condicionalmente custaria uma
-   requisição por caixinha marcada — o DOM já sabe contar. */
+/* --- modo de seleção ---
+
+   Um quadradinho por card em 360 cards é ruído numa grade cuja função é
+   ser lida de relance, e um checkbox nativo não tem identidade nenhuma.
+   A seleção entra por um botão e se mostra na **borda do próprio item**.
+
+   A caixinha continua no DOM — é ela que o formulário envia — mas nunca
+   é desenhada. Escondida por clip em vez de `display:none` para
+   continuar existindo na árvore de acessibilidade e alcançável pelo
+   teclado. */
+.lib-pick-box {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* `data-select` mora no `<body>`, não no `#library-body`: uma tecla na
+   busca troca o corpo inteiro, e o modo é preferência do operador, não
+   estado do servidor. */
+body[data-select="1"] .lib-pick {
+  cursor: pointer;
+}
+/* Dentro do modo o card inteiro é o alvo. Sem isto, escolher um título
+   abriria o título. */
+body[data-select="1"] .lib-pick a,
+body[data-select="1"] .lib-pick button,
+body[data-select="1"] .lib-pick select {
+  pointer-events: none;
+}
+body[data-select="1"] .lib-pick:hover {
+  border-color: var(--color-border-strong);
+}
+
+/* O escolhido muda a borda. `:has` porque quem sabe o estado é o input,
+   e sincronizar uma classe por JS seria uma segunda fonte de verdade. */
+.lib-pick:has(.lib-pick-box:checked) {
+  border-color: var(--color-accent-solid);
+  box-shadow: 0 0 0 1px var(--color-accent-solid);
+}
+/* A linha da lista não tem caixa própria para pintar: ganha uma barra na
+   borda esquerda e um fundo. */
+.lib-row.lib-pick:has(.lib-pick-box:checked) {
+  background-color: var(--color-accent-soft);
+  box-shadow: inset 3px 0 0 var(--color-accent-solid);
+}
+
+/* A barra de lote aparece com o modo, não com a primeira marcação: ela
+   é onde o operador sai do modo, então precisa existir antes de haver o
+   que fazer. As ações ficam desabilitadas até haver seleção. */
 .lib-bulk {
   display: none;
   align-items: center;
@@ -764,7 +816,7 @@ body, body * {
   background-color: var(--color-accent-soft);
   color: var(--color-accent-soft-fg);
 }
-.lib-bulk[data-any="1"] { display: flex; }
+body[data-select="1"] .lib-bulk { display: flex; }
 
 /* The spine down the left edge of a grid card — the indicator you can
    read without focusing on any text. */
