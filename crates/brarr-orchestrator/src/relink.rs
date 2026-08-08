@@ -290,6 +290,99 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_real_names_on_this_operator_s_disk_resolve() {
+        // Both taken verbatim from the production database, because both
+        // carry something a marker parser can trip on: a **season 0**
+        // special (the tree has those, and refusing them would strand
+        // the exact rows that need repairing), and a release tail —
+        // `DTS-HD MA 2.0` — full of digits that a second, looser marker
+        // pattern could read as another episode and report as ambiguous.
+        for (name, want) in [
+            (
+                "The Familiar of Zero S00E01 1080p BluRay REMUX AVC DTS-HD MA 2.0-Th3Sherminator.mkv",
+                (0_u16, 1_u16),
+            ),
+            (
+                "The Familiar of Zero S01E02 1080p BluRay REMUX AVC DTS-HD MA 2.0-Th3Sherminator.mkv",
+                (1, 2),
+            ),
+            ("Tomb Raider King - S01E05.mkv", (1, 5)),
+        ] {
+            assert_eq!(
+                adopt::parse_marker(name).ok(),
+                Some(want),
+                "{name} must resolve to exactly one episode"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_season_zero_special_is_repaired_like_any_other_episode() {
+        // 50 of this operator's 55 orphans are one anime, and its
+        // specials live in season 0. The scanner stopped excluding
+        // season 0 in v0.10.1; the repair must not reintroduce the
+        // asymmetry.
+        let pool = open_memory().await.unwrap();
+        let (item_id, provider_id) = series(&pool).await;
+        sync_seasons(
+            &pool,
+            item_id,
+            &[
+                NewSeason {
+                    season_number: 0,
+                    episode_count: 1,
+                    air_date: None,
+                    episodes: vec![NewEpisode {
+                        episode_number: 1,
+                        title: None,
+                        air_date: None,
+                    }],
+                },
+                NewSeason {
+                    season_number: 1,
+                    episode_count: 2,
+                    air_date: None,
+                    episodes: vec![
+                        NewEpisode {
+                            episode_number: 1,
+                            title: None,
+                            air_date: None,
+                        },
+                        NewEpisode {
+                            episode_number: 2,
+                            title: None,
+                            air_date: None,
+                        },
+                    ],
+                },
+            ],
+        )
+        .await
+        .unwrap();
+        let id = orphan(
+            &pool,
+            item_id,
+            provider_id,
+            "s0",
+            "/midias/Animes/The Familiar of Zero/Season 0/The Familiar of Zero S00E01 \
+             1080p BluRay REMUX AVC DTS-HD MA 2.0-Th3Sherminator.mkv",
+        )
+        .await;
+
+        assert_eq!(run(&pool).await.unwrap().linked, 1);
+
+        let eps = library::episodes(&pool, item_id).await.unwrap();
+        let special = eps
+            .iter()
+            .find(|e| e.season_number == 0 && e.episode_number == 1)
+            .unwrap();
+        assert_eq!(
+            grabs::get_by_id(&pool, id).await.unwrap().episode_id,
+            Some(special.id)
+        );
+    }
+
+    #[tokio::test]
     async fn a_marker_the_catalogue_does_not_have_is_reported_not_guessed() {
         let pool = open_memory().await.unwrap();
         let (item_id, provider_id) = series(&pool).await;
