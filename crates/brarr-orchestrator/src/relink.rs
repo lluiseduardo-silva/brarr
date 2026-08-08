@@ -198,14 +198,18 @@ mod tests {
         (item.id, provider.id)
     }
 
-    /// Build an imported grab that names no episode — the shape a
-    /// refresh left behind.
+    /// Build the shape a pre-fix database carries: a grab taken **for an
+    /// episode**, imported, whose `episode_id` a metadata refresh then
+    /// nulled. The `UPDATE` stands in for the `ON DELETE SET NULL` that
+    /// `sync_seasons` used to trigger — no code path produces this any
+    /// more, which is exactly why the fixture has to forge it.
     async fn orphan(pool: &Pool, item_id: Uuid, provider_id: Uuid, guid: &str, path: &str) -> Uuid {
+        let episode = library::episodes(pool, item_id).await.unwrap()[0].id;
         let grab = reserve(
             pool,
             &NewGrab {
                 item_id,
-                episode_id: None,
+                episode_id: Some(episode),
                 season_number: None,
                 decision_id: None,
                 provider_id,
@@ -223,6 +227,11 @@ mod tests {
             .await
             .unwrap();
         mark_imported(pool, grab.id, path).await.unwrap();
+        sqlx::query("UPDATE grabs SET episode_id = NULL WHERE id = ?")
+            .bind(grab.id.to_string())
+            .execute(pool)
+            .await
+            .unwrap();
         grab.id
     }
 
@@ -320,7 +329,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_movie_grab_is_not_an_orphan() {
-        // `(NULL, NULL)` is the *correct* shape for a film.
+        // Naming no episode is the *correct* shape for a film, and
+        // `scope` is what tells the two apart — before the column the
+        // query had to infer it from the item's media type.
         let pool = open_memory().await.unwrap();
         let (_, provider_id) = series(&pool).await;
         let movie = upsert(
@@ -334,14 +345,30 @@ mod tests {
         )
         .await
         .unwrap();
-        orphan(
+        let grab = reserve(
             &pool,
-            movie.id,
-            provider_id,
-            "m",
-            "/midias/Filmes/The Matrix (1999).mkv",
+            &NewGrab {
+                item_id: movie.id,
+                episode_id: None,
+                season_number: None,
+                decision_id: None,
+                provider_id,
+                provider_name: "capybara",
+                release_id_remote: "m",
+                release_name: "m",
+                download_url: None,
+                protocol: crate::db::grabs::Protocol::Torrent,
+            },
         )
-        .await;
+        .await
+        .unwrap()
+        .unwrap();
+        set_status(&pool, grab.id, GrabStatus::Completed, None)
+            .await
+            .unwrap();
+        mark_imported(&pool, grab.id, "/midias/Filmes/The Matrix (1999).mkv")
+            .await
+            .unwrap();
 
         assert_eq!(run(&pool).await.unwrap().examined, 0);
     }

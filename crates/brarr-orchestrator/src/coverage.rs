@@ -363,7 +363,8 @@ pub fn episode_mark(
     // Nothing live. A row that named this episode and lost its file is a
     // different story from one that never existed.
     let vanished = grabs.iter().find(|g| {
-        g.file_missing_at.is_some() && grabs::covers_target(g.episode_id, g.season_number, target)
+        g.file_missing_at.is_some()
+            && grabs::covers_target(g.scope, g.episode_id, g.season_number, target)
     });
     if let Some(gone) = vanished {
         return EpisodeMark {
@@ -413,6 +414,7 @@ mod tests {
     fn cover_episode(item: Uuid, episode: Uuid) -> Coverage {
         Coverage {
             item_id: item,
+            scope: grabs::GrabScope::Episode,
             episode_id: Some(episode),
             season_number: None,
         }
@@ -521,6 +523,7 @@ mod tests {
         let s2 = ep(item, 2, -20);
         let pack = Coverage {
             item_id: item,
+            scope: grabs::GrabScope::Season,
             episode_id: None,
             season_number: Some(1),
         };

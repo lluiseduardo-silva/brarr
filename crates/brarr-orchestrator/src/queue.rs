@@ -395,6 +395,7 @@ mod tests {
         Grab {
             id: Uuid::new_v4(),
             item_id: Uuid::new_v4(),
+            scope: crate::db::grabs::GrabScope::Item,
             episode_id: None,
             season_number: None,
             decision_id: None,

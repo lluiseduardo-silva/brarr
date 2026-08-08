@@ -152,6 +152,68 @@ impl GrabStatus {
     }
 }
 
+/// What a grab is *about*.
+///
+/// Recorded rather than inferred from `(episode_id, season_number)`,
+/// because the absence of a value cannot distinguish "this grab is about
+/// the whole item" from "this grab lost what it was about". A grab taken
+/// for an episode stays [`Self::Episode`] forever: if its FK is nulled
+/// again it covers **nothing**, which is visible and repairable, instead
+/// of covering everything, which is not. See the migration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GrabScope {
+    /// The item as a whole — every film, and nothing else today.
+    #[default]
+    Item,
+    /// One season, as a pack.
+    Season,
+    /// One episode.
+    Episode,
+}
+
+impl GrabScope {
+    /// The scope a reservation with these coordinates is taking.
+    ///
+    /// Derived at insert and never passed in by a caller: it is exactly
+    /// the encoding the two columns already carried, and letting six
+    /// call sites set it by hand would be a sixth way to get it wrong.
+    #[must_use]
+    pub fn of(episode_id: Option<Uuid>, season_number: Option<i32>) -> Self {
+        match (episode_id, season_number) {
+            (Some(_), _) => Self::Episode,
+            (None, Some(_)) => Self::Season,
+            (None, None) => Self::Item,
+        }
+    }
+
+    /// Persisted label.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Item => "item",
+            Self::Season => "season",
+            Self::Episode => "episode",
+        }
+    }
+
+    /// Parse from the persisted label.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::InvalidInput`] for anything the CHECK
+    /// constraint would have rejected.
+    pub fn from_label(s: &str) -> Result<Self, AppError> {
+        match s {
+            "item" => Ok(Self::Item),
+            "season" => Ok(Self::Season),
+            "episode" => Ok(Self::Episode),
+            other => Err(AppError::InvalidInput(format!(
+                "unknown grabs.scope: {other}"
+            ))),
+        }
+    }
+}
+
 /// One acquisition attempt.
 #[derive(Debug, Clone)]
 pub struct Grab {
@@ -159,6 +221,9 @@ pub struct Grab {
     pub id: Uuid,
     /// Catalogue entry being acquired.
     pub item_id: Uuid,
+    /// What this grab is about. Survives its `episode_id` being nulled,
+    /// which is the entire reason it is stored.
+    pub scope: GrabScope,
     /// Set for a per-episode grab; `None` for a movie or season pack.
     pub episode_id: Option<Uuid>,
     /// Set for a season pack.
@@ -242,7 +307,7 @@ pub struct NewGrab<'a> {
     pub protocol: Protocol,
 }
 
-const GRAB_COLUMNS: &str = "id, item_id, episode_id, season_number, decision_id, provider_id, \
+const GRAB_COLUMNS: &str = "id, item_id, scope, episode_id, season_number, decision_id, provider_id, \
      provider_name, release_id_remote, release_name, download_url, protocol, \
      client_id, client_item_id, status, error, imported_path, file_missing_at, \
      import_wait_reason, import_attempted_at, grabbed_at, updated_at";
@@ -266,11 +331,13 @@ fn row_to_grab(row: &SqliteRow) -> Result<Grab, AppError> {
         .map_err(|e| AppError::InvalidInput(format!("invalid uuid in grabs.item_id: {e}")))?;
     let protocol_raw: String = row.try_get("protocol")?;
     let status_raw: String = row.try_get("status")?;
+    let scope_raw: String = row.try_get("scope")?;
     let grabbed: i64 = row.try_get("grabbed_at")?;
     let updated: i64 = row.try_get("updated_at")?;
     Ok(Grab {
         id,
         item_id,
+        scope: GrabScope::from_label(&scope_raw)?,
         episode_id: opt_uuid_at(row, "episode_id")?,
         season_number: row
             .try_get::<Option<i64>, _>("season_number")?
@@ -322,14 +389,15 @@ pub async fn reserve(pool: &Pool, new: &NewGrab<'_>) -> Result<Option<Grab>, App
     // genuine bug into a silent no-op.
     let res = sqlx::query(
         "INSERT INTO grabs ( \
-            id, item_id, episode_id, season_number, decision_id, provider_id, \
+            id, item_id, scope, episode_id, season_number, decision_id, provider_id, \
             provider_name, release_id_remote, release_name, download_url, \
             protocol, status, grabbed_at, updated_at \
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'reserved', ?, ?) \
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'reserved', ?, ?) \
          ON CONFLICT DO NOTHING",
     )
     .bind(id.to_string())
     .bind(new.item_id.to_string())
+    .bind(GrabScope::of(new.episode_id, new.season_number).label())
     .bind(new.episode_id.map(|e| e.to_string()))
     .bind(new.season_number.map(i64::from))
     .bind(new.decision_id.map(|d| d.to_string()))
@@ -405,14 +473,15 @@ pub async fn reserve_local(pool: &Pool, new: &LocalGrab<'_>) -> Result<Option<Gr
     // `INSERT OR IGNORE` would also swallow CHECK and FK violations.
     let res = sqlx::query(
         "INSERT INTO grabs ( \
-            id, item_id, episode_id, season_number, decision_id, provider_id, \
+            id, item_id, scope, episode_id, season_number, decision_id, provider_id, \
             provider_name, release_id_remote, release_name, download_url, \
             protocol, status, grabbed_at, updated_at \
-         ) VALUES (?, ?, ?, NULL, NULL, NULL, ?, ?, ?, NULL, 'local', 'reserved', ?, ?) \
+         ) VALUES (?, ?, ?, ?, NULL, NULL, NULL, ?, ?, ?, NULL, 'local', 'reserved', ?, ?) \
          ON CONFLICT DO NOTHING",
     )
     .bind(id.to_string())
     .bind(new.item_id.to_string())
+    .bind(GrabScope::of(new.episode_id, None).label())
     .bind(new.episode_id.map(|e| e.to_string()))
     .bind(LOCAL_PROVIDER_NAME)
     .bind(new.source_path)
@@ -664,13 +733,21 @@ pub async fn active_for_item(pool: &Pool, item_id: Uuid) -> Result<Vec<Grab>, Ap
 ///
 /// | grab | covers |
 /// |---|---|
-/// | `episode_id = X` | episode X only |
-/// | no episode, no season | the whole item — a movie, or a full-series grab |
-/// | no episode, `season_number = 4` | every episode of season 4 |
+/// | `scope = episode`, `episode_id = X` | episode X only |
+/// | `scope = item` | the whole item — a film, or a full-series grab |
+/// | `scope = season`, `season_number = 4` | every episode of season 4 |
+/// | `scope = episode`, `episode_id` NULL | **nothing** |
 ///
-/// That last row is why the season has to travel with the question. A
+/// The season row is why the season has to travel with the question. A
 /// pack of season 4 used to satisfy the query for *any* episode, so
 /// season 5 read as acquired the moment one pack landed.
+///
+/// The last row is why `scope` is a column. It used to be indexed the
+/// same way as `scope = item`, because both are "no episode, no season"
+/// — so a per-episode grab whose FK a metadata refresh nulled started
+/// answering for the entire series, and the library rendered complete.
+/// The scope survives the FK, so a grab that lost its episode now covers
+/// nothing until [`crate::relink`] puts it back.
 ///
 /// # Errors
 ///
@@ -685,14 +762,16 @@ pub async fn blocking_for(
          WHERE item_id = ? AND status NOT IN ('failed', 'rejected') \
            AND file_missing_at IS NULL \
            AND ( \
-                 episode_id IS ? \
-              OR (episode_id IS NULL AND (season_number IS NULL OR season_number IS ?)) \
+                 scope = 'item' \
+              OR (scope = 'season'  AND (? IS NULL OR season_number IS ?)) \
+              OR (scope = 'episode' AND episode_id IS ? AND episode_id IS NOT NULL) \
            ) \
          ORDER BY grabbed_at DESC"
     ))
     .bind(item_id.to_string())
     .bind(target.episode_id.map(|e| e.to_string()))
     .bind(target.season_number.map(i64::from))
+    .bind(target.episode_id.map(|e| e.to_string()))
     .fetch_all(pool)
     .await?;
     rows.iter().map(row_to_grab).collect()
@@ -729,14 +808,11 @@ impl GrabTarget {
 
 /// The predicate [`blocking_for`] applies in SQL, in Rust.
 ///
-/// A direct translation of
-/// `episode_id IS ? OR (episode_id IS NULL AND (season_number IS NULL OR
-/// season_number IS ?))`. SQLite's `IS` is null-safe equality, which is
-/// exactly `Option::eq` — so the translation is the comparison, not a
-/// hand-written case analysis. Writing the cases out by hand is what
-/// makes a version like this disagree with the SQL for a season pack
-/// asked with [`GrabTarget::item`]: there the first disjunct is
-/// `NULL IS NULL`, true, and the query returns the row.
+/// One arm per scope, matching the three-branch `OR` in the query. It
+/// used to be a null-safe comparison of the two coordinate columns,
+/// which was a faithful translation of the SQL *and* of the encoding's
+/// flaw: `(NULL, NULL)` meant both "about the whole item" and "lost what
+/// it was about", so a decayed row covered everything.
 ///
 /// A test confronts the two over a matrix of fixtures, the same way
 /// `ProviderScope` and `Protocol::matches_kind` are kept in agreement.
@@ -745,7 +821,7 @@ pub fn covers(grab: &Grab, target: GrabTarget) -> bool {
     if !grab.status.blocks_search() || grab.file_missing_at.is_some() {
         return false;
     }
-    covers_target(grab.episode_id, grab.season_number, target)
+    covers_target(grab.scope, grab.episode_id, grab.season_number, target)
 }
 
 /// The coordinate half of [`covers`], without the status checks.
@@ -756,13 +832,22 @@ pub fn covers(grab: &Grab, target: GrabTarget) -> bool {
 /// that confronts it with the SQL guards that one.
 #[must_use]
 pub fn covers_target(
+    scope: GrabScope,
     episode_id: Option<Uuid>,
     season_number: Option<i32>,
     target: GrabTarget,
 ) -> bool {
-    episode_id == target.episode_id
-        || (episode_id.is_none()
-            && (season_number.is_none() || season_number == target.season_number))
+    match scope {
+        // A whole-item acquisition answers every question about the
+        // item, including "do I have episode 7".
+        GrabScope::Item => true,
+        // A pack answers for its own season, and for the item-wide
+        // "is anything covering this at all".
+        GrabScope::Season => target.episode_id.is_none() || season_number == target.season_number,
+        // An episode answers only for itself — and a row that lost its
+        // episode answers for nothing, which is the point of the column.
+        GrabScope::Episode => target.episode_id.is_some() && episode_id == target.episode_id,
+    }
 }
 
 /// The coordinates of one grab that still counts as coverage.
@@ -775,6 +860,8 @@ pub fn covers_target(
 pub struct Coverage {
     /// Catalogue entry the grab belongs to.
     pub item_id: Uuid,
+    /// What the grab is about.
+    pub scope: GrabScope,
     /// Episode it names, when it names one.
     pub episode_id: Option<Uuid>,
     /// Season it names, for a pack.
@@ -785,7 +872,7 @@ impl Coverage {
     /// Whether this grab answers for `target`.
     #[must_use]
     pub fn covers(self, target: GrabTarget) -> bool {
-        covers_target(self.episode_id, self.season_number, target)
+        covers_target(self.scope, self.episode_id, self.season_number, target)
     }
 }
 
@@ -793,11 +880,13 @@ const COVERAGE_WHERE: &str = "status NOT IN ('failed', 'rejected') AND file_miss
 
 fn row_to_coverage(row: &SqliteRow) -> Result<Coverage, AppError> {
     let item: String = row.try_get("item_id")?;
+    let scope_raw: String = row.try_get("scope")?;
     let episode: Option<String> = row.try_get("episode_id")?;
     let season: Option<i64> = row.try_get("season_number")?;
     Ok(Coverage {
         item_id: Uuid::parse_str(&item)
             .map_err(|e| AppError::InvalidInput(format!("invalid grabs.item_id: {e}")))?,
+        scope: GrabScope::from_label(&scope_raw)?,
         episode_id: episode
             .as_deref()
             .map(Uuid::parse_str)
@@ -818,7 +907,7 @@ fn row_to_coverage(row: &SqliteRow) -> Result<Coverage, AppError> {
 /// Returns [`AppError::Database`] on SQL failure.
 pub async fn live_coverage(pool: &Pool) -> Result<Vec<Coverage>, AppError> {
     let rows = sqlx::query(&format!(
-        "SELECT item_id, episode_id, season_number FROM grabs WHERE {COVERAGE_WHERE}"
+        "SELECT item_id, scope, episode_id, season_number FROM grabs WHERE {COVERAGE_WHERE}"
     ))
     .fetch_all(pool)
     .await?;
@@ -832,7 +921,7 @@ pub async fn live_coverage(pool: &Pool) -> Result<Vec<Coverage>, AppError> {
 /// Returns [`AppError::Database`] on SQL failure.
 pub async fn live_coverage_for_item(pool: &Pool, item_id: Uuid) -> Result<Vec<Coverage>, AppError> {
     let rows = sqlx::query(&format!(
-        "SELECT item_id, episode_id, season_number FROM grabs \
+        "SELECT item_id, scope, episode_id, season_number FROM grabs \
          WHERE item_id = ? AND {COVERAGE_WHERE}"
     ))
     .bind(item_id.to_string())
@@ -1103,13 +1192,14 @@ pub async fn relink_episode(pool: &Pool, id: Uuid, episode_id: Uuid) -> Result<R
     }
 }
 
-/// Grabs of a *series* that name neither an episode nor a season, and
-/// hold a file.
+/// Grabs taken for an episode that no longer name one, and hold a file.
 ///
-/// This is the shape a metadata refresh used to leave behind: the FK was
-/// nulled and `(NULL, NULL)` is the encoding of "covers the whole item",
-/// so one file answered for every episode of the show. Movies are
-/// excluded because for them the shape is the correct one.
+/// This is the shape a metadata refresh left behind. Before `scope`
+/// existed the query had to infer it — both coordinates NULL *and* the
+/// item a series, since for a film that shape is the correct one — which
+/// is exactly the ambiguity the column removes: a row that says
+/// `scope = 'episode'` with no `episode_id` cannot be anything but a
+/// decayed one.
 ///
 /// # Errors
 ///
@@ -1117,11 +1207,10 @@ pub async fn relink_episode(pool: &Pool, id: Uuid, episode_id: Uuid) -> Result<R
 pub async fn unlinked_episode_grabs(pool: &Pool) -> Result<Vec<Grab>, AppError> {
     let rows = sqlx::query(&format!(
         "SELECT {GRAB_COLUMNS} FROM grabs \
-         WHERE episode_id IS NULL AND season_number IS NULL \
+         WHERE scope = 'episode' AND episode_id IS NULL \
            AND imported_path IS NOT NULL \
            AND file_missing_at IS NULL \
            AND status NOT IN ('failed', 'rejected') \
-           AND item_id IN (SELECT id FROM library_items WHERE media_type = 'tv') \
          ORDER BY grabbed_at ASC"
     ))
     .fetch_all(pool)
@@ -1473,6 +1562,85 @@ mod tests {
         assert!(
             !covers(&after[0], GrabTarget::episode(eps[1].id, 4)),
             "and it must not start answering for the episode it never named"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_grab_that_lost_its_episode_covers_nothing() {
+        // The whole reason `scope` is a column. Before it, this row was
+        // indistinguishable from a whole-item acquisition — both are
+        // "no episode, no season" — so it answered for *every* episode
+        // of the series and the library rendered complete with each row
+        // pointing at an arbitrary file.
+        let pool = open_memory().await.unwrap();
+        let (_, provider_id) = fixture(&pool).await;
+        let series = library::upsert(
+            &pool,
+            &NewLibraryItem {
+                media_type: Some(MediaType::Tv),
+                tmdb_id: 62715,
+                title: "Dragon Ball Super".to_owned(),
+                ..NewLibraryItem::default()
+            },
+        )
+        .await
+        .unwrap();
+        library::sync_seasons(
+            &pool,
+            series.id,
+            &[NewSeason {
+                season_number: 1,
+                episode_count: 2,
+                air_date: None,
+                episodes: vec![
+                    NewEpisode {
+                        episode_number: 1,
+                        title: None,
+                        air_date: None,
+                    },
+                    NewEpisode {
+                        episode_number: 2,
+                        title: None,
+                        air_date: None,
+                    },
+                ],
+            }],
+        )
+        .await
+        .unwrap();
+        let eps = library::episodes(&pool, series.id).await.unwrap();
+
+        let mut held = new_grab(series.id, provider_id, "s01e01");
+        held.episode_id = Some(eps[0].id);
+        let grab = reserve(&pool, &held).await.unwrap().unwrap();
+        // Forge what the old `sync_seasons` left behind. No code path
+        // produces this any more, which is why the test has to.
+        sqlx::query("UPDATE grabs SET episode_id = NULL WHERE id = ?")
+            .bind(grab.id.to_string())
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let decayed = get_by_id(&pool, grab.id).await.unwrap();
+        assert_eq!(decayed.scope, GrabScope::Episode, "the scope survives");
+        assert!(
+            !covers(&decayed, GrabTarget::episode(eps[1].id, 1)),
+            "it must not answer for the episode it never named"
+        );
+        assert!(
+            !covers(&decayed, GrabTarget::episode(eps[0].id, 1)),
+            "nor for the one it did — it no longer knows which that was"
+        );
+        assert!(
+            !covers(&decayed, GrabTarget::item()),
+            "nor for the series as a whole"
+        );
+        assert!(
+            blocking_for(&pool, series.id, GrabTarget::episode(eps[1].id, 1))
+                .await
+                .unwrap()
+                .is_empty(),
+            "and the SQL has to agree, or the scanner and the UI disagree"
         );
     }
 
@@ -2112,6 +2280,21 @@ mod tests {
         reserve(&pool, &pack).await.unwrap();
 
         reserve_local(&pool, &local(series.id, "/midias/x.mkv"))
+            .await
+            .unwrap();
+
+        // The fifth shape, and the one that used to make the two
+        // implementations agree on the *wrong* answer: a per-episode
+        // grab whose FK a metadata refresh nulled. It has to be in the
+        // matrix, because a `covers` that special-cases it and a SQL
+        // clause that does not is exactly the drift this test exists
+        // for.
+        let mut decayed = new_grab(series.id, provider_id, "decayed");
+        decayed.episode_id = Some(e5.id);
+        let decayed = reserve(&pool, &decayed).await.unwrap().unwrap();
+        sqlx::query("UPDATE grabs SET episode_id = NULL WHERE id = ?")
+            .bind(decayed.id.to_string())
+            .execute(&pool)
             .await
             .unwrap();
 
