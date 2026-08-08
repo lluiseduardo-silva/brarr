@@ -109,6 +109,8 @@ pub fn router(state: AppState, static_dir: &std::path::Path) -> Router {
         .route("/searches/new", get(new_search_modal))
         .route("/searches/{id}", get(search_detail))
         .route("/library", get(library_index))
+        .route("/library/items", get(library_items))
+        .route("/library/bulk", post(library_bulk))
         .route("/library/add", get(library_add).post(library_add_submit))
         .route("/library/add/options", get(library_add_options))
         .route("/library/verify", post(library_verify))
@@ -1022,9 +1024,15 @@ struct LibraryQuery {
     /// `grid` (default) or `list`.
     #[serde(default)]
     view: Option<String>,
-    /// `movie`, `tv`, `unmonitored`, or absent for everything.
+    /// `movie`, `tv`, `unmonitored`, `missing`, `complete`, or absent
+    /// for everything.
     #[serde(default)]
     filter: Option<String>,
+    /// Free-text title search. Matched against the title *and* the
+    /// original title, forgiving accents, punctuation, word order and a
+    /// bounded number of typos — see [`crate::fuzzy`].
+    #[serde(default)]
+    q: Option<String>,
 }
 
 /// Query string of `GET /library/add`.
@@ -1090,14 +1098,41 @@ async fn library_index(
     State(state): State<AppState>,
     axum::extract::Query(q): axum::extract::Query<LibraryQuery>,
 ) -> Result<Response, AppError> {
+    library_page(state, q, false).await
+}
+
+/// `GET /library/items` — just the results, for the live search and the
+/// filter chips.
+///
+/// Same code path as the page, so a filtered fragment and a reloaded
+/// page can never disagree about what matches.
+async fn library_items(
+    State(state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<LibraryQuery>,
+) -> Result<Response, AppError> {
+    library_page(state, q, true).await
+}
+
+async fn library_page(
+    state: AppState,
+    q: LibraryQuery,
+    fragment: bool,
+) -> Result<Response, AppError> {
     let view = match q.view.as_deref() {
         Some("list") => "list".to_owned(),
         _ => "grid".to_owned(),
     };
     let filter = q.filter.unwrap_or_default();
+    let query = q.q.unwrap_or_default().trim().to_owned();
 
     let counts = library::counts(state.pool()).await?;
     let all = library::list(state.pool()).await?;
+
+    // One query for every profile name, not one per title. This was a
+    // `get_by_id` inside the loop — 360 round trips to render a column
+    // — which the de-N+1 pass missed because it was counting the
+    // *season* queries.
+    let profile_names = profile_name_map(state.pool()).await?;
 
     // Four queries for the whole page, whatever its size. This used to
     // be two per series — `seasons` and `episodes` — which is 720 round
@@ -1109,84 +1144,241 @@ async fn library_index(
     let trees = library::tree_counts(state.pool()).await?;
     let series_progress = crate::coverage::summarise(&monitored_episodes, &coverage, now);
 
-    let mut items = Vec::with_capacity(all.len());
+    let mut items: Vec<(u32, LibraryItemView)> = Vec::with_capacity(all.len());
     for item in all {
-        let keep = match filter.as_str() {
-            "movie" => item.media_type == library::MediaType::Movie,
-            "tv" => item.media_type == library::MediaType::Tv,
-            "unmonitored" => !item.monitored,
-            _ => true,
+        // The search runs before the coverage work, so a query narrows
+        // what has to be summarised rather than summarising everything
+        // and throwing most of it away.
+        let rank = if query.is_empty() {
+            0
+        } else {
+            let original = item.original_title.clone().unwrap_or_default();
+            match crate::fuzzy::score(&query, &[&item.title, &original]) {
+                Some(r) => r,
+                None => continue,
+            }
         };
-        if !keep {
-            continue;
-        }
 
         // Only series have a tree. Season 0 is TMDB's specials bucket,
         // and it is not small: The Boys carries 76 of them against 40
         // real episodes. Both halves of the summary exclude it or the
         // line reads "5 temporadas · 116 episódios", which is nonsense.
         let is_series = item.media_type == library::MediaType::Tv;
-        let tree_summary = if is_series {
-            let tree = trees.get(&item.id).copied().unwrap_or_default();
-            if tree.specials > 0 {
-                format!(
-                    "{} temporadas · {} episódios · {} especiais",
-                    tree.seasons, tree.episodes, tree.specials
-                )
-            } else {
-                format!("{} temporadas · {} episódios", tree.seasons, tree.episodes)
-            }
-        } else {
-            String::new()
-        };
+        let tree_summary = tree_summary(trees.get(&item.id).copied(), is_series);
 
         let progress = crate::coverage::progress_of(&item, &series_progress, &coverage, now);
         let status = crate::coverage::ItemStatus::of(item.monitored, progress);
         let (missing, upcoming) = status.callout(progress);
 
-        let profile = match item.profile_id {
-            Some(pid) => quality_profiles::get_by_id(state.pool(), pid)
-                .await
-                .map_or_else(|_| "—".to_owned(), |p| p.name),
-            None => "—".to_owned(),
-        };
+        if !passes_filter(&filter, is_series, item.monitored, missing, status) {
+            continue;
+        }
 
-        items.push(LibraryItemView {
-            id: item.id.to_string(),
-            title: item.title,
-            year: item.year.map_or_else(|| "—".to_owned(), |y| y.to_string()),
-            kind_label: if is_series { "Série" } else { "Filme" }.to_owned(),
-            is_series,
-            poster_url: brarr_tmdb::image_url(item.poster_path.as_deref(), POSTER_SIZE),
-            monitored: item.monitored,
-            profile,
-            tmdb_id: item.tmdb_id,
-            imdb_id: item.imdb_id,
-            tree_summary,
-            added_at: short_date(item.added_at),
-            tone: status.tone().to_owned(),
-            status_label: status.label().to_owned(),
-            monitored_count: progress.total,
-            have: progress.have,
-            missing,
-            upcoming,
-            percent: progress.percent(),
-        });
+        let profile = item
+            .profile_id
+            .and_then(|pid| profile_names.get(&pid).cloned())
+            .unwrap_or_else(|| "—".to_owned());
+
+        items.push((
+            rank,
+            LibraryItemView {
+                id: item.id.to_string(),
+                title: item.title,
+                year: item.year.map_or_else(|| "—".to_owned(), |y| y.to_string()),
+                kind_label: if is_series { "Série" } else { "Filme" }.to_owned(),
+                is_series,
+                poster_url: brarr_tmdb::image_url(item.poster_path.as_deref(), POSTER_SIZE),
+                monitored: item.monitored,
+                profile,
+                tmdb_id: item.tmdb_id,
+                imdb_id: item.imdb_id,
+                tree_summary,
+                added_at: short_date(item.added_at),
+                tone: status.tone().to_owned(),
+                status_label: status.label().to_owned(),
+                monitored_count: progress.total,
+                have: progress.have,
+                missing,
+                upcoming,
+                percent: progress.percent(),
+            },
+        ));
     }
+
+    // Best match first when there is a query; otherwise leave the SQL
+    // order alone (newest added, then title), which is what the operator
+    // expects from an unfiltered catalogue.
+    if !query.is_empty() {
+        items.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.title.cmp(&b.1.title)));
+    }
+    let items: Vec<LibraryItemView> = items.into_iter().map(|(_, v)| v).collect();
 
     let tmdb_ready = crate::tmdb_sync::load_config(state.pool())
         .await?
         .is_configured();
 
+    let matched = items.len();
+    let profiles = profile_options(state.pool()).await?;
+    let root_folders = root_folder_options(&state, library::MediaType::Tv).await?;
+
+    if fragment {
+        return html(&crate::web::templates::LibraryItemsPartial {
+            items,
+            matched,
+            view,
+            filter,
+            query,
+            profiles,
+            root_folders,
+            tmdb_ready,
+        });
+    }
     html(&LibraryTemplate {
-        items,
         movies: counts.movies,
         series: counts.series,
         unmonitored: counts.unmonitored,
+        tmdb_ready,
+        items,
+        matched,
         view,
         filter,
-        tmdb_ready,
+        query,
+        profiles,
+        root_folders,
     })
+}
+
+/// `POST /library/bulk` — one action against every checked title.
+///
+/// Body is `Vec<(String, String)>` rather than a struct, the same shape
+/// the import screen uses: `sel` repeats once per checked row, and
+/// `serde_urlencoded` — which is what axum's `Form` runs on — collapses
+/// repeated keys instead of collecting them. A `Vec<String>` field
+/// silently loses every value but one.
+///
+/// Answers the re-rendered list rather than a redirect, so the operator
+/// sees the new state without losing the filter or the search they were
+/// in. An unknown id is skipped rather than failing the batch: the page
+/// may be minutes old, and a title deleted in another tab must not abort
+/// the other thirty-nine updates.
+async fn library_bulk(
+    State(state): State<AppState>,
+    Form(fields): Form<Vec<(String, String)>>,
+) -> Result<Response, AppError> {
+    let value = |key: &str| {
+        fields
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.trim().to_owned())
+    };
+    let ids: Vec<Uuid> = fields
+        .iter()
+        .filter(|(k, _)| k == "sel")
+        .filter_map(|(_, v)| Uuid::parse_str(v).ok())
+        .collect();
+    let action = value("action").unwrap_or_default();
+
+    if !ids.is_empty() {
+        match action.as_str() {
+            "monitor" => {
+                library::set_monitored_many(state.pool(), &ids, true).await?;
+            }
+            "unmonitor" => {
+                library::set_monitored_many(state.pool(), &ids, false).await?;
+            }
+            "profile" => {
+                let raw = value("profile_id").unwrap_or_default();
+                let profile =
+                    if raw.is_empty() {
+                        None
+                    } else {
+                        Some(Uuid::parse_str(&raw).map_err(|e| {
+                            AppError::InvalidInput(format!("invalid profile id: {e}"))
+                        })?)
+                    };
+                library::set_profile_many(state.pool(), &ids, profile).await?;
+            }
+            "root" => {
+                let raw = value("root_folder").unwrap_or_default();
+                library::set_root_folder_many(
+                    state.pool(),
+                    &ids,
+                    (!raw.is_empty()).then_some(raw.as_str()),
+                )
+                .await?;
+            }
+            other => {
+                return Err(AppError::InvalidInput(format!(
+                    "ação em lote desconhecida: {other}"
+                )));
+            }
+        }
+    }
+
+    library_page(
+        state,
+        LibraryQuery {
+            view: value("view"),
+            filter: value("filter"),
+            q: value("q"),
+        },
+        true,
+    )
+    .await
+}
+
+/// "5 temporadas · 40 episódios · 76 especiais", or empty for a movie.
+///
+/// Season 0 is counted separately rather than folded in: The Boys
+/// carries 76 specials against 40 real episodes, and adding them would
+/// render "5 temporadas · 116 episódios", which is nonsense.
+fn tree_summary(tree: Option<library::TreeCounts>, is_series: bool) -> String {
+    if !is_series {
+        return String::new();
+    }
+    let tree = tree.unwrap_or_default();
+    if tree.specials > 0 {
+        format!(
+            "{} temporadas · {} episódios · {} especiais",
+            tree.seasons, tree.episodes, tree.specials
+        )
+    } else {
+        format!("{} temporadas · {} episódios", tree.seasons, tree.episodes)
+    }
+}
+
+/// Whether one title survives the active filter chip.
+///
+/// The status chips are answered here rather than against a column,
+/// because "faltando" and "completa" are things `crate::coverage`
+/// computes. `missing` is the **callout** count, so a paused title with
+/// the same gaps does not appear under "faltando": brarr is not going
+/// to chase it, and listing it would be a call to an action that does
+/// not exist.
+fn passes_filter(
+    filter: &str,
+    is_series: bool,
+    monitored: bool,
+    missing: usize,
+    status: crate::coverage::ItemStatus,
+) -> bool {
+    match filter {
+        "movie" => !is_series,
+        "tv" => is_series,
+        "unmonitored" => !monitored,
+        "missing" => missing > 0,
+        "complete" => status == crate::coverage::ItemStatus::Complete,
+        _ => true,
+    }
+}
+
+/// `(id, name)` for every quality profile, for the bulk picker.
+async fn profile_options(pool: &crate::db::Pool) -> Result<Vec<(String, String)>, AppError> {
+    Ok(quality_profiles::list_all(pool)
+        .await?
+        .into_iter()
+        .map(|p| (p.id.to_string(), p.name))
+        .collect())
 }
 
 /// `GET /library/add` — TMDB search.

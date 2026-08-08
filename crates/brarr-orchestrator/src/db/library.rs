@@ -527,6 +527,107 @@ pub async fn set_monitored(pool: &Pool, id: Uuid, monitored: bool) -> Result<(),
     Ok(())
 }
 
+/// Flip the monitoring flag on many titles at once.
+///
+/// One transaction rather than one statement with a built `IN (…)`
+/// list: the id count is operator-chosen and unbounded, SQLite caps how
+/// many parameters a statement may bind, and string-building the list
+/// is the shape that invites an injection the day someone passes
+/// something other than a `Uuid`. A few hundred updates inside one
+/// transaction is a single fsync and a few milliseconds.
+///
+/// Returns how many rows actually changed. An id that no longer exists
+/// is **not** an error here — a bulk action on a stale page should do
+/// what it can and report the number, not fail whole because one title
+/// was deleted in another tab.
+///
+/// # Errors
+///
+/// Returns [`AppError::Database`] on SQL failure.
+pub async fn set_monitored_many(
+    pool: &Pool,
+    ids: &[Uuid],
+    monitored: bool,
+) -> Result<u64, AppError> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    let mut tx = pool.begin().await?;
+    let mut changed = 0;
+    for id in ids {
+        changed += sqlx::query("UPDATE library_items SET monitored = ? WHERE id = ?")
+            .bind(i64::from(monitored))
+            .bind(id.to_string())
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+    }
+    tx.commit().await?;
+    Ok(changed)
+}
+
+/// Attach a quality profile to many titles at once. `None` detaches.
+///
+/// Same transaction-and-count contract as [`set_monitored_many`].
+///
+/// # Errors
+///
+/// Returns [`AppError::Database`] on SQL failure.
+pub async fn set_profile_many(
+    pool: &Pool,
+    ids: &[Uuid],
+    profile_id: Option<Uuid>,
+) -> Result<u64, AppError> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    let mut tx = pool.begin().await?;
+    let mut changed = 0;
+    for id in ids {
+        changed += sqlx::query("UPDATE library_items SET profile_id = ? WHERE id = ?")
+            .bind(profile_id.map(|p| p.to_string()))
+            .bind(id.to_string())
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+    }
+    tx.commit().await?;
+    Ok(changed)
+}
+
+/// Point many titles at a root folder. `None` restores "the default for
+/// the type".
+///
+/// Deliberately does **not** touch `profile_id`, unlike
+/// [`set_placement`], which writes both columns: a bulk action must
+/// change only the thing it names, or selecting forty titles to set a
+/// folder would silently blank forty hand-picked profiles.
+///
+/// # Errors
+///
+/// Returns [`AppError::Database`] on SQL failure.
+pub async fn set_root_folder_many(
+    pool: &Pool,
+    ids: &[Uuid],
+    root_folder: Option<&str>,
+) -> Result<u64, AppError> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    let mut tx = pool.begin().await?;
+    let mut changed = 0;
+    for id in ids {
+        changed += sqlx::query("UPDATE library_items SET root_folder = ? WHERE id = ?")
+            .bind(root_folder)
+            .bind(id.to_string())
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+    }
+    tx.commit().await?;
+    Ok(changed)
+}
+
 /// Set how much of a title to chase.
 ///
 /// Also flips `monitored`, because [`MonitorScope::Nothing`] and an

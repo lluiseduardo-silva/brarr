@@ -712,6 +712,60 @@ body, body * {
   .queue-bar { transition: none; }
 }
 
+/* --------------------------------------------------------------------
+   Biblioteca: chips de filtro, seleção e barra de lote
+   -------------------------------------------------------------------- */
+
+/* Os chips eram um bagulho de utilitários repetido seis vezes por linha,
+   com o estado ativo duplicado em cada um. Uma classe e um modificador. */
+.lib-chip {
+  display: inline-flex;
+  align-items: center;
+  height: 1.75rem;
+  padding-inline: 0.75rem;
+  border-radius: 9999px;
+  border: 1px solid var(--color-border-default);
+  background-color: var(--color-bg-surface);
+  color: var(--color-fg-secondary);
+  font-size: 0.875rem;
+  font-weight: 500;
+  cursor: pointer;
+}
+.lib-chip:hover { color: var(--color-fg-primary); }
+.lib-chip-on {
+  background-color: var(--color-accent-solid);
+  border-color: var(--color-accent-solid);
+  color: var(--color-accent-fg);
+}
+.lib-chip-on:hover { color: var(--color-accent-fg); }
+
+/* A caixinha de seleção. O reset zera a aparência de todo input, então
+   ela precisa recuperar a nativa explicitamente. */
+.lib-check {
+  appearance: auto;
+  width: 0.95rem;
+  height: 0.95rem;
+  accent-color: var(--color-accent-solid);
+  cursor: pointer;
+}
+
+/* A barra de lote mora no DOM o tempo todo e some por CSS: `library.js`
+   só liga `data-any`. Renderizá-la condicionalmente custaria uma
+   requisição por caixinha marcada — o DOM já sabe contar. */
+.lib-bulk {
+  display: none;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.75rem;
+  padding: 0.625rem 0.875rem;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--color-accent-solid);
+  background-color: var(--color-accent-soft);
+  color: var(--color-accent-soft-fg);
+}
+.lib-bulk[data-any="1"] { display: flex; }
+
 /* The spine down the left edge of a grid card — the indicator you can
    read without focusing on any text. */
 .lib-spine {

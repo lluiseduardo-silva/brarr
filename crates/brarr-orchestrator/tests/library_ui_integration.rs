@@ -308,8 +308,11 @@ async fn a_paused_title_is_neither_complete_nor_missing() {
     // Found on screen: the grey chip said "pausado" while red text next
     // to it said "5 faltando". Both were true, and together they read as
     // a call to action brarr was never going to take.
+    // The *callout* specifically — the word also lives in the
+    // "Episódios faltando" filter chip, which is navigation and not a
+    // claim about any title.
     assert!(
-        !body.contains("faltando"),
+        !body.contains(" faltando</span>"),
         "a paused title must not call out a gap it will not close: {body}"
     );
     assert!(body.contains("0/5"), "the honest count still shows: {body}");
@@ -613,6 +616,236 @@ async fn placement_moved_into_a_dialog() {
     assert!(
         !dialog.contains(r#"method="dialog""#),
         "cancel must not be a nested dialog form: {dialog}"
+    );
+}
+
+// ---------- the catalogue: filters, search, bulk ----------
+
+/// The two new chips read a status `coverage` computes, not a column.
+///
+/// "Faltando" is deliberately what the operator can *act on*: monitored,
+/// already aired, and absent. A paused title with the same gaps stays
+/// out — brarr is not going to chase it, so listing it would be a call
+/// to an action that does not exist.
+#[tokio::test]
+async fn the_missing_and_complete_chips_filter_by_status() {
+    let (addr, state) = spawn().await;
+    let gap = seed_series(&state).await;
+
+    // A second series with every aired episode on disk.
+    let done = seed_series_with_special(&state).await;
+    for ep in library::episodes(state.pool(), done).await.unwrap() {
+        adopt(&state, done, ep.id, &format!("/midias/{}.mkv", ep.id)).await;
+    }
+
+    let missing = get(addr, "/library?filter=missing").await;
+    assert!(missing.contains("The Boys"), "{missing}");
+    assert!(!missing.contains("The Familiar of Zero"), "{missing}");
+
+    let complete = get(addr, "/library?filter=complete").await;
+    assert!(complete.contains("The Familiar of Zero"), "{complete}");
+    assert!(!complete.contains("The Boys"), "{complete}");
+
+    // Pausing the gap-ridden one takes it out of "faltando": brarr will
+    // not go after it, so it is not a gap the operator can close.
+    library::set_monitored(state.pool(), gap, false)
+        .await
+        .unwrap();
+    let after = get(addr, "/library?filter=missing").await;
+    assert!(!after.contains("The Boys"), "{after}");
+}
+
+/// The case the operator named: the Japanese name of an anime finds the
+/// localised title, because `original_title` is a field we already
+/// store. No edit distance would ever connect the two.
+#[tokio::test]
+async fn searching_the_original_title_finds_the_localised_one() {
+    let (addr, state) = spawn().await;
+    library::upsert(
+        state.pool(),
+        &NewLibraryItem {
+            media_type: Some(MediaType::Tv),
+            tmdb_id: 65_942,
+            title: "That Time I Got Reincarnated as a Slime".to_owned(),
+            original_title: Some("Tensei Shitara Slime Datta Ken".to_owned()),
+            ..NewLibraryItem::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let found = get(addr, "/library?q=tensei+shitara").await;
+    assert!(found.contains("Reincarnated"), "{found}");
+
+    // And the tolerances the box advertises.
+    assert!(
+        get(addr, "/library?q=reincarnted")
+            .await
+            .contains("Reincarnated")
+    );
+    assert!(
+        get(addr, "/library?q=slime+tensei")
+            .await
+            .contains("Reincarnated")
+    );
+
+    let nothing = get(addr, "/library?q=breaking+bad").await;
+    assert!(nothing.contains("Nada encontrado"), "{nothing}");
+}
+
+/// Accents are optional when typing and mandatory in the data.
+#[tokio::test]
+async fn searching_ignores_accents_and_punctuation() {
+    let (addr, state) = spawn().await;
+    library::upsert(
+        state.pool(),
+        &NewLibraryItem {
+            media_type: Some(MediaType::Tv),
+            tmdb_id: 94_997,
+            title: "A Casa do Dragão".to_owned(),
+            ..NewLibraryItem::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        get(addr, "/library?q=casa+do+dragao")
+            .await
+            .contains("Dragão")
+    );
+    assert!(get(addr, "/library?q=DRAGÃO").await.contains("Dragão"));
+}
+
+/// The fragment route is the same code path as the page, so a live
+/// search and a reload can never disagree about what matches.
+#[tokio::test]
+async fn the_items_fragment_is_the_list_without_the_page() {
+    let (addr, state) = spawn().await;
+    seed_series(&state).await;
+
+    let fragment = get(addr, "/library/items?q=boys").await;
+    assert!(fragment.contains("The Boys"), "{fragment}");
+    assert!(
+        !fragment.contains("<!DOCTYPE"),
+        "a fragment must not carry the layout: {fragment}"
+    );
+    assert!(!fragment.contains("<nav"));
+    assert!(fragment.contains(r#"id="library-body""#));
+}
+
+/// One action, every checked title. The ids ride in the form the way
+/// the import screen does it — the DOM is the selection store.
+#[tokio::test]
+async fn a_bulk_action_moves_every_selected_title() {
+    let (addr, state) = spawn().await;
+    let a = seed_series(&state).await;
+    let b = seed_series_with_special(&state).await;
+    assert!(library::get_by_id(state.pool(), a).await.unwrap().monitored);
+
+    let body = reqwest::Client::new()
+        .post(format!("http://{addr}/library/bulk"))
+        .form(&[
+            ("action", "unmonitor"),
+            ("sel", &a.to_string()),
+            ("sel", &b.to_string()),
+        ])
+        .send()
+        .await
+        .expect("send")
+        .text()
+        .await
+        .unwrap();
+    // Answers the re-rendered list, not a redirect, so the operator does
+    // not lose the filter they were in.
+    assert!(body.contains(r#"id="library-body""#), "{body}");
+
+    assert!(!library::get_by_id(state.pool(), a).await.unwrap().monitored);
+    assert!(!library::get_by_id(state.pool(), b).await.unwrap().monitored);
+}
+
+/// A page can be minutes old. A title deleted in another tab must not
+/// abort the other updates.
+#[tokio::test]
+async fn a_bulk_action_skips_ids_that_no_longer_exist() {
+    let (addr, state) = spawn().await;
+    let real = seed_series(&state).await;
+    let ghost = Uuid::new_v4().to_string();
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{addr}/library/bulk"))
+        .form(&[
+            ("action", "unmonitor"),
+            ("sel", &real.to_string()),
+            ("sel", &ghost),
+        ])
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 200);
+    assert!(
+        !library::get_by_id(state.pool(), real)
+            .await
+            .unwrap()
+            .monitored
+    );
+}
+
+/// Nothing checked is not an error, and must not touch anything.
+#[tokio::test]
+async fn a_bulk_action_with_an_empty_selection_is_a_no_op() {
+    let (addr, state) = spawn().await;
+    let item = seed_series(&state).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{addr}/library/bulk"))
+        .form(&[("action", "unmonitor")])
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 200);
+    assert!(
+        library::get_by_id(state.pool(), item)
+            .await
+            .unwrap()
+            .monitored,
+        "an empty selection must leave the catalogue alone"
+    );
+}
+
+/// Setting a folder in bulk must not blank the profiles. `set_placement`
+/// writes both columns; the bulk setters deliberately write one each.
+#[tokio::test]
+async fn a_bulk_root_folder_leaves_the_profile_alone() {
+    let (addr, state) = spawn().await;
+    let item = seed_series(&state).await;
+    let profile = brarr_orchestrator::db::quality_profiles::list_all(state.pool())
+        .await
+        .unwrap()
+        .into_iter()
+        .next()
+        .expect("the presets are seeded by the migration");
+    library::set_placement(state.pool(), item, Some(profile.id), None)
+        .await
+        .unwrap();
+
+    reqwest::Client::new()
+        .post(format!("http://{addr}/library/bulk"))
+        .form(&[
+            ("action", "root"),
+            ("sel", &item.to_string()),
+            ("root_folder", "/midias/Series"),
+        ])
+        .send()
+        .await
+        .expect("send");
+
+    let after = library::get_by_id(state.pool(), item).await.unwrap();
+    assert_eq!(after.root_folder.as_deref(), Some("/midias/Series"));
+    assert_eq!(
+        after.profile_id,
+        Some(profile.id),
+        "the folder action must not blank a hand-picked profile"
     );
 }
 

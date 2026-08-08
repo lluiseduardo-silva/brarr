@@ -1243,20 +1243,62 @@ pub struct SearchDetailTemplate {
 #[derive(Debug, Template)]
 #[template(path = "library.html")]
 pub struct LibraryTemplate {
-    /// Catalogue rows, already filtered.
-    pub items: Vec<LibraryItemView>,
     /// Monitored movies.
     pub movies: u64,
     /// Monitored series.
     pub series: u64,
     /// Entries with monitoring switched off.
     pub unmonitored: u64,
-    /// `"grid"` or `"list"` — drives which layout renders.
-    pub view: String,
-    /// Active filter chip: `""`, `"movie"`, `"tv"` or `"unmonitored"`.
-    pub filter: String,
     /// `false` when no TMDB credential is configured, which is the only
     /// state where an empty library is not the operator's own doing.
+    pub tmdb_ready: bool,
+
+    // The results half, repeated field for field because Askama's
+    // `{% include %}` renders against the *parent* context — the same
+    // shape `QueueTemplate` carries for `partials/queue_live.html`.
+    /// Catalogue rows, already filtered and ranked.
+    pub items: Vec<LibraryItemView>,
+    /// How many survived the filter and the search.
+    pub matched: usize,
+    /// `"grid"` or `"list"`.
+    pub view: String,
+    /// Active filter chip.
+    pub filter: String,
+    /// What the operator typed.
+    pub query: String,
+    /// `(id, name)` for the bulk profile picker.
+    pub profiles: Vec<(String, String)>,
+    /// `(path, label)` for the bulk root-folder picker.
+    pub root_folders: Vec<(String, String)>,
+}
+
+/// The results half of `/library`, served on its own at
+/// `/library/items` so a keystroke swaps the list instead of the page.
+///
+/// The page renders it through `{% include %}`, so first paint and every
+/// filtered refresh come out of the same file.
+#[derive(Debug, Template)]
+#[template(path = "partials/library_items.html")]
+pub struct LibraryItemsPartial {
+    /// Catalogue rows, already filtered and ranked.
+    pub items: Vec<LibraryItemView>,
+    /// How many survived — the count the operator reads before doing
+    /// something to all of them.
+    pub matched: usize,
+    /// `"grid"` or `"list"` — drives which layout renders.
+    pub view: String,
+    /// Active filter chip: `""`, `"movie"`, `"tv"`, `"unmonitored"`,
+    /// `"missing"` or `"complete"`.
+    pub filter: String,
+    /// What the operator typed, echoed so a swap does not clear the box.
+    pub query: String,
+    /// `(id, name)` for the bulk profile picker.
+    pub profiles: Vec<(String, String)>,
+    /// `(path, label)` for the bulk root-folder picker.
+    pub root_folders: Vec<(String, String)>,
+    /// Needed by the empty state, which distinguishes "you have not
+    /// added anything" from "there is no TMDB credential, so you
+    /// *cannot* add anything yet".
     pub tmdb_ready: bool,
 }
 

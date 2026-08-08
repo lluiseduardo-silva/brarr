@@ -57,6 +57,7 @@ pub mod coverage;
 pub mod db;
 pub mod deliver;
 pub mod error;
+pub mod fuzzy;
 pub mod grpc;
 pub mod import;
 pub mod maintenance;

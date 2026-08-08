@@ -42,191 +42,37 @@
     </div>
 </div>
 
-{# Filter chips + view switch. Both are plain links carrying query
-   params — the whole surface is server-rendered, so there is no state
-   to keep in sync on the client. #}
-<div class="flex items-center gap-2 mb-4 flex-wrap">
-    <a href="/library?view={{ view }}"
-       class="inline-flex items-center px-3 h-7 rounded-full text-sm font-medium {% if filter.is_empty() %}bg-accent-solid text-on-accent-solid{% else %}bg-bg-surface border border-border-default text-fg-secondary hover:text-fg-primary{% endif %}">Todos</a>
-    <a href="/library?view={{ view }}&filter=movie"
-       class="inline-flex items-center px-3 h-7 rounded-full text-sm font-medium {% if filter == "movie" %}bg-accent-solid text-on-accent-solid{% else %}bg-bg-surface border border-border-default text-fg-secondary hover:text-fg-primary{% endif %}">Filmes</a>
-    <a href="/library?view={{ view }}&filter=tv"
-       class="inline-flex items-center px-3 h-7 rounded-full text-sm font-medium {% if filter == "tv" %}bg-accent-solid text-on-accent-solid{% else %}bg-bg-surface border border-border-default text-fg-secondary hover:text-fg-primary{% endif %}">Séries</a>
-    <a href="/library?view={{ view }}&filter=unmonitored"
-       class="inline-flex items-center px-3 h-7 rounded-full text-sm font-medium {% if filter == "unmonitored" %}bg-accent-solid text-on-accent-solid{% else %}bg-bg-surface border border-border-default text-fg-secondary hover:text-fg-primary{% endif %}">Pausados</a>
+{# A busca fica **fora** do alvo de troca, de propósito: trocar o input a
+   cada tecla tiraria o foco e o cursor de onde estavam. Ela leva o
+   filtro e a vista atuais junto, porque esses mudam por navegação e a
+   busca precisa respeitá-los.
 
-    <div class="flex-1"></div>
-
-    <div class="inline-flex items-center gap-0.5 p-0.5 rounded-md bg-bg-muted">
-        <a href="/library?view=grid{% if !filter.is_empty() %}&filter={{ filter }}{% endif %}"
-           title="grade"
-           class="inline-flex items-center justify-center w-8 h-7 rounded {% if view != "list" %}bg-bg-surface text-fg-primary{% else %}text-fg-muted hover:text-fg-primary{% endif %}">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <rect x="3" y="3" width="7.5" height="7.5" rx="1.5"/><rect x="13.5" y="3" width="7.5" height="7.5" rx="1.5"/>
-                <rect x="3" y="13.5" width="7.5" height="7.5" rx="1.5"/><rect x="13.5" y="13.5" width="7.5" height="7.5" rx="1.5"/>
-            </svg>
-        </a>
-        <a href="/library?view=list{% if !filter.is_empty() %}&filter={{ filter }}{% endif %}"
-           title="lista"
-           class="inline-flex items-center justify-center w-8 h-7 rounded {% if view == "list" %}bg-bg-surface text-fg-primary{% else %}text-fg-muted hover:text-fg-primary{% endif %}">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-                <path d="M8 6h13M8 12h13M8 18h13M3.5 6h.01M3.5 12h.01M3.5 18h.01"/>
-            </svg>
-        </a>
-    </div>
-</div>
-
-{% if items.is_empty() %}
-<div class="card-hairline bg-bg-surface border border-border-default rounded-xl px-5 py-16 text-center">
-    <div class="w-12 h-12 rounded-xl bg-accent-soft inline-flex items-center justify-center mb-3">
-        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" class="text-accent-soft-fg">
-            <rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M9 4v16"/>
+   `changed` evita disparar em setas e modificadores; `delay:300ms`
+   debounce; `search` pega o X nativo do input[type=search]. #}
+<form class="mb-4"
+      hx-get="/library/items"
+      hx-target="#library-body"
+      hx-swap="outerHTML"
+      hx-trigger="keyup changed delay:300ms from:find input[name='q'], search from:find input[name='q']">
+    <input type="hidden" name="view" value="{{ view }}">
+    <input type="hidden" name="filter" value="{{ filter }}">
+    {# Flex em vez de ícone posicionado por `absolute`: a borda mora no
+       invólucro e o input entra sem a dele, o que dá o mesmo desenho
+       sem precisar de meia dúzia de utilitários de posicionamento. #}
+    <label class="flex items-center gap-2 max-w-xl h-9 px-3 rounded-md bg-bg-surface border border-border-default">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 text-fg-muted">
+            <circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/>
         </svg>
-    </div>
-    {% if !tmdb_ready %}
-    <h2 class="text-lg font-semibold text-fg-primary mb-1">Configure o TMDB primeiro</h2>
-    <p class="text-sm text-fg-muted mb-4">
-        A biblioteca usa o TMDB como fonte de metadados. Sem credencial não há como buscar títulos.
-    </p>
-    <a href="/settings" class="btn btn-md btn-ghost border border-dashed border-accent-solid text-accent-soft-fg">
-        Ir para configurações →
-    </a>
-    {% else if !filter.is_empty() %}
-    <h2 class="text-lg font-semibold text-fg-primary mb-1">Nenhum título neste filtro</h2>
-    <p class="text-sm text-fg-muted">
-        <a href="/library?view={{ view }}" class="text-accent-soft-fg hover:underline">Ver a biblioteca inteira</a>
-    </p>
-    {% else %}
-    <h2 class="text-lg font-semibold text-fg-primary mb-1">Sua biblioteca está vazia</h2>
-    <p class="text-sm text-fg-muted mb-4">
-        Adicione um filme ou uma série e o brarr passa a monitorar, buscar e baixar sozinho.
-    </p>
-    <a href="/library/add" class="btn btn-md btn-ghost border border-dashed border-accent-solid text-accent-soft-fg">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
-        Adicionar seu primeiro título
-    </a>
-    {% endif %}
-</div>
+        <input type="search"
+               name="q"
+               value="{{ query }}"
+               autocomplete="off"
+               placeholder="Buscar por título — aceita o nome original, acentos e erros de digitação"
+               aria-label="Buscar na biblioteca"
+               class="flex-1 min-w-0 bg-transparent text-sm text-fg-primary placeholder:text-fg-muted focus:outline-none">
+    </label>
+</form>
 
-{% else if view == "list" %}
-{# ---- list view: denser, and surfaces the ids the grid hides ---- #}
-<div class="card-hairline bg-bg-surface border border-border-default rounded-xl overflow-hidden">
-    <div class="flex items-center py-2.5 bg-bg-muted">
-        <div class="px-4 flex-1 text-[10px] font-medium uppercase tracking-[0.06em] text-fg-muted">Título</div>
-        <div class="px-4 w-20 text-[10px] font-medium uppercase tracking-[0.06em] text-fg-muted">Tipo</div>
-        <div class="px-4 w-56 text-[10px] font-medium uppercase tracking-[0.06em] text-fg-muted">Conteúdo</div>
-        <div class="px-4 w-40 text-[10px] font-medium uppercase tracking-[0.06em] text-fg-muted">Perfil</div>
-        <div class="px-4 w-28 text-[10px] font-medium uppercase tracking-[0.06em] text-fg-muted">Adicionado</div>
-        <div class="px-4 w-44 text-[10px] font-medium uppercase tracking-[0.06em] text-fg-muted text-right">Ações</div>
-    </div>
-    {% for it in items %}
-    <div class="flex items-center border-t border-border-default" id="lib-{{ it.id }}">
-        <div class="px-4 py-2.5 flex-1 flex items-center gap-3 min-w-0">
-            {% if let Some(url) = it.poster_url %}
-            <img src="{{ url }}" alt="" width="30" height="44" loading="lazy" class="shrink-0 w-[18px] h-[26px] rounded object-cover" style="width:30px;height:44px;">
-            {% else %}
-            <div class="shrink-0 rounded bg-bg-muted" style="width:30px;height:44px;"></div>
-            {% endif %}
-            <div class="min-w-0">
-                <a href="/library/{{ it.id }}" class="block text-sm font-medium text-fg-primary truncate hover:text-accent-solid">{{ it.title }} <span class="text-fg-muted font-normal">{{ it.year }}</span></a>
-                <div class="text-[11px] font-mono text-fg-muted">tmdb {{ it.tmdb_id }}{% if let Some(imdb) = it.imdb_id %} · {{ imdb }}{% endif %}</div>
-            </div>
-        </div>
-        <div class="px-4 w-20">
-            <span class="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium {% if it.is_series %}bg-secondary-soft text-secondary-soft-fg{% else %}bg-accent-soft text-accent-soft-fg{% endif %}">{{ it.kind_label }}</span>
-        </div>
-        <div class="px-4 w-56">
-            <div class="flex items-center gap-2">
-                <span class="lib-status lib-status-{{ it.tone }}">{{ it.status_label }}</span>
-                {% if it.monitored_count > 0 %}
-                <span class="text-[11px] font-mono text-fg-secondary">{{ it.have }}/{{ it.monitored_count }}</span>
-                {% endif %}
-            </div>
-            {% if it.monitored_count > 0 %}
-            <div class="lib-bar lib-bar-{{ it.tone }} mt-1.5"><span class="lib-bar-fill" style="width:{{ it.percent }}%"></span></div>
-            {% endif %}
-            {% if !it.tree_summary.is_empty() %}
-            <div class="text-[11px] text-fg-muted mt-1">{{ it.tree_summary }}</div>
-            {% endif %}
-        </div>
-        <div class="px-4 w-40 text-xs text-fg-secondary truncate">{{ it.profile }}</div>
-        <div class="px-4 w-28 text-[11px] font-mono text-fg-secondary">{{ it.added_at }}</div>
-        <div class="px-4 w-44 flex items-center justify-end gap-1.5">
-            {% include "partials/library_actions.html" %}
-        </div>
-    </div>
-    {% endfor %}
-</div>
-
-{% else %}
-{# ---- grid view ---- #}
-{# A contagem de coluna sobe com a janela: 3 até 1440, 4 até 1792, 5
-   acima disso. Os cortes saem da largura confortável do card (~340-400px
-   para o pôster de 100px mais o texto), não de um número redondo. #}
-<div class="grid grid-cols-1 md:grid-cols-3 xl:grid-cols-4 xxl:grid-cols-5 gap-4">
-{% for it in items %}
-{# `relative` anchors the status spine down the left edge — the
-   indicator you can read across a whole grid without focusing on any one
-   card. The card's own `p-4` already clears the 4px bar, so no extra
-   padding is needed. #}
-<div class="card-hairline bg-bg-surface border border-border-default rounded-xl relative overflow-hidden p-4 flex items-start gap-3.5" id="lib-{{ it.id }}">
-    <span class="lib-spine lib-spine-{{ it.tone }}" aria-hidden="true"></span>
-    {% if let Some(url) = it.poster_url %}
-    <img src="{{ url }}" alt="" loading="lazy" class="shrink-0 rounded-md object-cover" style="width:100px;height:150px;">
-    {% else %}
-    <div class="shrink-0 rounded-md bg-bg-muted flex items-center justify-center" style="width:100px;height:150px;">
-        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" class="text-fg-muted">
-            {% if it.is_series %}<rect x="2" y="7" width="20" height="13" rx="2"/><path d="m8 3 4 4 4-4" stroke-linecap="round"/>
-            {% else %}<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 5v14M17 5v14"/>{% endif %}
-        </svg>
-    </div>
-    {% endif %}
-
-    <div class="flex-1 min-w-0 flex flex-col" style="min-height:150px;">
-        <div class="flex items-baseline gap-2 min-w-0">
-            <a href="/library/{{ it.id }}" class="text-sm font-medium text-fg-primary truncate hover:text-accent-solid">{{ it.title }}</a>
-            <span class="shrink-0 text-xs text-fg-muted">{{ it.year }}</span>
-        </div>
-
-        <div class="flex items-center gap-1.5 flex-wrap mt-2">
-            <span class="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium {% if it.is_series %}bg-secondary-soft text-secondary-soft-fg{% else %}bg-accent-soft text-accent-soft-fg{% endif %}">{{ it.kind_label }}</span>
-            {# One chip, not two. "monitorado" said what brarr was told to
-               do; this says what actually happened, and it already
-               carries "pausado" as one of its answers. #}
-            <span class="lib-status lib-status-{{ it.tone }}">{{ it.status_label }}</span>
-        </div>
-
-        {# Progress over the monitored content — never over what the
-           series happens to have. See `crate::coverage`. #}
-        {% if it.monitored_count > 0 %}
-        <div class="mt-2.5">
-            <div class="flex items-baseline gap-2 mb-1">
-                <span class="text-xs font-mono text-fg-secondary">{{ it.have }}/{{ it.monitored_count }}</span>
-                {% if it.missing > 0 %}
-                <span class="text-xs font-medium text-danger-soft-fg">{{ it.missing }} faltando</span>
-                {% else if it.upcoming > 0 %}
-                <span class="text-xs text-fg-muted">{{ it.upcoming }} a estrear</span>
-                {% endif %}
-            </div>
-            <div class="lib-bar lib-bar-{{ it.tone }}"><span class="lib-bar-fill" style="width:{{ it.percent }}%"></span></div>
-        </div>
-        {% endif %}
-
-        {% if !it.tree_summary.is_empty() %}
-        <p class="text-xs text-fg-muted mt-2">{{ it.tree_summary }}</p>
-        {% endif %}
-
-        <div class="flex-1"></div>
-
-        <div class="flex items-center gap-1.5 flex-wrap">
-            <span class="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] bg-bg-muted text-fg-secondary truncate max-w-[120px]">{{ it.profile }}</span>
-            <div class="flex-1"></div>
-            {% include "partials/library_actions.html" %}
-        </div>
-    </div>
-</div>
-{% endfor %}
-</div>
-{% endif %}
+{% include "partials/library_items.html" %}
 
 {% endblock %}

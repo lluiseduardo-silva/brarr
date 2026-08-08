@@ -1,0 +1,271 @@
+
+{# ---- o corpo trocável ----
+
+   Os chips e o alternador de vista ficam aqui dentro para o estado ativo
+   acompanhar a troca; a **caixa de busca fica fora**, em `library.html`.
+   Trocar o input a cada tecla tiraria o foco e o cursor de onde estavam,
+   que é o jeito clássico de estragar uma busca ao vivo. #}
+<div id="library-body">
+
+{# Chips + alternador. Links comuns carregando query params: o filtro
+   muda por navegação, não por tecla, então a URL continua compartilhável
+   e não há estado para sincronizar no cliente. Cada um leva o `q` atual
+   junto para trocar de filtro não jogar a busca fora. #}
+<div class="flex items-center gap-2 mb-4 flex-wrap">
+    <a href="/library?view={{ view }}{% if !query.is_empty() %}&q={{ query }}{% endif %}"
+       class="lib-chip{% if filter.is_empty() %} lib-chip-on{% endif %}">Todos</a>
+    <a href="/library?view={{ view }}&filter=movie{% if !query.is_empty() %}&q={{ query }}{% endif %}"
+       class="lib-chip{% if filter == "movie" %} lib-chip-on{% endif %}">Filmes</a>
+    <a href="/library?view={{ view }}&filter=tv{% if !query.is_empty() %}&q={{ query }}{% endif %}"
+       class="lib-chip{% if filter == "tv" %} lib-chip-on{% endif %}">Séries</a>
+    {# "Faltando" é o que o operador pode agir sobre: monitorado, já
+       estreou, e não está aqui. Um título pausado com buracos fica de
+       fora — o brarr não vai atrás dele, então listá-lo aqui seria
+       chamar para uma ação que não existe. #}
+    <a href="/library?view={{ view }}&filter=missing{% if !query.is_empty() %}&q={{ query }}{% endif %}"
+       class="lib-chip{% if filter == "missing" %} lib-chip-on{% endif %}">Episódios faltando</a>
+    <a href="/library?view={{ view }}&filter=complete{% if !query.is_empty() %}&q={{ query }}{% endif %}"
+       class="lib-chip{% if filter == "complete" %} lib-chip-on{% endif %}">Completas</a>
+    <a href="/library?view={{ view }}&filter=unmonitored{% if !query.is_empty() %}&q={{ query }}{% endif %}"
+       class="lib-chip{% if filter == "unmonitored" %} lib-chip-on{% endif %}">Pausados</a>
+
+    <div class="flex-1"></div>
+
+    {% if !query.is_empty() || !filter.is_empty() %}
+    <span class="text-xs text-fg-muted">{{ matched }} título(s)</span>
+    {% endif %}
+
+    <div class="inline-flex items-center gap-0.5 p-0.5 rounded-md bg-bg-muted">
+        <a href="/library?view=grid{% if !filter.is_empty() %}&filter={{ filter }}{% endif %}{% if !query.is_empty() %}&q={{ query }}{% endif %}"
+           title="grade"
+           class="inline-flex items-center justify-center w-8 h-7 rounded {% if view != "list" %}bg-bg-surface text-fg-primary{% else %}text-fg-muted hover:text-fg-primary{% endif %}">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="3" y="3" width="7.5" height="7.5" rx="1.5"/><rect x="13.5" y="3" width="7.5" height="7.5" rx="1.5"/>
+                <rect x="3" y="13.5" width="7.5" height="7.5" rx="1.5"/><rect x="13.5" y="13.5" width="7.5" height="7.5" rx="1.5"/>
+            </svg>
+        </a>
+        <a href="/library?view=list{% if !filter.is_empty() %}&filter={{ filter }}{% endif %}{% if !query.is_empty() %}&q={{ query }}{% endif %}"
+           title="lista"
+           class="inline-flex items-center justify-center w-8 h-7 rounded {% if view == "list" %}bg-bg-surface text-fg-primary{% else %}text-fg-muted hover:text-fg-primary{% endif %}">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                <path d="M8 6h13M8 12h13M8 18h13M3.5 6h.01M3.5 12h.01M3.5 18h.01"/>
+            </svg>
+        </a>
+    </div>
+</div>
+
+{# A barra de lote. Fica no DOM sempre e some por CSS quando nada está
+   marcado — `library.js` só liga `data-any` e a contagem. Renderizá-la
+   condicionalmente exigiria um round-trip por caixinha marcada, que é
+   exatamente o tipo de coisa que o DOM já sabe fazer sozinho.
+
+   O formulário embrulha as linhas: as caixinhas são o estado, como na
+   tela de importação. Cada ação manda `sel` repetido. #}
+<form id="library-bulk"
+      hx-post="/library/bulk"
+      hx-target="#library-body"
+      hx-swap="outerHTML"
+      hx-vals='{"view": "{{ view }}", "filter": "{{ filter }}", "q": "{{ query }}"}'>
+<div class="lib-bulk" data-bulk-bar>
+    <label class="flex items-center gap-2 text-sm text-fg-primary cursor-pointer">
+        <input type="checkbox" data-bulk-all class="lib-check">
+        <span data-bulk-count>nenhum selecionado</span>
+    </label>
+
+    <div class="flex-1"></div>
+
+    <button type="submit" name="action" value="monitor" class="btn btn-sm btn-toggle-on">monitorar</button>
+    <button type="submit" name="action" value="unmonitor" class="btn btn-sm btn-secondary">pausar</button>
+
+    <select name="profile_id" class="h-7 px-2 rounded-md bg-bg-canvas border border-border-strong text-xs text-fg-primary focus:outline-none">
+        <option value="">— perfil —</option>
+        {% for p in profiles %}<option value="{{ p.0 }}">{{ p.1 }}</option>{% endfor %}
+    </select>
+    <button type="submit" name="action" value="profile" class="btn btn-sm btn-secondary">aplicar perfil</button>
+
+    {% if !root_folders.is_empty() %}
+    <select name="root_folder" class="h-7 px-2 rounded-md bg-bg-canvas border border-border-strong text-xs text-fg-primary focus:outline-none">
+        <option value="">— pasta raiz —</option>
+        {% for f in root_folders %}<option value="{{ f.0 }}">{{ f.1 }}</option>{% endfor %}
+    </select>
+    <button type="submit" name="action" value="root" class="btn btn-sm btn-secondary">aplicar pasta</button>
+    {% endif %}
+</div>
+{% if items.is_empty() %}
+<div class="card-hairline bg-bg-surface border border-border-default rounded-xl px-5 py-16 text-center">
+    <div class="w-12 h-12 rounded-xl bg-accent-soft inline-flex items-center justify-center mb-3">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" class="text-accent-soft-fg">
+            <rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M9 4v16"/>
+        </svg>
+    </div>
+    {# Ordem importa: a dica do TMDB responde "por que não consigo
+       adicionar nada", que só é a pergunta certa numa biblioteca
+       genuinamente vazia. Vindo antes, ela sequestrava o resultado de
+       toda busca sem acerto e respondia outra coisa. #}
+    {% if !query.is_empty() %}
+    {# A busca já tolera acento, pontuação, ordem das palavras e alguns
+       erros de digitação, e procura no título original também. Se nem
+       assim achou, o título provavelmente não está na biblioteca. #}
+    <h2 class="text-lg font-semibold text-fg-primary mb-1">Nada encontrado para “{{ query }}”</h2>
+    <p class="text-sm text-fg-muted">
+        A busca cobre o título e o título original, ignora acentos e perdoa erros de digitação.
+        <a href="/library?view={{ view }}" class="text-accent-soft-fg hover:underline">Limpar a busca</a>
+    </p>
+    {% else if !filter.is_empty() %}
+    <h2 class="text-lg font-semibold text-fg-primary mb-1">Nenhum título neste filtro</h2>
+    <p class="text-sm text-fg-muted">
+        <a href="/library" class="text-accent-soft-fg hover:underline">Ver a biblioteca inteira</a>
+    </p>
+    {% else if !tmdb_ready %}
+    <h2 class="text-lg font-semibold text-fg-primary mb-1">Configure o TMDB primeiro</h2>
+    <p class="text-sm text-fg-muted mb-4">
+        A biblioteca usa o TMDB como fonte de metadados. Sem credencial não há como buscar títulos.
+    </p>
+    <a href="/settings" class="btn btn-md btn-ghost border border-dashed border-accent-solid text-accent-soft-fg">
+        Ir para configurações →
+    </a>
+    {% else %}
+    <h2 class="text-lg font-semibold text-fg-primary mb-1">Sua biblioteca está vazia</h2>
+    <p class="text-sm text-fg-muted mb-4">
+        Adicione um filme ou uma série e o brarr passa a monitorar, buscar e baixar sozinho.
+    </p>
+    <a href="/library/add" class="btn btn-md btn-ghost border border-dashed border-accent-solid text-accent-soft-fg">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+        Adicionar seu primeiro título
+    </a>
+    {% endif %}
+</div>
+
+{% else if view == "list" %}
+{# ---- list view: denser, and surfaces the ids the grid hides ---- #}
+<div class="card-hairline bg-bg-surface border border-border-default rounded-xl overflow-hidden">
+    <div class="flex items-center py-2.5 bg-bg-muted">
+        <div class="px-4 flex-1 text-[10px] font-medium uppercase tracking-[0.06em] text-fg-muted">Título</div>
+        <div class="px-4 w-20 text-[10px] font-medium uppercase tracking-[0.06em] text-fg-muted">Tipo</div>
+        <div class="px-4 w-56 text-[10px] font-medium uppercase tracking-[0.06em] text-fg-muted">Conteúdo</div>
+        <div class="px-4 w-40 text-[10px] font-medium uppercase tracking-[0.06em] text-fg-muted">Perfil</div>
+        <div class="px-4 w-28 text-[10px] font-medium uppercase tracking-[0.06em] text-fg-muted">Adicionado</div>
+        <div class="px-4 w-44 text-[10px] font-medium uppercase tracking-[0.06em] text-fg-muted text-right">Ações</div>
+    </div>
+    {% for it in items %}
+    <div class="flex items-center border-t border-border-default" id="lib-{{ it.id }}">
+        <label class="px-4 shrink-0 flex items-center cursor-pointer">
+            <input type="checkbox" name="sel" value="{{ it.id }}" data-bulk-item class="lib-check">
+        </label>
+        <div class="px-4 py-2.5 flex-1 flex items-center gap-3 min-w-0">
+            {% if let Some(url) = it.poster_url %}
+            <img src="{{ url }}" alt="" width="30" height="44" loading="lazy" class="shrink-0 w-[18px] h-[26px] rounded object-cover" style="width:30px;height:44px;">
+            {% else %}
+            <div class="shrink-0 rounded bg-bg-muted" style="width:30px;height:44px;"></div>
+            {% endif %}
+            <div class="min-w-0">
+                <a href="/library/{{ it.id }}" class="block text-sm font-medium text-fg-primary truncate hover:text-accent-solid">{{ it.title }} <span class="text-fg-muted font-normal">{{ it.year }}</span></a>
+                <div class="text-[11px] font-mono text-fg-muted">tmdb {{ it.tmdb_id }}{% if let Some(imdb) = it.imdb_id %} · {{ imdb }}{% endif %}</div>
+            </div>
+        </div>
+        <div class="px-4 w-20">
+            <span class="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium {% if it.is_series %}bg-secondary-soft text-secondary-soft-fg{% else %}bg-accent-soft text-accent-soft-fg{% endif %}">{{ it.kind_label }}</span>
+        </div>
+        <div class="px-4 w-56">
+            <div class="flex items-center gap-2">
+                <span class="lib-status lib-status-{{ it.tone }}">{{ it.status_label }}</span>
+                {% if it.monitored_count > 0 %}
+                <span class="text-[11px] font-mono text-fg-secondary">{{ it.have }}/{{ it.monitored_count }}</span>
+                {% endif %}
+            </div>
+            {% if it.monitored_count > 0 %}
+            <div class="lib-bar lib-bar-{{ it.tone }} mt-1.5"><span class="lib-bar-fill" style="width:{{ it.percent }}%"></span></div>
+            {% endif %}
+            {% if !it.tree_summary.is_empty() %}
+            <div class="text-[11px] text-fg-muted mt-1">{{ it.tree_summary }}</div>
+            {% endif %}
+        </div>
+        <div class="px-4 w-40 text-xs text-fg-secondary truncate">{{ it.profile }}</div>
+        <div class="px-4 w-28 text-[11px] font-mono text-fg-secondary">{{ it.added_at }}</div>
+        <div class="px-4 w-44 flex items-center justify-end gap-1.5">
+            {% include "partials/library_actions.html" %}
+        </div>
+    </div>
+    {% endfor %}
+</div>
+
+{% else %}
+{# ---- grid view ---- #}
+{# A contagem de coluna sobe com a janela: 3 até 1440, 4 até 1792, 5
+   acima disso. Os cortes saem da largura confortável do card (~340-400px
+   para o pôster de 100px mais o texto), não de um número redondo. #}
+<div class="grid grid-cols-1 md:grid-cols-3 xl:grid-cols-4 xxl:grid-cols-5 gap-4">
+{% for it in items %}
+{# `relative` anchors the status spine down the left edge — the
+   indicator you can read across a whole grid without focusing on any one
+   card. The card's own `p-4` already clears the 4px bar, so no extra
+   padding is needed. #}
+<div class="card-hairline bg-bg-surface border border-border-default rounded-xl relative overflow-hidden p-4 flex items-start gap-3.5" id="lib-{{ it.id }}">
+    <span class="lib-spine lib-spine-{{ it.tone }}" aria-hidden="true"></span>
+    {# A caixinha some visualmente até o card ser tocado ou marcado (ver
+       `.lib-check` no app.css): 360 quadradinhos sempre visíveis viram
+       ruído numa grade cuja função é ser lida de relance. #}
+    <label class="shrink-0 flex items-center cursor-pointer pt-1">
+        <input type="checkbox" name="sel" value="{{ it.id }}" data-bulk-item class="lib-check">
+    </label>
+    {% if let Some(url) = it.poster_url %}
+    <img src="{{ url }}" alt="" loading="lazy" class="shrink-0 rounded-md object-cover" style="width:100px;height:150px;">
+    {% else %}
+    <div class="shrink-0 rounded-md bg-bg-muted flex items-center justify-center" style="width:100px;height:150px;">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" class="text-fg-muted">
+            {% if it.is_series %}<rect x="2" y="7" width="20" height="13" rx="2"/><path d="m8 3 4 4 4-4" stroke-linecap="round"/>
+            {% else %}<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 5v14M17 5v14"/>{% endif %}
+        </svg>
+    </div>
+    {% endif %}
+
+    <div class="flex-1 min-w-0 flex flex-col" style="min-height:150px;">
+        <div class="flex items-baseline gap-2 min-w-0">
+            <a href="/library/{{ it.id }}" class="text-sm font-medium text-fg-primary truncate hover:text-accent-solid">{{ it.title }}</a>
+            <span class="shrink-0 text-xs text-fg-muted">{{ it.year }}</span>
+        </div>
+
+        <div class="flex items-center gap-1.5 flex-wrap mt-2">
+            <span class="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium {% if it.is_series %}bg-secondary-soft text-secondary-soft-fg{% else %}bg-accent-soft text-accent-soft-fg{% endif %}">{{ it.kind_label }}</span>
+            {# One chip, not two. "monitorado" said what brarr was told to
+               do; this says what actually happened, and it already
+               carries "pausado" as one of its answers. #}
+            <span class="lib-status lib-status-{{ it.tone }}">{{ it.status_label }}</span>
+        </div>
+
+        {# Progress over the monitored content — never over what the
+           series happens to have. See `crate::coverage`. #}
+        {% if it.monitored_count > 0 %}
+        <div class="mt-2.5">
+            <div class="flex items-baseline gap-2 mb-1">
+                <span class="text-xs font-mono text-fg-secondary">{{ it.have }}/{{ it.monitored_count }}</span>
+                {% if it.missing > 0 %}
+                <span class="text-xs font-medium text-danger-soft-fg">{{ it.missing }} faltando</span>
+                {% else if it.upcoming > 0 %}
+                <span class="text-xs text-fg-muted">{{ it.upcoming }} a estrear</span>
+                {% endif %}
+            </div>
+            <div class="lib-bar lib-bar-{{ it.tone }}"><span class="lib-bar-fill" style="width:{{ it.percent }}%"></span></div>
+        </div>
+        {% endif %}
+
+        {% if !it.tree_summary.is_empty() %}
+        <p class="text-xs text-fg-muted mt-2">{{ it.tree_summary }}</p>
+        {% endif %}
+
+        <div class="flex-1"></div>
+
+        <div class="flex items-center gap-1.5 flex-wrap">
+            <span class="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] bg-bg-muted text-fg-secondary truncate max-w-[120px]">{{ it.profile }}</span>
+            <div class="flex-1"></div>
+            {% include "partials/library_actions.html" %}
+        </div>
+    </div>
+</div>
+{% endfor %}
+</div>
+{% endif %}
+
+
+</form>
+</div>
