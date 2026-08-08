@@ -5729,6 +5729,7 @@ async fn arr_import_run(
         blocked: report.blocked,
         adopted: report.files.adopted,
         already: report.files.already,
+        relinked: report.files.relinked,
         missing: report.files.missing,
         unmapped: report.files.unmapped,
         failures: report.failures,

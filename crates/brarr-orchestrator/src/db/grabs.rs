@@ -1059,6 +1059,102 @@ pub async fn mark_file_missing(pool: &Pool, id: Uuid) -> Result<(), AppError> {
     Ok(())
 }
 
+/// What [`relink_episode`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Relink {
+    /// The grab now names the episode.
+    Linked,
+    /// The grab already named one, or is gone. Nothing was touched.
+    AlreadyLinked,
+    /// A live grab of the same release already answers for that episode,
+    /// so this orphan is a duplicate rather than the record to keep.
+    Occupied,
+}
+
+/// Point a grab that lost its episode back at the one it holds.
+///
+/// `WHERE episode_id IS NULL` **is the lock**. This can only ever fill a
+/// blank — never move a file from one episode to another — so running the
+/// repair twice, or two of them at once, is a no-op the second time.
+/// That matters because every caller is a sweep.
+///
+/// # Errors
+///
+/// - [`AppError::NotFound`] when the id is absent.
+/// - [`AppError::Database`] on SQL failure.
+pub async fn relink_episode(pool: &Pool, id: Uuid, episode_id: Uuid) -> Result<Relink, AppError> {
+    let now = OffsetDateTime::now_utc().unix_timestamp();
+    let res = sqlx::query(
+        "UPDATE grabs SET episode_id = ?, updated_at = ? WHERE id = ? AND episode_id IS NULL",
+    )
+    .bind(episode_id.to_string())
+    .bind(now)
+    .bind(id.to_string())
+    .execute(pool)
+    .await;
+    match res {
+        Ok(done) if done.rows_affected() > 0 => Ok(Relink::Linked),
+        // Filling the blank moves the row out of `idx_grabs_unique_item`
+        // and into `idx_grabs_unique_episode`, so a live sibling of the
+        // same release already sitting on that episode refuses it.
+        Err(sqlx::Error::Database(e)) if e.is_unique_violation() => Ok(Relink::Occupied),
+        Err(e) => Err(e.into()),
+        Ok(_) => Ok(Relink::AlreadyLinked),
+    }
+}
+
+/// Grabs of a *series* that name neither an episode nor a season, and
+/// hold a file.
+///
+/// This is the shape a metadata refresh used to leave behind: the FK was
+/// nulled and `(NULL, NULL)` is the encoding of "covers the whole item",
+/// so one file answered for every episode of the show. Movies are
+/// excluded because for them the shape is the correct one.
+///
+/// # Errors
+///
+/// Returns [`AppError::Database`] on SQL failure.
+pub async fn unlinked_episode_grabs(pool: &Pool) -> Result<Vec<Grab>, AppError> {
+    let rows = sqlx::query(&format!(
+        "SELECT {GRAB_COLUMNS} FROM grabs \
+         WHERE episode_id IS NULL AND season_number IS NULL \
+           AND imported_path IS NOT NULL \
+           AND file_missing_at IS NULL \
+           AND status NOT IN ('failed', 'rejected') \
+           AND item_id IN (SELECT id FROM library_items WHERE media_type = 'tv') \
+         ORDER BY grabbed_at ASC"
+    ))
+    .fetch_all(pool)
+    .await?;
+    rows.iter().map(row_to_grab).collect()
+}
+
+/// The live grab holding `path` for this item, if there is one.
+///
+/// The repair path needs it: when [`reserve_local`] refuses because the
+/// file is already recorded, the caller knows which episode the \*arr
+/// says it is but not which row to correct.
+///
+/// # Errors
+///
+/// Returns [`AppError::Database`] on SQL failure.
+pub async fn local_by_path(
+    pool: &Pool,
+    item_id: Uuid,
+    path: &str,
+) -> Result<Option<Grab>, AppError> {
+    let row = sqlx::query(&format!(
+        "SELECT {GRAB_COLUMNS} FROM grabs \
+         WHERE item_id = ? AND release_id_remote = ? \
+           AND protocol = 'local' AND file_missing_at IS NULL"
+    ))
+    .bind(item_id.to_string())
+    .bind(path)
+    .fetch_optional(pool)
+    .await?;
+    row.as_ref().map(row_to_grab).transpose()
+}
+
 /// Every grab for an item, newest first.
 ///
 /// # Errors

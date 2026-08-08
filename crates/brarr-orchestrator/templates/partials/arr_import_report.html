@@ -48,6 +48,18 @@
         </div>
     </div>
 
+    {# A repair, not a routine metric — so it gets a line when it happens
+       instead of a seventh cell that reads zero forever. These are files
+       whose grab a metadata refresh unlinked, and which no file name can
+       identify: only the *arr knows an absolute-numbered anime file is
+       S04E07. #}
+    {% if relinked > 0 %}
+    <p class="px-5 pb-4 text-xs text-success-soft-fg">
+        <strong>{{ relinked }} arquivo(s)</strong> estavam registrados mas tinham perdido o episódio —
+        religados a partir do pareamento que o *arr já tinha feito. Eles voltam a contar na cobertura
+        da série.
+    </p>
+    {% endif %}
     {% if unmapped > 0 %}
     <p class="px-5 pb-4 text-xs text-warning-soft-fg">
         <strong>{{ unmapped }} arquivo(s)</strong> ficaram sem mapeamento de raiz: o brarr não tem regra

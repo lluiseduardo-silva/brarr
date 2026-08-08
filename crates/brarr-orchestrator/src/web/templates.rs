@@ -378,6 +378,9 @@ pub struct ArrImportReportPartial {
     pub adopted: usize,
     /// Files a grab already covered.
     pub already: usize,
+    /// Files whose grab had lost its episode and was repaired from the
+    /// \*arr's pairing.
+    pub relinked: usize,
     /// Files translated but not on disk.
     pub missing: usize,
     /// Files no mapping covered.

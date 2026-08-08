@@ -55,7 +55,7 @@ use brarr_orchestrator::db::settings::{
 use brarr_orchestrator::state::{LogReloader, RuntimeConfig};
 use brarr_orchestrator::{
     AppState, AuthConfig, BypassConfig, TrustedPeers, arr_import, db, grpc, import, maintenance,
-    poll, queue, scan, verify, web,
+    poll, queue, relink, scan, verify, web,
 };
 use tracing::warn;
 use tracing_subscriber::layer::SubscriberExt;
@@ -239,6 +239,18 @@ async fn main() -> Result<()> {
     // no-ops while no instance is a source or TMDB is unconfigured, so a
     // deployment that never touches the *arr screen sees no change.
     let _arr_sync_handle = arr_import::spawn(state.clone());
+    // One-shot repair, not a long-lived task: until this release a
+    // metadata refresh unlinked every per-episode grab, and the damage
+    // rendered as *complete* rather than as missing, so nothing would
+    // ever have prompted the operator to fix it. It only fills blanks it
+    // can positively identify, so a database with nothing to repair pays
+    // one query and logs nothing.
+    let relink_state = state.clone();
+    tokio::spawn(async move {
+        if let Err(e) = relink::run(relink_state.pool()).await {
+            warn!(target: "brarr_orchestrator::relink", error = %e, "grab repair pass failed");
+        }
+    });
 
     tokio::select! {
         res = web_task => res.context("web task panicked")?.context("web server")?,

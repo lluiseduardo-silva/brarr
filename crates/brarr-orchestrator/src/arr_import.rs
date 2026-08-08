@@ -612,6 +612,13 @@ pub struct FileCounts {
     pub adopted: usize,
     /// Files a live grab already covered.
     pub already: usize,
+    /// Files already recorded that had **lost** their episode, and which
+    /// the \*arr's own pairing put back. Separate from `already` because
+    /// it is a repair, not a no-op: these are the rows a metadata
+    /// refresh unlinked, and the ones no file name can identify —
+    /// Sonarr knows an absolute-numbered anime file is S04E07, and the
+    /// name does not say so. See [`crate::relink`].
+    pub relinked: usize,
     /// Files whose translated path brarr cannot see.
     pub missing: usize,
     /// Files no mapping covers *and* that are not where the \*arr says.
@@ -624,6 +631,7 @@ impl FileCounts {
     fn merge(&mut self, other: Self) {
         self.adopted += other.adopted;
         self.already += other.already;
+        self.relinked += other.relinked;
         self.missing += other.missing;
         self.unmapped += other.unmapped;
     }
@@ -1013,24 +1021,44 @@ async fn adopt_files(
             };
             episode_id = Some(found);
         }
-        if record(pool, item.id, episode_id, &local.path, &file.path).await? {
-            counts.adopted += 1;
-        } else {
-            counts.already += 1;
+        match record(pool, item.id, episode_id, &local.path, &file.path).await? {
+            Recorded::Adopted => counts.adopted += 1,
+            Recorded::Already => counts.already += 1,
+            Recorded::Relinked => counts.relinked += 1,
         }
     }
     Ok(counts)
 }
 
-/// Reserve, then mark imported. `false` when the barrier refused, which
-/// means another grab already covers this exact file.
+/// What [`record`] concluded about one file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Recorded {
+    /// A new in-place adoption.
+    Adopted,
+    /// Already recorded, and already correct.
+    Already,
+    /// Already recorded, but the row had lost its episode. Repaired from
+    /// the pairing the \*arr had done.
+    Relinked,
+}
+
+/// Reserve, then mark imported.
+///
+/// The barrier refusing is not always "nothing to do": `idx_grabs_unique_local`
+/// is keyed on `(item_id, release_id_remote)` — the file path — so a row
+/// whose `episode_id` a metadata refresh nulled refuses the re-adoption
+/// that would have fixed it, and the run counts it `already` forever.
+/// **This is the only place in brarr that can repair those**: the file
+/// name of an absolute-numbered anime says nothing, and Sonarr has
+/// already paired it. `relink_episode` only ever fills a blank, so a
+/// grab pointing somewhere is never moved.
 async fn record(
     pool: &Pool,
     item_id: Uuid,
     episode_id: Option<Uuid>,
     local: &std::path::Path,
     reported: &str,
-) -> Result<bool, AppError> {
+) -> Result<Recorded, AppError> {
     let path = local.to_string_lossy().into_owned();
     let name = local
         .file_name()
@@ -1046,7 +1074,7 @@ async fn record(
     )
     .await?;
     let Some(grab) = reserved else {
-        return Ok(false);
+        return repair(pool, item_id, episode_id, &path).await;
     };
     // Source and destination are the same path, which is what
     // `grabs::is_in_place` reads to know undo has nothing to remove.
@@ -1055,7 +1083,35 @@ async fn record(
         target: "brarr_orchestrator::arr_import",
         %item_id, path = %path, "adopted a file the *arr already had"
     );
-    Ok(true)
+    Ok(Recorded::Adopted)
+}
+
+/// The barrier refused: decide whether the stored row is fine or is an
+/// orphan this run can put back.
+async fn repair(
+    pool: &Pool,
+    item_id: Uuid,
+    episode_id: Option<Uuid>,
+    path: &str,
+) -> Result<Recorded, AppError> {
+    let (Some(episode_id), Some(stored)) =
+        (episode_id, grabs::local_by_path(pool, item_id, path).await?)
+    else {
+        return Ok(Recorded::Already);
+    };
+    if stored.episode_id.is_some() {
+        return Ok(Recorded::Already);
+    }
+    match grabs::relink_episode(pool, stored.id, episode_id).await? {
+        grabs::Relink::Linked => {
+            debug!(
+                target: "brarr_orchestrator::arr_import",
+                %item_id, path, "re-pointed an orphaned file at the episode the *arr paired it with"
+            );
+            Ok(Recorded::Relinked)
+        }
+        grabs::Relink::AlreadyLinked | grabs::Relink::Occupied => Ok(Recorded::Already),
+    }
 }
 
 /// One file's path after translation.
