@@ -94,6 +94,19 @@
 
     <button type="button" data-select-off class="btn btn-sm btn-ghost">sair da seleção</button>
 </div>
+
+{# O que a última ação em lote deixou de fazer. Uma raiz que serve só
+   filmes não é gravada numa série — a importação colocaria a árvore de
+   temporadas dentro de /midias/Filmes — e uma seleção misturada é o
+   caso normal aqui. Pular calado seria a versão ruim disso. #}
+{% if !notice.is_empty() %}
+<div class="flex items-start gap-2 px-4 py-2.5 mb-3 rounded-lg bg-warning-soft border border-warning-solid text-sm text-warning-soft-fg">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" class="shrink-0 mt-0.5">
+        <circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16v.5"/>
+    </svg>
+    <span>{{ notice }}</span>
+</div>
+{% endif %}
 {% if items.is_empty() %}
 <div class="card-hairline bg-bg-surface border border-border-default rounded-xl px-5 py-16 text-center">
     <div class="w-12 h-12 rounded-xl bg-accent-soft inline-flex items-center justify-center mb-3">

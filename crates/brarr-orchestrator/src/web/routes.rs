@@ -1098,7 +1098,7 @@ async fn library_index(
     State(state): State<AppState>,
     axum::extract::Query(q): axum::extract::Query<LibraryQuery>,
 ) -> Result<Response, AppError> {
-    library_page(state, q, false).await
+    library_page(state, q, false, String::new()).await
 }
 
 /// `GET /library/items` — just the results, for the live search and the
@@ -1110,13 +1110,14 @@ async fn library_items(
     State(state): State<AppState>,
     axum::extract::Query(q): axum::extract::Query<LibraryQuery>,
 ) -> Result<Response, AppError> {
-    library_page(state, q, true).await
+    library_page(state, q, true, String::new()).await
 }
 
 async fn library_page(
     state: AppState,
     q: LibraryQuery,
     fragment: bool,
+    notice: String,
 ) -> Result<Response, AppError> {
     let view = match q.view.as_deref() {
         Some("list") => "list".to_owned(),
@@ -1205,13 +1206,7 @@ async fn library_page(
         ));
     }
 
-    // Best match first when there is a query; otherwise leave the SQL
-    // order alone (newest added, then title), which is what the operator
-    // expects from an unfiltered catalogue.
-    if !query.is_empty() {
-        items.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.title.cmp(&b.1.title)));
-    }
-    let items: Vec<LibraryItemView> = items.into_iter().map(|(_, v)| v).collect();
+    let items = rank_items(items, &query);
 
     let tmdb_ready = crate::tmdb_sync::load_config(state.pool())
         .await?
@@ -1219,7 +1214,7 @@ async fn library_page(
 
     let matched = items.len();
     let profiles = profile_options(state.pool()).await?;
-    let root_folders = root_folder_options(&state, library::MediaType::Tv).await?;
+    let root_folders = bulk_root_options(&state).await?;
 
     if fragment {
         return html(&crate::web::templates::LibraryItemsPartial {
@@ -1230,6 +1225,7 @@ async fn library_page(
             query,
             profiles,
             root_folders,
+            notice,
             tmdb_ready,
         });
     }
@@ -1245,6 +1241,7 @@ async fn library_page(
         query,
         profiles,
         root_folders,
+        notice,
     })
 }
 
@@ -1277,6 +1274,7 @@ async fn library_bulk(
         .filter_map(|(_, v)| Uuid::parse_str(v).ok())
         .collect();
     let action = value("action").unwrap_or_default();
+    let mut notice = String::new();
 
     if !ids.is_empty() {
         match action.as_str() {
@@ -1300,12 +1298,25 @@ async fn library_bulk(
             }
             "root" => {
                 let raw = value("root_folder").unwrap_or_default();
-                library::set_root_folder_many(
-                    state.pool(),
-                    &ids,
-                    (!raw.is_empty()).then_some(raw.as_str()),
-                )
-                .await?;
+                if raw.is_empty() {
+                    library::set_root_folder_many(state.pool(), &ids, None).await?;
+                } else {
+                    // A root that serves only movies must not be written
+                    // onto a series: the importer would place the files
+                    // under it and the operator would find a season tree
+                    // inside /midias/Filmes. A mixed selection is the
+                    // normal case here, so the incompatible half is
+                    // skipped and *reported* rather than dropped.
+                    let (ok, skipped) = split_by_root_compatibility(&state, &ids, &raw).await?;
+                    library::set_root_folder_many(state.pool(), &ok, Some(raw.as_str())).await?;
+                    if skipped > 0 {
+                        notice = format!(
+                            "Pasta aplicada a {} título(s). {} ficaram de fora: essa raiz não serve o tipo deles.",
+                            ok.len(),
+                            skipped
+                        );
+                    }
+                }
             }
             other => {
                 return Err(AppError::InvalidInput(format!(
@@ -1323,6 +1334,7 @@ async fn library_bulk(
             q: value("q"),
         },
         true,
+        notice,
     )
     .await
 }
@@ -1904,11 +1916,91 @@ async fn root_folder_options(
     state: &AppState,
     media_type: crate::db::library::MediaType,
 ) -> Result<Vec<(String, String)>, AppError> {
+    Ok(all_root_folder_options(state)
+        .await?
+        .into_iter()
+        .filter(|(_, _, serves)| serves.is_none() || *serves == Some(media_type))
+        .map(|(path, label, _)| (path, label))
+        .collect())
+}
+
+/// Drop the match ranks, best first when there was a query.
+///
+/// Without one the SQL order stands — newest added, then title — which
+/// is what the operator expects from an unfiltered catalogue.
+fn rank_items(mut items: Vec<(u32, LibraryItemView)>, query: &str) -> Vec<LibraryItemView> {
+    if !query.is_empty() {
+        items.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.title.cmp(&b.1.title)));
+    }
+    items.into_iter().map(|(_, v)| v).collect()
+}
+
+/// Root folders for the bulk picker: **every** one, whatever it serves.
+///
+/// Not [`root_folder_options`], which filters by a single media type. A
+/// bulk selection can hold movies and series at once, so filtering here
+/// is a guess — and hard-coding it to `Tv` is what made the movie root
+/// unreachable from the library screen entirely.
+async fn bulk_root_options(state: &AppState) -> Result<Vec<(String, String)>, AppError> {
+    Ok(all_root_folder_options(state)
+        .await?
+        .into_iter()
+        .map(|(path, label, _)| (path, label))
+        .collect())
+}
+
+/// Split `ids` into the ones `root` can serve and a count of the rest.
+///
+/// A root with no media type serves either, so nothing is ever refused
+/// against it. One query for the whole catalogue rather than one per id
+/// — the selection can be the entire library.
+async fn split_by_root_compatibility(
+    state: &AppState,
+    ids: &[Uuid],
+    root: &str,
+) -> Result<(Vec<Uuid>, usize), AppError> {
+    let serves = root_folders::list_all(state.pool())
+        .await?
+        .into_iter()
+        .find(|f| f.path.to_string_lossy() == root)
+        .and_then(|f| f.media_type);
+    let Some(serves) = serves else {
+        return Ok((ids.to_vec(), 0));
+    };
+
+    let kinds: std::collections::HashMap<Uuid, library::MediaType> = library::list(state.pool())
+        .await?
+        .into_iter()
+        .map(|i| (i.id, i.media_type))
+        .collect();
+    let ok: Vec<Uuid> = ids
+        .iter()
+        .copied()
+        // An id the catalogue no longer has is left to the setter, which
+        // already treats a missing row as a no-op.
+        .filter(|id| kinds.get(id).is_none_or(|k| *k == serves))
+        .collect();
+    let skipped = ids.len() - ok.len();
+    Ok((ok, skipped))
+}
+
+/// Every root folder, whatever it serves.
+///
+/// The bulk picker uses this rather than [`root_folder_options`]: a
+/// selection can hold movies and series at once, so filtering it by one
+/// media type is a guess. It was hard-coded to `Tv`, which simply hid
+/// the movie root from the list.
+///
+/// Safe to offer unfiltered because the labels already say what each one
+/// serves, and [`library_bulk`] refuses to apply a root to a title it
+/// does not serve.
+async fn all_root_folder_options(
+    state: &AppState,
+) -> Result<Vec<(String, String, Option<crate::db::library::MediaType>)>, AppError> {
     use crate::db::library::MediaType;
     Ok(root_folders::list_all(state.pool())
         .await?
         .into_iter()
-        .filter(|f| f.media_type.is_none() || f.media_type == Some(media_type))
         .map(|f| {
             let path = f.path.to_string_lossy().into_owned();
             let label = match f.media_type {
@@ -1916,7 +2008,7 @@ async fn root_folder_options(
                 Some(MediaType::Tv) => format!("{path} (séries)"),
                 None => format!("{path} (qualquer)"),
             };
-            (path, label)
+            (path, label, f.media_type)
         })
         .collect())
 }

@@ -857,6 +857,138 @@ async fn a_bulk_action_skips_ids_that_no_longer_exist() {
     );
 }
 
+/// The bulk picker offers **every** root, not one media type's.
+///
+/// It was hard-coded to `Tv`, so an operator with `/midias/Filmes`,
+/// `/midias/Animes` and `/midias/Series` saw only the last two and the
+/// movie root was simply unreachable from here.
+#[tokio::test]
+async fn the_bulk_root_picker_offers_movie_folders_too() {
+    use brarr_orchestrator::db::root_folders;
+
+    let (addr, state) = spawn().await;
+    seed_series(&state).await;
+    let movies = std::env::temp_dir().join("brarr-bulk-root-movies");
+    let series = std::env::temp_dir().join("brarr-bulk-root-series");
+    tokio::fs::create_dir_all(&movies).await.unwrap();
+    tokio::fs::create_dir_all(&series).await.unwrap();
+    root_folders::insert(
+        state.pool(),
+        &movies.to_string_lossy(),
+        Some(MediaType::Movie),
+    )
+    .await
+    .unwrap();
+    root_folders::insert(state.pool(), &series.to_string_lossy(), Some(MediaType::Tv))
+        .await
+        .unwrap();
+
+    let page = get(addr, "/library").await;
+    assert!(
+        page.contains(&format!("{} (filmes)", movies.to_string_lossy())),
+        "the movie root has to be reachable from the bulk bar: {page}"
+    );
+    assert!(page.contains(&format!("{} (séries)", series.to_string_lossy())));
+}
+
+/// Offering every root is only safe because applying one is checked. A
+/// movies-only root written onto a series would put a season tree inside
+/// the film library, and a mixed selection is the normal case here.
+#[tokio::test]
+async fn a_root_that_does_not_serve_the_type_is_skipped_and_reported() {
+    use brarr_orchestrator::db::root_folders;
+
+    let (addr, state) = spawn().await;
+    let series = seed_series(&state).await;
+    let movie = library::upsert(
+        state.pool(),
+        &NewLibraryItem {
+            media_type: Some(MediaType::Movie),
+            tmdb_id: 603,
+            title: "The Matrix".to_owned(),
+            ..NewLibraryItem::default()
+        },
+    )
+    .await
+    .unwrap();
+    let movies = std::env::temp_dir().join("brarr-skip-root-movies");
+    tokio::fs::create_dir_all(&movies).await.unwrap();
+    root_folders::insert(
+        state.pool(),
+        &movies.to_string_lossy(),
+        Some(MediaType::Movie),
+    )
+    .await
+    .unwrap();
+
+    let body = reqwest::Client::new()
+        .post(format!("http://{addr}/library/bulk"))
+        .form(&[
+            ("action", "root"),
+            ("sel", &series.to_string()),
+            ("sel", &movie.id.to_string()),
+            ("root_folder", &movies.to_string_lossy()),
+        ])
+        .send()
+        .await
+        .expect("send")
+        .text()
+        .await
+        .unwrap();
+
+    let after_movie = library::get_by_id(state.pool(), movie.id).await.unwrap();
+    let after_series = library::get_by_id(state.pool(), series).await.unwrap();
+    assert_eq!(
+        after_movie.root_folder.as_deref(),
+        Some(movies.to_string_lossy().as_ref()),
+        "the movie is what this root serves"
+    );
+    assert_eq!(
+        after_series.root_folder, None,
+        "the series must not be pointed at the film library"
+    );
+    // And it says so, rather than skipping in silence.
+    assert!(body.contains("ficaram de fora"), "{body}");
+}
+
+/// A root that serves either type refuses nothing.
+#[tokio::test]
+async fn a_root_serving_any_type_is_applied_to_everything() {
+    use brarr_orchestrator::db::root_folders;
+
+    let (addr, state) = spawn().await;
+    let series = seed_series(&state).await;
+    let any = std::env::temp_dir().join("brarr-any-root");
+    tokio::fs::create_dir_all(&any).await.unwrap();
+    root_folders::insert(state.pool(), &any.to_string_lossy(), None)
+        .await
+        .unwrap();
+
+    let body = reqwest::Client::new()
+        .post(format!("http://{addr}/library/bulk"))
+        .form(&[
+            ("action", "root"),
+            ("sel", &series.to_string()),
+            ("root_folder", &any.to_string_lossy()),
+        ])
+        .send()
+        .await
+        .expect("send")
+        .text()
+        .await
+        .unwrap();
+
+    let after = library::get_by_id(state.pool(), series).await.unwrap();
+    assert_eq!(
+        after.root_folder.as_deref(),
+        Some(any.to_string_lossy().as_ref())
+    );
+    assert!(
+        !body.contains("ficaram de fora"),
+        "nothing was skipped: {body}"
+    );
+}
+
 /// Nothing checked is not an error, and must not touch anything.
 #[tokio::test]
 async fn a_bulk_action_with_an_empty_selection_is_a_no_op() {

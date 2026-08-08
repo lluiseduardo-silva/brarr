@@ -1270,6 +1270,8 @@ pub struct LibraryTemplate {
     pub profiles: Vec<(String, String)>,
     /// `(path, label)` for the bulk root-folder picker.
     pub root_folders: Vec<(String, String)>,
+    /// What the last bulk action did, when it did not do all of it.
+    pub notice: String,
 }
 
 /// The results half of `/library`, served on its own at
@@ -1296,6 +1298,9 @@ pub struct LibraryItemsPartial {
     pub profiles: Vec<(String, String)>,
     /// `(path, label)` for the bulk root-folder picker.
     pub root_folders: Vec<(String, String)>,
+    /// What the last bulk action did, when it did not do all of it.
+    /// Empty renders nothing.
+    pub notice: String,
     /// Needed by the empty state, which distinguishes "you have not
     /// added anything" from "there is no TMDB credential, so you
     /// *cannot* add anything yet".
