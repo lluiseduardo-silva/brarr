@@ -1314,6 +1314,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_per_episode_grab_survives_a_metadata_refresh() {
+        // The passive *arr sweep calls `library::sync_seasons` for every
+        // series on every pass (arr_import.rs, outside the `if created`
+        // gate). While that function rebuilt the tree with fresh UUIDs,
+        // every per-episode grab was unlinked every half hour — and the
+        // damage rendered as *complete*, because an unlinked grab is
+        // `(NULL, NULL)`, which `covers_target` reads as "the whole
+        // item". Nothing in the UI asked for action and the scanner
+        // stopped too.
+        let pool = open_memory().await.unwrap();
+        let (_, provider_id) = fixture(&pool).await;
+        let series = library::upsert(
+            &pool,
+            &NewLibraryItem {
+                media_type: Some(MediaType::Tv),
+                tmdb_id: 76479,
+                title: "The Boys".to_owned(),
+                ..NewLibraryItem::default()
+            },
+        )
+        .await
+        .unwrap();
+        let tree = [NewSeason {
+            season_number: 4,
+            episode_count: 2,
+            air_date: None,
+            episodes: vec![
+                NewEpisode {
+                    episode_number: 1,
+                    title: None,
+                    air_date: None,
+                },
+                NewEpisode {
+                    episode_number: 2,
+                    title: None,
+                    air_date: None,
+                },
+            ],
+        }];
+        library::sync_seasons(&pool, series.id, &tree)
+            .await
+            .unwrap();
+        let eps = library::episodes(&pool, series.id).await.unwrap();
+
+        let mut wanted = new_grab(series.id, provider_id, "s04e01");
+        wanted.episode_id = Some(eps[0].id);
+        reserve(&pool, &wanted).await.unwrap().unwrap();
+
+        // A plain metadata refresh: same numbering, same shape.
+        library::sync_seasons(&pool, series.id, &tree)
+            .await
+            .unwrap();
+
+        let after = for_item(&pool, series.id).await.unwrap();
+        assert_eq!(after.len(), 1);
+        assert_eq!(
+            after[0].episode_id,
+            Some(eps[0].id),
+            "a refresh must not unlink the file from its episode"
+        );
+        assert!(
+            !covers(&after[0], GrabTarget::episode(eps[1].id, 4)),
+            "and it must not start answering for the episode it never named"
+        );
+    }
+
+    #[tokio::test]
     async fn releasing_a_reservation_lets_a_retry_through() {
         let pool = open_memory().await.unwrap();
         let (item_id, provider_id) = fixture(&pool).await;

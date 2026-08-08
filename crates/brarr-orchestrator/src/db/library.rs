@@ -7,7 +7,7 @@
 //! touch `monitored`, `profile_id`, `root_folder` or `added_at` — those
 //! belong to the operator, not to the upstream API.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use sqlx::{Row, sqlite::SqliteRow};
 use time::OffsetDateTime;
@@ -738,46 +738,83 @@ pub async fn counts(pool: &Pool) -> Result<LibraryCounts, AppError> {
     })
 }
 
-/// The per-season and per-episode monitoring flags currently stored, so
-/// [`sync_seasons`] can rebuild the tree without losing them.
-type MonitoringFlags = (Vec<(i32, bool)>, Vec<(i32, i32, bool)>);
+/// A season row as it stands before a sync: its identity and the flag
+/// the operator set.
+#[derive(Debug, Clone, Copy)]
+struct StoredSeason {
+    id: Uuid,
+    monitored: bool,
+}
 
-/// Read the flags the operator has already chosen.
+/// An episode row as it stands before a sync.
+#[derive(Debug, Clone, Copy)]
+struct StoredEpisode {
+    id: Uuid,
+    monitored: bool,
+}
+
+/// The tree as currently stored, keyed the way TMDB numbers it.
+///
+/// The flags are what the operator chose. **The ids are what holds the
+/// library to the disk**: `grabs.episode_id` is the only link between a
+/// file and the episode it is, and the FK is `ON DELETE SET NULL`. A
+/// refresh that recreated these rows unlinked every file, and an
+/// unlinked grab reads as `(NULL, NULL)` — the encoding of "covers the
+/// whole item" — so the series went on rendering as complete while
+/// every episode pointed at an arbitrary file. Reusing the ids is the
+/// whole reason this struct exists.
+struct StoredTree {
+    /// By season number.
+    seasons: HashMap<i32, StoredSeason>,
+    /// By `(season_number, episode_number)`.
+    episodes: HashMap<(i32, i32), StoredEpisode>,
+}
+
+/// Read the tree the operator already has, ids included.
 ///
 /// Split out of [`sync_seasons`] to keep that function under the line
-/// limit, and because "what has the operator already chosen" is a
-/// question worth being able to ask on its own.
-async fn existing_monitoring(pool: &Pool, item_id: Uuid) -> Result<MonitoringFlags, AppError> {
+/// limit, and because "what is stored right now" is a question worth
+/// being able to ask on its own.
+async fn existing_tree(pool: &Pool, item_id: Uuid) -> Result<StoredTree, AppError> {
     let existing =
-        sqlx::query("SELECT season_number, monitored FROM library_seasons WHERE item_id = ?")
+        sqlx::query("SELECT id, season_number, monitored FROM library_seasons WHERE item_id = ?")
             .bind(item_id.to_string())
             .fetch_all(pool)
             .await?;
-    let mut season_flags: Vec<(i32, bool)> = Vec::with_capacity(existing.len());
+    let mut seasons = HashMap::with_capacity(existing.len());
     for row in &existing {
         let number: i64 = row.try_get("season_number")?;
         let flag: i64 = row.try_get("monitored")?;
-        season_flags.push((i32::try_from(number).unwrap_or(0), flag != 0));
+        seasons.insert(
+            i32::try_from(number).unwrap_or(0),
+            StoredSeason {
+                id: uuid_at(row, "id")?,
+                monitored: flag != 0,
+            },
+        );
     }
 
     let existing_eps = sqlx::query(
-        "SELECT season_number, episode_number, monitored FROM library_episodes WHERE item_id = ?",
+        "SELECT id, season_number, episode_number, monitored FROM library_episodes \
+         WHERE item_id = ?",
     )
     .bind(item_id.to_string())
     .fetch_all(pool)
     .await?;
-    let mut episode_flags: Vec<(i32, i32, bool)> = Vec::with_capacity(existing_eps.len());
+    let mut episodes = HashMap::with_capacity(existing_eps.len());
     for row in &existing_eps {
         let s: i64 = row.try_get("season_number")?;
         let e: i64 = row.try_get("episode_number")?;
         let flag: i64 = row.try_get("monitored")?;
-        episode_flags.push((
-            i32::try_from(s).unwrap_or(0),
-            i32::try_from(e).unwrap_or(0),
-            flag != 0,
-        ));
+        episodes.insert(
+            (i32::try_from(s).unwrap_or(0), i32::try_from(e).unwrap_or(0)),
+            StoredEpisode {
+                id: uuid_at(row, "id")?,
+                monitored: flag != 0,
+            },
+        );
     }
-    Ok((season_flags, episode_flags))
+    Ok(StoredTree { seasons, episodes })
 }
 
 /// The item's [`MonitorScope`]. A missing row falls back to
@@ -794,7 +831,7 @@ async fn item_scope(pool: &Pool, item_id: Uuid) -> Result<MonitorScope, AppError
     }
 }
 
-/// Replace the season/episode tree of a series from a TMDB fetch.
+/// Refresh the season/episode tree of a series from a TMDB fetch.
 ///
 /// Monitoring flags of seasons and episodes that survive the sync are
 /// preserved — the same reasoning as [`upsert`]: TMDB owns the shape,
@@ -805,6 +842,22 @@ async fn item_scope(pool: &Pool, item_id: Uuid) -> Result<MonitorScope, AppError
 /// [`MonitorScope`], which is why "only the first season" survives a
 /// refresh that publishes a second one.
 ///
+/// **A surviving row keeps its `id`, and that is the point.** This used
+/// to `DELETE` the item's seasons and reinsert everything with fresh
+/// UUIDs, which cost nothing visible in the tree — the flags were
+/// recopied by number — but nulled every `grabs.episode_id` pointing
+/// into it. Since the passive \*arr sweep calls this for every series on
+/// every pass, an operator's whole TV library was unlinked from its
+/// files every half hour, and because an unlinked grab reads as
+/// `(NULL, NULL)` — "covers the whole item" — the damage rendered as
+/// *complete*, not as missing. Upserting by number keeps the ids, so the
+/// only rows that lose their link are the ones TMDB genuinely dropped.
+///
+/// Note the residual: an episode that *moves* — `(1, 13)` becoming
+/// `(2, 1)` under an alternate ordering — is a new key, so it is still a
+/// delete plus an insert. Re-numbering a series is not a refresh, and
+/// wants the coordinates recorded on the grab itself.
+///
 /// # Errors
 ///
 /// Returns [`AppError::Database`] on SQL failure.
@@ -813,7 +866,7 @@ pub async fn sync_seasons(
     item_id: Uuid,
     seasons: &[NewSeason],
 ) -> Result<(), AppError> {
-    let (season_flags, episode_flags) = existing_monitoring(pool, item_id).await?;
+    let stored = existing_tree(pool, item_id).await?;
 
     // A row this function has never seen takes its default from the
     // item's scope. Rows it *has* seen keep whatever the operator set —
@@ -829,36 +882,18 @@ pub async fn sync_seasons(
         .unwrap_or(1);
     let now = OffsetDateTime::now_utc();
 
-    // Rebuild from scratch: cheaper and far less error-prone than
-    // diffing, and the tree is small (tens of rows per series).
-    sqlx::query("DELETE FROM library_seasons WHERE item_id = ?")
-        .bind(item_id.to_string())
-        .execute(pool)
-        .await?;
-
+    // One transaction: a failure halfway used to leave the item with a
+    // partially rebuilt tree, because the `DELETE` had already committed.
+    let mut tx = pool.begin().await?;
     for season in seasons {
-        let season_id = Uuid::new_v4();
+        let known = stored.seasons.get(&season.season_number);
+        let season_id = known.map_or_else(Uuid::new_v4, |s| s.id);
         let season_aired = season.air_date.is_some_and(|d| d <= now);
-        let monitored = season_flags
-            .iter()
-            .find(|(n, _)| *n == season.season_number)
-            .map_or_else(
-                || scope.wants_new_row(season.season_number, first_season, season_aired),
-                |(_, flag)| *flag,
-            );
-        sqlx::query(
-            "INSERT INTO library_seasons \
-                (id, item_id, season_number, episode_count, air_date, monitored) \
-             VALUES (?, ?, ?, ?, ?, ?)",
-        )
-        .bind(season_id.to_string())
-        .bind(item_id.to_string())
-        .bind(i64::from(season.season_number))
-        .bind(i64::from(season.episode_count))
-        .bind(season.air_date.map(OffsetDateTime::unix_timestamp))
-        .bind(i64::from(monitored))
-        .execute(pool)
-        .await?;
+        let monitored = known.map_or_else(
+            || scope.wants_new_row(season.season_number, first_season, season_aired),
+            |s| s.monitored,
+        );
+        upsert_season(&mut tx, season_id, item_id, season, monitored).await?;
 
         for episode in &season.episodes {
             // No air date counts as "not aired": TMDB leaves it blank
@@ -867,28 +902,140 @@ pub async fn sync_seasons(
             // stay forever — the tree preserves flags by number, so it
             // could never come back on its own.
             let aired = episode.air_date.is_some_and(|d| d <= now);
-            let ep_monitored = episode_flags
+            let known = stored
+                .episodes
+                .get(&(season.season_number, episode.episode_number));
+            let ep_monitored = known.map_or_else(
+                || scope.wants_new_row(season.season_number, first_season, aired),
+                |e| e.monitored,
+            );
+            let ids = EpisodeIds {
+                id: known.map_or_else(Uuid::new_v4, |e| e.id),
+                item_id,
+                season_id,
+            };
+            upsert_episode(&mut tx, ids, season.season_number, episode, ep_monitored).await?;
+        }
+    }
+    prune_tree(&mut tx, &stored, seasons).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// The three ids an episode row carries, grouped so [`upsert_episode`]
+/// stays under the argument threshold.
+#[derive(Debug, Clone, Copy)]
+struct EpisodeIds {
+    /// The row's own id — reused when the episode already exists.
+    id: Uuid,
+    /// Series it belongs to.
+    item_id: Uuid,
+    /// Parent season row.
+    season_id: Uuid,
+}
+
+/// Insert a season, or update the one already stored under this number.
+///
+/// `id` is never in the `DO UPDATE` list: preserving it is the contract.
+async fn upsert_season(
+    conn: &mut sqlx::SqliteConnection,
+    id: Uuid,
+    item_id: Uuid,
+    season: &NewSeason,
+    monitored: bool,
+) -> Result<(), AppError> {
+    sqlx::query(
+        "INSERT INTO library_seasons \
+            (id, item_id, season_number, episode_count, air_date, monitored) \
+         VALUES (?, ?, ?, ?, ?, ?) \
+         ON CONFLICT(item_id, season_number) DO UPDATE SET \
+            episode_count = excluded.episode_count, \
+            air_date      = excluded.air_date, \
+            monitored     = excluded.monitored",
+    )
+    .bind(id.to_string())
+    .bind(item_id.to_string())
+    .bind(i64::from(season.season_number))
+    .bind(i64::from(season.episode_count))
+    .bind(season.air_date.map(OffsetDateTime::unix_timestamp))
+    .bind(i64::from(monitored))
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
+/// Insert an episode, or update the one already stored under this
+/// `(season_number, episode_number)`.
+///
+/// `season_id` *is* updated: the parent row survives a refresh now, but
+/// a season that TMDB dropped and republished gets a new one, and the
+/// child has to follow it or the CASCADE would take the wrong rows.
+async fn upsert_episode(
+    conn: &mut sqlx::SqliteConnection,
+    ids: EpisodeIds,
+    season_number: i32,
+    episode: &NewEpisode,
+    monitored: bool,
+) -> Result<(), AppError> {
+    sqlx::query(
+        "INSERT INTO library_episodes \
+            (id, item_id, season_id, season_number, episode_number, title, air_date, monitored) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
+         ON CONFLICT(item_id, season_number, episode_number) DO UPDATE SET \
+            season_id = excluded.season_id, \
+            title     = excluded.title, \
+            air_date  = excluded.air_date, \
+            monitored = excluded.monitored",
+    )
+    .bind(ids.id.to_string())
+    .bind(ids.item_id.to_string())
+    .bind(ids.season_id.to_string())
+    .bind(i64::from(season_number))
+    .bind(i64::from(episode.episode_number))
+    .bind(episode.title.as_deref())
+    .bind(episode.air_date.map(OffsetDateTime::unix_timestamp))
+    .bind(i64::from(monitored))
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
+/// Drop the rows TMDB no longer reports.
+///
+/// Deleting by id, from the set difference computed in Rust, rather than
+/// by a `NOT IN` list built into the SQL: the payload is tens of rows and
+/// the interesting part is which ones vanish, not how the statement is
+/// assembled. Episodes go first so the reason each row died is the one
+/// stated here, not an incidental CASCADE.
+async fn prune_tree(
+    conn: &mut sqlx::SqliteConnection,
+    stored: &StoredTree,
+    seasons: &[NewSeason],
+) -> Result<(), AppError> {
+    let wanted_seasons: HashSet<i32> = seasons.iter().map(|s| s.season_number).collect();
+    let wanted_episodes: HashSet<(i32, i32)> = seasons
+        .iter()
+        .flat_map(|s| {
+            s.episodes
                 .iter()
-                .find(|(s, e, _)| *s == season.season_number && *e == episode.episode_number)
-                .map_or_else(
-                    || scope.wants_new_row(season.season_number, first_season, aired),
-                    |(_, _, flag)| *flag,
-                );
-            sqlx::query(
-                "INSERT INTO library_episodes \
-                    (id, item_id, season_id, season_number, episode_number, title, air_date, monitored) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            )
-            .bind(Uuid::new_v4().to_string())
-            .bind(item_id.to_string())
-            .bind(season_id.to_string())
-            .bind(i64::from(season.season_number))
-            .bind(i64::from(episode.episode_number))
-            .bind(episode.title.as_deref())
-            .bind(episode.air_date.map(OffsetDateTime::unix_timestamp))
-            .bind(i64::from(ep_monitored))
-            .execute(pool)
-            .await?;
+                .map(move |e| (s.season_number, e.episode_number))
+        })
+        .collect();
+
+    for (key, episode) in &stored.episodes {
+        if !wanted_episodes.contains(key) {
+            sqlx::query("DELETE FROM library_episodes WHERE id = ?")
+                .bind(episode.id.to_string())
+                .execute(&mut *conn)
+                .await?;
+        }
+    }
+    for (number, season) in &stored.seasons {
+        if !wanted_seasons.contains(number) {
+            sqlx::query("DELETE FROM library_seasons WHERE id = ?")
+                .bind(season.id.to_string())
+                .execute(&mut *conn)
+                .await?;
         }
     }
     Ok(())
@@ -1288,6 +1435,88 @@ mod tests {
                 .all(|e| !e.monitored),
             "season 1 episodes stay unmonitored too"
         );
+    }
+
+    #[tokio::test]
+    async fn sync_seasons_keeps_the_ids_of_rows_that_survive() {
+        // `grabs.episode_id` is the only link between a file on disk and
+        // the episode it is, and the FK is `ON DELETE SET NULL`. A
+        // refresh that recreates these rows unlinks the whole library —
+        // and reads as *complete*, not as missing, because an unlinked
+        // grab is `(NULL, NULL)`, the encoding of "covers the item".
+        let pool = open_memory().await.unwrap();
+        let item = upsert(
+            &pool,
+            &NewLibraryItem {
+                media_type: Some(MediaType::Tv),
+                tmdb_id: 76479,
+                title: "The Boys".to_owned(),
+                ..NewLibraryItem::default()
+            },
+        )
+        .await
+        .unwrap();
+        sync_seasons(&pool, item.id, &[season(1, 8)]).await.unwrap();
+
+        let before: HashMap<(i32, i32), Uuid> = episodes(&pool, item.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|e| ((e.season_number, e.episode_number), e.id))
+            .collect();
+        let season_before = seasons(&pool, item.id).await.unwrap()[0].id;
+
+        // TMDB publishes a second season; season 1 is untouched.
+        sync_seasons(&pool, item.id, &[season(1, 8), season(2, 6)])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            seasons(&pool, item.id).await.unwrap()[0].id,
+            season_before,
+            "the season row must keep its id"
+        );
+        for e in episodes(&pool, item.id).await.unwrap() {
+            if e.season_number != 1 {
+                continue;
+            }
+            assert_eq!(
+                before.get(&(e.season_number, e.episode_number)),
+                Some(&e.id),
+                "S{:02}E{:02} must keep its id across a refresh",
+                e.season_number,
+                e.episode_number
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn sync_seasons_drops_what_tmdb_stopped_reporting() {
+        // The upsert must not turn into "append only": a season that
+        // vanishes upstream, and an episode count that shrinks, both
+        // still have to leave the tree.
+        let pool = open_memory().await.unwrap();
+        let item = upsert(
+            &pool,
+            &NewLibraryItem {
+                media_type: Some(MediaType::Tv),
+                tmdb_id: 76479,
+                title: "The Boys".to_owned(),
+                ..NewLibraryItem::default()
+            },
+        )
+        .await
+        .unwrap();
+        sync_seasons(&pool, item.id, &[season(1, 8), season(2, 6)])
+            .await
+            .unwrap();
+
+        sync_seasons(&pool, item.id, &[season(1, 5)]).await.unwrap();
+
+        assert_eq!(seasons(&pool, item.id).await.unwrap().len(), 1);
+        let eps = episodes(&pool, item.id).await.unwrap();
+        assert_eq!(eps.len(), 5, "the shrunk season keeps only what remains");
+        assert!(eps.iter().all(|e| e.season_number == 1));
     }
 
     #[tokio::test]
