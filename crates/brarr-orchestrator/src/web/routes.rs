@@ -42,8 +42,8 @@ use crate::auth::{BypassConfig, TrustedPeers};
 use crate::db::quality_profiles;
 use crate::db::settings;
 use crate::db::{
-    arr_instances, decisions, download_clients, grabs, library, path_mappings, providers,
-    push_history, root_folders, searches,
+    arr_instances, decisions, download_clients, episode_numbering, grabs, library, path_mappings,
+    providers, push_history, root_folders, searches,
 };
 use crate::scan::ScanProgress;
 #[allow(
@@ -119,6 +119,11 @@ pub fn router(state: AppState, static_dir: &std::path::Path) -> Router {
         .route("/library/{id}/profile", post(library_set_profile))
         .route("/library/{id}/placement", get(library_placement))
         .route("/library/{id}/groups", get(library_groups))
+        .route(
+            "/library/{id}/groups/{group_id}/apply",
+            post(library_groups_apply),
+        )
+        .route("/library/{id}/groups/clear", post(library_groups_clear))
         .route("/library/{id}/refresh", post(library_refresh))
         .route("/library/{id}/scan", post(library_scan_now))
         .route("/library/{id}/scan/status", get(library_scan_status))
@@ -2813,10 +2818,14 @@ async fn library_groups(
     }
     let tmdb = crate::tmdb_sync::client(state.pool()).await?;
     let groups = tmdb.episode_groups(item.tmdb_id).await?;
+    let active = episode_numbering::active_group(state.pool(), uuid).await?;
+    let episodes = i32::try_from(library::episodes(state.pool(), uuid).await?.len()).unwrap_or(0);
 
     let mut rows: Vec<crate::web::templates::GroupRow> = groups
         .into_iter()
         .map(|g| crate::web::templates::GroupRow {
+            active: active.as_ref().is_some_and(|(id, _)| *id == g.id),
+            id: g.id,
             name: g.name.unwrap_or_else(|| "sem nome".to_owned()),
             kind: group_kind_label(g.kind).to_owned(),
             alternate: g.kind.is_alternate_ordering(),
@@ -2828,10 +2837,58 @@ async fn library_groups(
     rows.sort_by_key(|r| !r.alternate);
 
     html(&crate::web::templates::LibraryGroupsModalPartial {
+        item_id: item.id.to_string(),
         item_title: item.title,
         alternates: rows.iter().filter(|r| r.alternate).count(),
+        active_name: active.and_then(|(_, name)| name),
+        episodes,
         rows,
     })
+}
+
+/// `POST /library/{id}/groups/{group_id}/apply` — search this title
+/// under that ordering.
+///
+/// **Writes nothing to `library_episodes` and touches no grab.** The
+/// catalogue keeps TMDB's numbering; only the coordinates the scanner
+/// sends to the indexer, and the marker it requires in a release title,
+/// come from the group. That separation is the whole design — see the
+/// migration — and an integration test pins it.
+async fn library_groups_apply(
+    State(state): State<AppState>,
+    Path((id, group_id)): Path<(String, String)>,
+) -> Result<Response, AppError> {
+    let uuid = Uuid::parse_str(&id)
+        .map_err(|e| AppError::InvalidInput(format!("invalid library id: {e}")))?;
+    let item = library::get_by_id(state.pool(), uuid).await?;
+    let tmdb = crate::tmdb_sync::client(state.pool()).await?;
+    let group = tmdb.episode_group(&group_id).await?;
+
+    let rows = episode_numbering::rows_from_group(&group);
+    if rows.is_empty() {
+        return Err(AppError::InvalidInput(
+            "essa ordenação não lista episódio nenhum".to_owned(),
+        ));
+    }
+    let name = group.name.clone();
+    episode_numbering::apply(state.pool(), uuid, &group_id, name.as_deref(), &rows).await?;
+    info!(
+        target: "brarr_orchestrator::web",
+        item = %item.title, group = %group_id, episodes = rows.len(),
+        "applied an alternate numbering for search"
+    );
+    library_groups(State(state), Path(id)).await
+}
+
+/// `POST /library/{id}/groups/clear` — back to TMDB's numbering.
+async fn library_groups_clear(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, AppError> {
+    let uuid = Uuid::parse_str(&id)
+        .map_err(|e| AppError::InvalidInput(format!("invalid library id: {e}")))?;
+    episode_numbering::clear(state.pool(), uuid).await?;
+    library_groups(State(state), Path(id)).await
 }
 
 /// Portuguese for [`brarr_tmdb::EpisodeGroupKind`].

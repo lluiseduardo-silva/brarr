@@ -1629,6 +1629,10 @@ pub struct EpisodeView {
 /// One ordering, as the panel renders it.
 #[derive(Debug, Clone)]
 pub struct GroupRow {
+    /// TMDB group id — a hex string, and what the apply route takes.
+    pub id: String,
+    /// Whether the title is currently searched under this ordering.
+    pub active: bool,
     /// Name the TMDB contributor gave it.
     pub name: String,
     /// Kind, in Portuguese.
@@ -1646,8 +1650,15 @@ pub struct GroupRow {
 #[derive(Debug, Template)]
 #[template(path = "partials/library_groups_modal.html")]
 pub struct LibraryGroupsModalPartial {
+    /// Stringified item UUID, for the apply and clear actions.
+    pub item_id: String,
     /// Series being asked about.
     pub item_title: String,
+    /// Name of the ordering in force, when one is.
+    pub active_name: Option<String>,
+    /// Episodes the catalogue holds, so a group's coverage can be
+    /// compared against it before the operator applies it.
+    pub episodes: i32,
     /// Orderings, alternates first.
     pub rows: Vec<GroupRow>,
     /// How many of them renumber. Zero is the common answer.

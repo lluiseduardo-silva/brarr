@@ -50,6 +50,7 @@
 //! but recognising one means parsing which episodes it covers, which is
 //! the import phase's problem. Not grabbing is the safe failure here.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -62,6 +63,7 @@ use tokio::time::sleep;
 use tracing::{debug, info, warn};
 
 use crate::db::decisions::DecisionRow;
+use crate::db::episode_numbering;
 use crate::db::grabs::{self, NewGrab, Protocol};
 use crate::db::library::{self, Episode, LibraryItem, MediaType};
 use crate::db::quality_profiles::{self, QualityProfileRow};
@@ -505,12 +507,17 @@ async fn build_targets(
                 });
             };
             let episodes = library::episodes(state.pool(), item.id).await?;
+            // Empty for every title until an operator applies an episode
+            // group, so "no entry" is the fallback rather than a flag to
+            // check first.
+            let numbering = episode_numbering::for_item(state.pool(), item.id).await?;
             Ok(episode_targets(
                 item,
                 &episodes,
                 tvdb,
                 OffsetDateTime::now_utc(),
                 scope,
+                &numbering,
             ))
         }
     }
@@ -553,12 +560,22 @@ fn movie_target(item: &LibraryItem) -> Option<Target> {
 /// refused to chase, which is a lever that moves the number and nothing
 /// else. A special is matchable, too: `S00E01` parses (only the `0x10`
 /// spelling is refused, and that one is not real).
+///
+/// `numbering` translates the catalogue's coordinates into the ones
+/// releases actually use. It is empty for almost every title — the
+/// canonical numbering *is* the scene's — and where it is not, it is the
+/// difference between finding an episode and refusing every candidate:
+/// TMDB models Jujutsu Kaisen as one season of 59, so brarr asked for
+/// `S01E35` while the release was named `S02E23`. **Only the query and
+/// the marker are translated.** `Target::episode` stays canonical,
+/// because it is what the grab, the file name and Sonarr are keyed on.
 fn episode_targets(
     item: &LibraryItem,
     episodes: &[Episode],
     tvdb: TvdbId,
     now: OffsetDateTime,
     scope: Scope,
+    numbering: &HashMap<(i32, i32), episode_numbering::Numbering>,
 ) -> TargetPlan {
     let mut plan = TargetPlan::default();
     for e in episodes {
@@ -591,14 +608,18 @@ fn episode_targets(
             plan.skipped_unaired += 1;
             continue;
         }
-        let (Ok(season), Ok(number)) = (
-            u16::try_from(e.season_number),
-            u16::try_from(e.episode_number),
-        ) else {
+        let asked = numbering
+            .get(&(e.season_number, e.episode_number))
+            .map_or((e.season_number, e.episode_number), |n| {
+                (n.season, n.episode)
+            });
+        let (Ok(season), Ok(number)) = (u16::try_from(asked.0), u16::try_from(asked.1)) else {
             continue;
         };
         plan.targets.push(Target {
             label: format!("{} S{season:02}E{number:02}", item.title),
+            // Canonical, deliberately: this is the episode the grab is
+            // recorded against and the name the importer will write.
             episode: Some(e.clone()),
             keys: SearchKeys::from_tvdb(tvdb, Some(season), Some(number)),
             episode_marker: Some((season, number)),
@@ -899,6 +920,69 @@ mod tests {
     }
 
     #[test]
+    fn an_applied_numbering_changes_the_query_and_nothing_else() {
+        // TMDB models Jujutsu Kaisen as one season of 59; every release
+        // is named `S02E23`. brarr asked for `S01E47` and the marker
+        // filter refused every candidate. The translation fixes the two
+        // things that talk to the network — and only those.
+        let series = item(MediaType::Tv);
+        let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        let episodes = vec![episode(1, 47, true, Some(1_600_000_000))];
+        let tvdb = TvdbId::new(70_726).unwrap();
+
+        let mut numbering = HashMap::new();
+        numbering.insert(
+            (1, 47),
+            episode_numbering::Numbering {
+                season: 2,
+                episode: 23,
+            },
+        );
+
+        let plan = episode_targets(&series, &episodes, tvdb, now, Scope::Item, &numbering);
+        let target = &plan.targets[0];
+
+        assert_eq!(target.keys.season, Some(2), "the indexer is asked for S02");
+        assert_eq!(target.keys.episode, Some(23));
+        assert_eq!(
+            target.episode_marker,
+            Some((2, 23)),
+            "and the title must carry the marker the release actually uses"
+        );
+        assert_eq!(target.label, "The Matrix S02E23");
+
+        // The identity does not move: this is still canonical S01E47,
+        // which is what the grab is recorded against, what the importer
+        // writes to disk, and what Sonarr and `relink` pair on.
+        let held = target.episode.as_ref().unwrap();
+        assert_eq!(held.season_number, 1);
+        assert_eq!(held.episode_number, 47);
+    }
+
+    #[test]
+    fn an_episode_the_group_does_not_cover_keeps_the_canonical_numbering() {
+        // A group may cover fewer episodes than the catalogue holds —
+        // Jujutsu Kaisen's "Story Arcs" lists 48 of 59. The rest must
+        // keep working rather than fall off the sweep.
+        let series = item(MediaType::Tv);
+        let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        let episodes = vec![episode(1, 59, true, Some(1_600_000_000))];
+        let tvdb = TvdbId::new(70_726).unwrap();
+
+        let mut numbering = HashMap::new();
+        numbering.insert(
+            (1, 47),
+            episode_numbering::Numbering {
+                season: 2,
+                episode: 23,
+            },
+        );
+
+        let plan = episode_targets(&series, &episodes, tvdb, now, Scope::Item, &numbering);
+        assert_eq!(plan.targets[0].episode_marker, Some((1, 59)));
+    }
+
+    #[test]
     fn the_imdb_prefix_is_stripped_for_the_search_axis() {
         // `library_items.imdb_id` keeps the `tt`; `searches.imdb_id`
         // keeps the bare number. This is where the two meet.
@@ -919,7 +1003,8 @@ mod tests {
             episode(1, 4, true, None),                // no date at all
         ];
         let tvdb = TvdbId::new(70_726).unwrap();
-        let targets = episode_targets(&series, &episodes, tvdb, now, Scope::Item).targets;
+        let targets =
+            episode_targets(&series, &episodes, tvdb, now, Scope::Item, &HashMap::new()).targets;
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].label, "The Matrix S01E01");
         assert_eq!(targets[0].keys.season, Some(1));
@@ -942,7 +1027,7 @@ mod tests {
             episode(0, 2, false, Some(1_600_000_000)), // the usual case
         ];
         let tvdb = TvdbId::new(70_726).unwrap();
-        let plan = episode_targets(&series, &episodes, tvdb, now, Scope::Item);
+        let plan = episode_targets(&series, &episodes, tvdb, now, Scope::Item, &HashMap::new());
 
         assert_eq!(plan.targets.len(), 1, "only the monitored one");
         assert_eq!(plan.targets[0].episode_marker, Some((0, 1)));
@@ -976,7 +1061,14 @@ mod tests {
             episode(1, 1, true, Some(1_600_000_000)),
         ];
         let tvdb = TvdbId::new(70_726).unwrap();
-        let plan = episode_targets(&series, &episodes, tvdb, now, Scope::Season(0));
+        let plan = episode_targets(
+            &series,
+            &episodes,
+            tvdb,
+            now,
+            Scope::Season(0),
+            &HashMap::new(),
+        );
 
         assert_eq!(plan.targets.len(), 1);
         assert_eq!(plan.targets[0].keys.season, Some(0));
@@ -1050,7 +1142,8 @@ mod tests {
         let tvdb = TvdbId::new(70_726).unwrap();
         let episodes = vec![episode(4, 7, true, Some(1_600_000_000))];
         let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
-        let target = &episode_targets(&series, &episodes, tvdb, now, Scope::Item).targets[0];
+        let target = &episode_targets(&series, &episodes, tvdb, now, Scope::Item, &HashMap::new())
+            .targets[0];
 
         let rows = vec![
             decision("The.Boys.S04E07.1080p.WEB-DL", 300, 10),

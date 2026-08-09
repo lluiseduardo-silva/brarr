@@ -1467,55 +1467,78 @@ async fn a_movie_not_out_yet_is_upcoming_rather_than_missing() {
     assert!(!body.contains("lib-status-missing"), "{body}");
 }
 
-/// The orderings panel renders what TMDB answered, and says plainly
-/// when nothing renumbers — which is the common answer and the one an
-/// operator most needs stated rather than implied by an empty table.
+/// The numbering panel. What it says out loud matters as much as what it
+/// lists: an operator about to change how a title is searched needs to
+/// know that the catalogue is not being renumbered, and needs to see
+/// when an ordering covers fewer episodes than the catalogue holds.
 #[test]
-fn the_orderings_panel_separates_alternates_from_the_canonical_order() {
+fn the_numbering_panel_offers_only_alternates_and_declares_what_it_changes() {
     use askama::Template;
     use brarr_orchestrator::web::templates::{GroupRow, LibraryGroupsModalPartial};
 
-    let canonical_only = LibraryGroupsModalPartial {
-        item_title: "The Boys".to_owned(),
-        rows: vec![GroupRow {
-            name: "Original Air Date".to_owned(),
-            kind: "exibição original".to_owned(),
-            alternate: false,
-            group_count: 4,
-            episode_count: 32,
-        }],
-        alternates: 0,
+    let row = |id: &str, name: &str, kind: &str, alternate: bool, eps: i32| GroupRow {
+        id: id.to_owned(),
+        active: false,
+        name: name.to_owned(),
+        kind: kind.to_owned(),
+        alternate,
+        group_count: 3,
+        episode_count: eps,
     };
-    let html = canonical_only.render().unwrap();
-    assert!(html.contains("Original Air Date"));
-    assert!(
-        html.contains("Nenhuma delas renumera"),
-        "a table of one canonical ordering must not read as an option"
-    );
 
-    let with_absolute = LibraryGroupsModalPartial {
-        item_title: "Dragon Ball Super".to_owned(),
-        rows: vec![GroupRow {
-            name: "Absolute Order".to_owned(),
-            kind: "absoluta".to_owned(),
-            alternate: true,
-            group_count: 1,
-            episode_count: 131,
-        }],
+    let panel = LibraryGroupsModalPartial {
+        item_id: "11111111-1111-4111-8111-111111111111".to_owned(),
+        item_title: "Jujutsu Kaisen".to_owned(),
         alternates: 1,
+        active_name: None,
+        episodes: 59,
+        rows: vec![
+            row("ki", "季", "produção", true, 59),
+            row("orig", "Original Air Date", "exibição original", false, 59),
+        ],
     };
-    let html = with_absolute.render().unwrap();
-    assert!(html.contains("Absolute Order"));
-    assert!(html.contains("131"));
+    let html = panel.render().unwrap();
+
     assert!(
-        html.contains("falta é o casador"),
-        "the panel has to say brarr cannot search these yet, or it promises a feature"
+        html.contains("/groups/ki/apply"),
+        "an alternate ordering is offered"
+    );
+    assert!(
+        !html.contains("/groups/orig/apply"),
+        "the canonical ordering is listed but never offered — it is what the tree already is"
+    );
+    assert!(
+        html.contains("Nada é renumerado na biblioteca"),
+        "the panel has to say what it does not touch, or applying reads as a rewrite"
     );
 
-    let none = LibraryGroupsModalPartial {
-        item_title: "Um filme qualquer".to_owned(),
-        rows: Vec::new(),
-        alternates: 0,
+    // Active: the row offers the way back, not the way in.
+    let active = LibraryGroupsModalPartial {
+        active_name: Some("季".to_owned()),
+        rows: vec![GroupRow {
+            active: true,
+            ..row("ki", "季", "produção", true, 59)
+        }],
+        ..panel
     };
-    assert!(none.render().unwrap().contains("não registra nenhuma"));
+    let html = active.render().unwrap();
+    assert!(html.contains("/groups/clear"));
+    assert!(!html.contains("/groups/ki/apply"));
+    assert!(html.contains("A árvore e os arquivos seguem a numeração"));
+
+    // Partial coverage is flagged rather than discovered afterwards.
+    let short = LibraryGroupsModalPartial {
+        item_id: "22222222-2222-4222-8222-222222222222".to_owned(),
+        item_title: "Jujutsu Kaisen".to_owned(),
+        alternates: 1,
+        active_name: None,
+        episodes: 59,
+        rows: vec![row("arcs", "Story Arcs", "arco narrativo", true, 48)],
+    };
+    assert!(
+        short
+            .render()
+            .unwrap()
+            .contains("cobre menos episódios do que o catálogo tem")
+    );
 }

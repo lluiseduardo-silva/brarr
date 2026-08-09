@@ -1,27 +1,40 @@
-{# Quais numerações o TMDB conhece para esta série.
+{# Sob qual numeração este título é buscado.
 
-   Só leitura, de propósito. Não grava nada, não troca numeração nenhuma
-   e custa uma chamada ao TMDB. A pergunta que ele responde — "quais dos
-   meus títulos têm arco ou ordem absoluta definidos" — precisa ser
-   respondível *antes* de qualquer decisão sobre renumerar, e a resposta
-   mais comum é "nenhum".
+   O TMDB e a cena nem sempre numeram uma série igual, e em anime quase
+   nunca numeram. Medido nesta biblioteca: o TMDB modela Jujutsu Kaisen
+   como UMA temporada de 59, e toda release se chama `S02E23`. O brarr
+   pedia `S01E35` e o filtro de marcador recusava tudo.
 
-   A ordem original de exibição aparece na lista mas não conta como
-   alternativa: ela é a forma canônica, a mesma que a árvore já usa.
+   Aplicar uma ordenação **não renumera a biblioteca**. A árvore, os
+   nomes dos arquivos em disco e o pareamento com o Sonarr continuam
+   canônicos; muda só a coordenada que vai ao indexador e o marcador
+   exigido no título da release. Voltar atrás é um clique.
 
-   Cancelar é `type="button"` + `close()`. `<form method="dialog">`
-   aninhado é removido pelo parser e vira submit do form de fora. #}
-<dialog id="groups-dialog" class="w-[640px] max-w-full rounded-xl bg-bg-surface border border-border-default p-0">
+   A cobertura fica visível antes de aplicar: uma ordenação que cobre
+   menos episódios do que o catálogo tem vai deixar o resto na numeração
+   canônica, e isso precisa ser uma escolha, não uma surpresa. #}
+<dialog id="groups-dialog" class="w-[760px] max-w-full rounded-xl bg-bg-surface border border-border-default p-0">
     <div class="px-6 py-5 border-b border-border-default">
-        <h2 class="text-lg font-semibold text-fg-primary">Numerações conhecidas</h2>
+        <h2 class="text-lg font-semibold text-fg-primary">Numeração para busca</h2>
         <p class="text-sm text-fg-secondary mt-1 truncate" title="{{ item_title }}">{{ item_title }}</p>
     </div>
 
     <div class="px-6 py-5">
+        {% match active_name %}
+        {% when Some with (name) %}
+        <p class="text-sm text-fg-primary mb-4">
+            Buscando como <strong>{{ name }}</strong>. A árvore e os arquivos seguem a numeração
+            original do TMDB.
+        </p>
+        {% when None %}
+        <p class="text-sm text-fg-secondary mb-4">
+            Buscando na numeração original do TMDB ({{ episodes }} episódios no catálogo).
+        </p>
+        {% endmatch %}
+
         {% if rows.is_empty() %}
         <p class="text-sm text-fg-secondary">
-            O TMDB não registra nenhuma numeração alternativa para esta série. A árvore da
-            biblioteca já é a única que existe.
+            O TMDB não registra nenhuma numeração alternativa para esta série.
         </p>
         {% else %}
         <div class="overflow-x-auto">
@@ -32,11 +45,12 @@
                         <th class="text-left font-medium px-3 py-2">Tipo</th>
                         <th class="text-right font-medium px-3 py-2">Blocos</th>
                         <th class="text-right font-medium px-3 py-2">Episódios</th>
+                        <th class="text-right font-medium px-3 py-2"></th>
                     </tr>
                 </thead>
                 <tbody>
                     {% for r in rows %}
-                    <tr class="border-t border-border-default">
+                    <tr class="border-t border-border-default {% if r.active %}bg-accent-soft{% endif %}">
                         <td class="px-3 py-2 text-fg-primary">{{ r.name }}</td>
                         <td class="px-3 py-2">
                             {% if r.alternate %}
@@ -46,7 +60,25 @@
                             {% endif %}
                         </td>
                         <td class="px-3 py-2 text-right text-fg-secondary">{{ r.group_count }}</td>
-                        <td class="px-3 py-2 text-right text-fg-secondary">{{ r.episode_count }}</td>
+                        <td class="px-3 py-2 text-right {% if r.episode_count < episodes %}text-warning-soft-fg{% else %}text-fg-secondary{% endif %}"
+                            {% if r.episode_count < episodes %}title="cobre menos episódios do que o catálogo tem; o resto fica na numeração original"{% endif %}>
+                            {{ r.episode_count }}
+                        </td>
+                        <td class="px-3 py-2 text-right">
+                            {% if r.active %}
+                            <button type="button" class="btn btn-sm btn-secondary"
+                                    hx-post="/library/{{ item_id }}/groups/clear"
+                                    hx-target="#modal-target" hx-swap="innerHTML">
+                                Voltar ao original
+                            </button>
+                            {% else if r.alternate %}
+                            <button type="button" class="btn btn-sm btn-primary"
+                                    hx-post="/library/{{ item_id }}/groups/{{ r.id }}/apply"
+                                    hx-target="#modal-target" hx-swap="innerHTML">
+                                Usar
+                            </button>
+                            {% endif %}
+                        </td>
                     </tr>
                     {% endfor %}
                 </tbody>
@@ -58,11 +90,9 @@
             Nenhuma delas renumera os episódios — todas seguem a ordem canônica que a biblioteca
             já usa.
             {% else %}
-            {{ alternates }} numeração(ões) alternativa(s). O brarr ainda <strong>não</strong> busca por elas:
-            hoje ele pede <span class="font-mono">S01E02</span> ao indexador e exige esse marcador
-            no título da release. Numeração absoluta é justamente o caso em que a release se chama
-            <span class="font-mono">Série - 224</span> e não carrega marcador nenhum, então o que
-            falta é o casador, não o rótulo.
+            Aplicar muda apenas o que o brarr pede ao indexador e o marcador que ele exige no
+            título da release. Nada é renumerado na biblioteca, nenhum arquivo é renomeado e
+            nenhuma aquisição perde o episódio a que está ligada.
             {% endif %}
         </p>
         {% endif %}

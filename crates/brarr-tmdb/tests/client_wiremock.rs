@@ -614,40 +614,46 @@ async fn episode_groups_are_listed_with_their_kind() {
     assert_eq!(groups[1].id, "5f8d2a3b1c9d440038b1a2c4");
 }
 
+/// The whole reason brarr reads episode groups, pinned against a real
+/// capture: TMDB models Jujutsu Kaisen as **one** season of 59, while
+/// every release in the wild is named `S02E23`. The group is the
+/// translation table, and it arrives complete — canonical coordinates
+/// beside the position in the block, so nothing is inferred.
 #[tokio::test]
-async fn a_group_carries_both_numberings_so_nothing_has_to_be_inferred() {
+async fn a_group_translates_tmdbs_flat_season_into_the_one_releases_use() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(path("/tv/episode_group/5f8d2a3b1c9d440038b1a2c4"))
-        .respond_with(json(&fixture("episode_group_absolute.json")))
+        .and(path("/tv/episode_group/6961c83d72e76980b8bd3780"))
+        .respond_with(json(&fixture("episode_group_jujutsu_seasons.json")))
         .mount(&server)
         .await;
 
     let group = client(&server)
-        .episode_group("5f8d2a3b1c9d440038b1a2c4")
+        .episode_group("6961c83d72e76980b8bd3780")
         .await
         .unwrap();
 
-    assert_eq!(group.kind, EpisodeGroupKind::Absolute);
-    assert_eq!(group.groups.len(), 1);
-    let episodes = &group.groups[0].episodes;
-    assert_eq!(episodes.len(), 5);
+    assert_eq!(group.kind, EpisodeGroupKind::Production);
+    // The scene's split, exactly: 24 / 23 / 12.
+    let sizes: Vec<usize> = group.groups.iter().map(|g| g.episodes.len()).collect();
+    assert_eq!(sizes, vec![24, 23, 12]);
 
-    // The whole point: canonical coordinates *and* the position in the
-    // group travel together, so the mapping is read, never guessed.
-    // Absolute 77 is S05E01 — which no release title would ever say.
-    let e = &episodes[2];
-    assert_eq!(e.order, 76);
-    assert_eq!(e.season_number, 5);
-    assert_eq!(e.episode_number, 1);
+    // Blocks are 1-based; episodes are 0-based **within their block**,
+    // not across the group. Getting this backwards is the whole bug.
+    assert_eq!(group.groups[0].order, 1);
+    assert_eq!(group.groups[1].order, 2);
+    assert_eq!(group.groups[1].episodes[0].order, 0);
 
-    // TMDB's own episode id — the identity stable across orderings, and
-    // the one the season endpoint's DTO still discards.
-    assert_eq!(episodes[0].id, 1_084_258);
-    assert_eq!(e.id, 1_348_892);
+    // The pairing that makes acquisition work. `Jujutsu Kaisen S02E23`
+    // is a real release name in this operator's database; canonically
+    // TMDB calls it S01E47, which is what brarr was asking for and why
+    // the marker filter rejected every candidate.
+    let block2 = &group.groups[1];
+    let last = block2.episodes.last().unwrap();
+    assert_eq!(last.order, 22, "23rd episode of the block, 0-based");
+    assert_eq!(last.season_number, 1, "canonical season stays 1");
+    assert_eq!(last.episode_number, 47, "canonical number is 47");
 
-    // An unaired entry keeps its slot: blank name and date degrade to
-    // None rather than failing the record.
-    assert_eq!(episodes[4].title, None);
-    assert_eq!(episodes[4].order, 78);
+    // And the stable identity travels with it.
+    assert_eq!(group.groups[0].episodes[0].id, 1_984_409);
 }
