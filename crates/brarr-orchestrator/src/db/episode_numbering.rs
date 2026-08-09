@@ -405,6 +405,7 @@ mod tests {
                 air_date: None,
                 episodes: (1..=59)
                     .map(|n| NewEpisode {
+                        tmdb_episode_id: None,
                         episode_number: n,
                         title: None,
                         air_date: None,

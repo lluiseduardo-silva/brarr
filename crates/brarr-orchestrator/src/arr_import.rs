@@ -1452,11 +1452,13 @@ mod tests {
                 air_date: None,
                 episodes: vec![
                     NewEpisode {
+                        tmdb_episode_id: None,
                         episode_number: 1,
                         title: None,
                         air_date: None,
                     },
                     NewEpisode {
+                        tmdb_episode_id: None,
                         episode_number: 2,
                         title: None,
                         air_date: None,

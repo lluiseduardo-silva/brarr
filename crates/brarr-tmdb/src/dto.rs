@@ -244,6 +244,11 @@ pub(crate) struct TvDetailsDto {
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct EpisodeDto {
+    /// TMDB's own episode id. The identity that survives a series
+    /// being re-numbered, which neither the UUID nor the season/episode
+    /// pair does on its own.
+    #[serde(default)]
+    pub id: i64,
     pub episode_number: i64,
     pub season_number: i64,
     #[serde(default, deserialize_with = "de_opt_string")]

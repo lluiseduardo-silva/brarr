@@ -53,6 +53,7 @@ fn season(number: i32, aired: usize, upcoming: usize) -> NewSeason {
     let mut episodes = Vec::new();
     for i in 0..aired {
         episodes.push(NewEpisode {
+            tmdb_episode_id: None,
             episode_number: i32::try_from(i).unwrap_or(0) + 1,
             title: Some(format!("Episódio {}", i + 1)),
             air_date: Some(ago(300 - i64::try_from(i).unwrap_or(0) * 7)),
@@ -60,6 +61,7 @@ fn season(number: i32, aired: usize, upcoming: usize) -> NewSeason {
     }
     for i in 0..upcoming {
         episodes.push(NewEpisode {
+            tmdb_episode_id: None,
             episode_number: i32::try_from(aired + i).unwrap_or(0) + 1,
             title: Some(format!("Episódio {}", aired + i + 1)),
             air_date: Some(ahead(7 + i64::try_from(i).unwrap_or(0) * 7)),

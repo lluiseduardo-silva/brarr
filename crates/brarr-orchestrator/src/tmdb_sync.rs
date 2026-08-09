@@ -132,6 +132,7 @@ pub fn season_to_new(season: &SeasonDetails) -> NewSeason {
             .episodes
             .iter()
             .map(|e| NewEpisode {
+                tmdb_episode_id: (e.id > 0).then_some(e.id),
                 episode_number: e.episode_number,
                 title: e.title.clone(),
                 air_date: e.air_date.map(at_midnight),
@@ -479,12 +480,14 @@ mod tests {
             air_date: Some(date!(2024 - 06 - 13)),
             episodes: vec![
                 Episode {
+                    id: 3_910_571,
                     season_number: 4,
                     episode_number: 1,
                     title: Some("A".to_owned()),
                     air_date: Some(date!(2024 - 06 - 13)),
                 },
                 Episode {
+                    id: 3_910_572,
                     season_number: 4,
                     episode_number: 2,
                     title: None,

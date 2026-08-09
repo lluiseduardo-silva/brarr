@@ -79,16 +79,19 @@ async fn seed_series(state: &AppState) -> Uuid {
                 air_date: Some(days_ago(400)),
                 episodes: vec![
                     NewEpisode {
+                        tmdb_episode_id: None,
                         episode_number: 1,
                         title: Some("A".to_owned()),
                         air_date: Some(days_ago(400)),
                     },
                     NewEpisode {
+                        tmdb_episode_id: None,
                         episode_number: 2,
                         title: Some("B".to_owned()),
                         air_date: Some(days_ago(393)),
                     },
                     NewEpisode {
+                        tmdb_episode_id: None,
                         episode_number: 3,
                         title: Some("C".to_owned()),
                         air_date: Some(days_ago(386)),
@@ -101,11 +104,13 @@ async fn seed_series(state: &AppState) -> Uuid {
                 air_date: Some(days_ago(30)),
                 episodes: vec![
                     NewEpisode {
+                        tmdb_episode_id: None,
                         episode_number: 1,
                         title: Some("D".to_owned()),
                         air_date: Some(days_ago(30)),
                     },
                     NewEpisode {
+                        tmdb_episode_id: None,
                         episode_number: 2,
                         title: Some("E".to_owned()),
                         air_date: Some(days_ahead(30)),
@@ -138,6 +143,7 @@ async fn seed_series_with_special(state: &AppState) -> Uuid {
     .await
     .unwrap();
     let ep = |n: i32| NewEpisode {
+        tmdb_episode_id: None,
         episode_number: n,
         title: None,
         air_date: Some(days_ago(3000)),

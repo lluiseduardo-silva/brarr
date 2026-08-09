@@ -87,6 +87,7 @@ async fn add_series(state: &AppState) -> uuid::Uuid {
             air_date: None,
             episodes: (1..=8)
                 .map(|n| NewEpisode {
+                    tmdb_episode_id: None,
                     episode_number: n,
                     title: Some(format!("Episódio {n}")),
                     air_date: None,

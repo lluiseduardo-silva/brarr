@@ -868,6 +868,7 @@ mod tests {
     fn episode(season: i32, number: i32, monitored: bool, air: Option<i64>) -> Episode {
         Episode {
             id: Uuid::new_v4(),
+            tmdb_episode_id: None,
             item_id: Uuid::new_v4(),
             season_id: Uuid::new_v4(),
             season_number: season,

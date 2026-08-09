@@ -1339,6 +1339,23 @@ mod tests {
         (item.id, provider.id)
     }
 
+    /// Season 4 with two episodes — the shape most of these tests need.
+    fn two_episode_season(season_number: i32) -> NewSeason {
+        NewSeason {
+            season_number,
+            episode_count: 2,
+            air_date: None,
+            episodes: (1..=2)
+                .map(|episode_number| NewEpisode {
+                    tmdb_episode_id: None,
+                    episode_number,
+                    title: None,
+                    air_date: None,
+                })
+                .collect(),
+        }
+    }
+
     fn new_grab(item_id: Uuid, provider_id: Uuid, remote: &str) -> NewGrab<'_> {
         NewGrab {
             item_id,
@@ -1459,29 +1476,9 @@ mod tests {
         )
         .await
         .unwrap();
-        library::sync_seasons(
-            &pool,
-            series.id,
-            &[NewSeason {
-                season_number: 4,
-                episode_count: 2,
-                air_date: None,
-                episodes: vec![
-                    NewEpisode {
-                        episode_number: 1,
-                        title: None,
-                        air_date: None,
-                    },
-                    NewEpisode {
-                        episode_number: 2,
-                        title: None,
-                        air_date: None,
-                    },
-                ],
-            }],
-        )
-        .await
-        .unwrap();
+        library::sync_seasons(&pool, series.id, &[two_episode_season(4)])
+            .await
+            .unwrap();
         let eps = library::episodes(&pool, series.id).await.unwrap();
 
         let mut first = new_grab(series.id, provider_id, "pack");
@@ -1527,11 +1524,13 @@ mod tests {
             air_date: None,
             episodes: vec![
                 NewEpisode {
+                    tmdb_episode_id: None,
                     episode_number: 1,
                     title: None,
                     air_date: None,
                 },
                 NewEpisode {
+                    tmdb_episode_id: None,
                     episode_number: 2,
                     title: None,
                     air_date: None,
@@ -1594,11 +1593,13 @@ mod tests {
                 air_date: None,
                 episodes: vec![
                     NewEpisode {
+                        tmdb_episode_id: None,
                         episode_number: 1,
                         title: None,
                         air_date: None,
                     },
                     NewEpisode {
+                        tmdb_episode_id: None,
                         episode_number: 2,
                         title: None,
                         air_date: None,
@@ -1796,29 +1797,9 @@ mod tests {
         )
         .await
         .unwrap();
-        library::sync_seasons(
-            &pool,
-            series.id,
-            &[NewSeason {
-                season_number: 4,
-                episode_count: 2,
-                air_date: None,
-                episodes: vec![
-                    NewEpisode {
-                        episode_number: 1,
-                        title: None,
-                        air_date: None,
-                    },
-                    NewEpisode {
-                        episode_number: 2,
-                        title: None,
-                        air_date: None,
-                    },
-                ],
-            }],
-        )
-        .await
-        .unwrap();
+        library::sync_seasons(&pool, series.id, &[two_episode_season(4)])
+            .await
+            .unwrap();
         let eps = library::episodes(&pool, series.id).await.unwrap();
 
         // A grab with no episode named — a season pack, or a whole-series
@@ -1848,29 +1829,9 @@ mod tests {
         )
         .await
         .unwrap();
-        library::sync_seasons(
-            &pool2,
-            series2.id,
-            &[NewSeason {
-                season_number: 4,
-                episode_count: 2,
-                air_date: None,
-                episodes: vec![
-                    NewEpisode {
-                        episode_number: 1,
-                        title: None,
-                        air_date: None,
-                    },
-                    NewEpisode {
-                        episode_number: 2,
-                        title: None,
-                        air_date: None,
-                    },
-                ],
-            }],
-        )
-        .await
-        .unwrap();
+        library::sync_seasons(&pool2, series2.id, &[two_episode_season(4)])
+            .await
+            .unwrap();
         let eps2 = library::episodes(&pool2, series2.id).await.unwrap();
         let mut only_first = new_grab(series2.id, provider2, "ep1");
         only_first.episode_id = Some(eps2[0].id);
@@ -1996,6 +1957,7 @@ mod tests {
                     episode_count: 1,
                     air_date: None,
                     episodes: vec![NewEpisode {
+                        tmdb_episode_id: None,
                         episode_number: 1,
                         title: None,
                         air_date: None,
@@ -2006,6 +1968,7 @@ mod tests {
                     episode_count: 1,
                     air_date: None,
                     episodes: vec![NewEpisode {
+                        tmdb_episode_id: None,
                         episode_number: 1,
                         title: None,
                         air_date: None,
@@ -2154,29 +2117,9 @@ mod tests {
         )
         .await
         .unwrap();
-        library::sync_seasons(
-            &pool,
-            series.id,
-            &[NewSeason {
-                season_number: 4,
-                episode_count: 2,
-                air_date: None,
-                episodes: vec![
-                    NewEpisode {
-                        episode_number: 1,
-                        title: None,
-                        air_date: None,
-                    },
-                    NewEpisode {
-                        episode_number: 2,
-                        title: None,
-                        air_date: None,
-                    },
-                ],
-            }],
-        )
-        .await
-        .unwrap();
+        library::sync_seasons(&pool, series.id, &[two_episode_season(4)])
+            .await
+            .unwrap();
         let eps = library::episodes(&pool, series.id).await.unwrap();
 
         let mut first = local(series.id, "/midias/Series/The Boys/s04e01.mkv");
@@ -2245,6 +2188,7 @@ mod tests {
                     episode_count: 1,
                     air_date: None,
                     episodes: vec![NewEpisode {
+                        tmdb_episode_id: None,
                         episode_number: 1,
                         title: None,
                         air_date: None,
@@ -2255,6 +2199,7 @@ mod tests {
                     episode_count: 1,
                     air_date: None,
                     episodes: vec![NewEpisode {
+                        tmdb_episode_id: None,
                         episode_number: 1,
                         title: None,
                         air_date: None,

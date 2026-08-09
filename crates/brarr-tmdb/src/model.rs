@@ -157,6 +157,9 @@ pub struct TvDetails {
 /// One episode.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Episode {
+    /// TMDB's own episode id — stable across orderings, and the only
+    /// identity that is.  when the payload omitted it.
+    pub id: i64,
     /// Season it belongs to.
     pub season_number: i32,
     /// Number within the season.
@@ -515,6 +518,7 @@ impl SeasonDetails {
                 .episodes
                 .into_iter()
                 .map(|e| Episode {
+                    id: e.id,
                     season_number: i32::try_from(e.season_number).unwrap_or(0),
                     episode_number: i32::try_from(e.episode_number).unwrap_or(0),
                     title: e.name,

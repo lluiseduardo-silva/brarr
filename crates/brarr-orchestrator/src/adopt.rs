@@ -1345,6 +1345,7 @@ mod tests {
                 air_date: None,
                 episodes: (1..=7)
                     .map(|n| library::NewEpisode {
+                        tmdb_episode_id: None,
                         episode_number: n,
                         title: None,
                         air_date: None,
