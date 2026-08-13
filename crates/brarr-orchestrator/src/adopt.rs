@@ -37,7 +37,8 @@ use uuid::Uuid;
 
 use crate::db::grabs::{self, Grab, GrabTarget};
 use crate::db::library::{self, Episode, LibraryItem, MediaType};
-use crate::db::root_folders;
+use crate::db::{episode_numbering, root_folders};
+use crate::episode_match::EpisodeMatcher;
 use crate::scan;
 use crate::{AppError, AppState};
 
@@ -555,17 +556,21 @@ pub async fn plan(
         .collect();
 
     let mut episodes: HashMap<Uuid, Vec<Episode>> = HashMap::new();
+    let mut matchers: HashMap<Uuid, EpisodeMatcher> = HashMap::new();
     let mut live: HashMap<Uuid, Vec<Grab>> = HashMap::new();
     let distinct: HashSet<Uuid> = assigned.iter().flatten().map(|i| i.id).collect();
     for id in distinct {
-        episodes.insert(id, library::episodes(pool, id).await?);
+        let eps = library::episodes(pool, id).await?;
+        let reverse = episode_numbering::reverse_for_item(pool, id).await?;
+        matchers.insert(id, EpisodeMatcher::new(&eps, reverse));
+        episodes.insert(id, eps);
         live.insert(id, grabs::live_for_item(pool, id).await?);
     }
 
     let mut files = Vec::with_capacity(scan.files.len());
     for (found, item) in scan.files.iter().zip(assigned) {
         let row = build_row(state, found, item, folder, &roots).await?;
-        files.push(resolve_target(row, item, &episodes, &live));
+        files.push(resolve_target(row, item, &episodes, &matchers, &live));
     }
 
     Ok(Plan {
@@ -680,11 +685,14 @@ pub async fn plan_one(
         row.episode = u16::try_from(ep.episode_number).ok();
         row.marker_error = None;
     }
+    let reverse = episode_numbering::reverse_for_item(pool, item.id).await?;
+    let mut matchers = HashMap::new();
+    matchers.insert(item.id, EpisodeMatcher::new(&episodes, reverse));
     let mut by_item = HashMap::new();
     by_item.insert(item.id, episodes);
     let mut live = HashMap::new();
     live.insert(item.id, grabs::live_for_item(pool, item.id).await?);
-    Ok(resolve_target(row, Some(&item), &by_item, &live))
+    Ok(resolve_target(row, Some(&item), &by_item, &matchers, &live))
 }
 
 /// One episode the picker offers.
@@ -807,10 +815,17 @@ async fn build_row(
 }
 
 /// Tie the row to an episode and to the coverage already in `grabs`.
+///
+/// The coordinates in `row` are what the **file name** says, and a name
+/// follows the numbering the release used — which is not always the
+/// catalogue's. `matchers` is what reconciles the two, so a folder of
+/// `S02E01`-style names lands on the right rows of a catalogue that
+/// numbers the same episodes 15 upwards.
 fn resolve_target(
     mut row: PlannedFile,
     item: Option<&LibraryItem>,
     episodes: &HashMap<Uuid, Vec<Episode>>,
+    matchers: &HashMap<Uuid, EpisodeMatcher>,
     live: &HashMap<Uuid, Vec<Grab>>,
 ) -> PlannedFile {
     let Some(item) = item else { return row };
@@ -825,20 +840,25 @@ fn resolve_target(
             );
             return row;
         };
-        let found = episodes.get(&item.id).and_then(|eps| {
-            eps.iter().find(|e| {
-                u16::try_from(e.season_number).ok() == Some(season)
-                    && u16::try_from(e.episode_number).ok() == Some(number)
-            })
-        });
+        let found = matchers
+            .get(&item.id)
+            .and_then(|m| m.resolve(i32::from(season), i32::from(number), None))
+            .and_then(|id| {
+                episodes
+                    .get(&item.id)
+                    .and_then(|eps| eps.iter().find(|e| e.id == id))
+            });
         let Some(ep) = found else {
             row.reason = Some(format!("S{season:02}E{number:02} não existe no catálogo"));
             return row;
         };
         row.episode_id = Some(ep.id);
+        // The catalogue's number, not the name's: under an alternate
+        // ordering they differ, and the picker beside this label lists
+        // catalogue numbers.
         row.episode_label = Some(match &ep.title {
-            Some(t) => format!("{number} — {t}"),
-            None => format!("{number}"),
+            Some(t) => format!("{} — {t}", ep.episode_number),
+            None => ep.episode_number.to_string(),
         });
         GrabTarget::episode(ep.id, ep.season_number)
     } else {

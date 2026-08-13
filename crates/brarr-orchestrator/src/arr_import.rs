@@ -62,7 +62,8 @@ use uuid::Uuid;
 use crate::db::arr_instances::{self, ArrInstanceRow};
 use crate::db::arr_root_mappings::{self, ArrRootMapping};
 use crate::db::library::{self, LibraryItem, MediaType, MonitorScope};
-use crate::db::{Pool, grabs};
+use crate::db::{Pool, episode_numbering, grabs};
+use crate::episode_match::EpisodeMatcher;
 use crate::remote_path::{self, PrefixRule};
 use crate::tmdb_sync;
 use crate::{AppError, AppState};
@@ -118,7 +119,13 @@ pub struct ArrFileRef {
     /// Absolute path in the \*arr's namespace.
     pub path: String,
     /// `None` for a movie, `Some((season, episode))` for an episode.
+    ///
+    /// These are the **\*arr's** coordinates, which are `TheTVDB`'s. They
+    /// are not always TMDB's, and [`crate::episode_match`] is what
+    /// reconciles the two.
     pub episode: Option<(i32, i32)>,
+    /// The \*arr's absolute episode number, when it has one.
+    pub absolute: Option<i32>,
 }
 
 /// The second read of one series: the file→episode pairing, and the
@@ -153,6 +160,7 @@ fn movie_to_title(movie: &ArrMovie) -> ArrTitle {
             .map(|f| ArrFileRef {
                 path: f.path.clone(),
                 episode: None,
+                absolute: None,
             })
             .collect(),
     }
@@ -189,11 +197,11 @@ fn series_to_title(series: &ArrSeries) -> ArrTitle {
 /// name and applies no regex — which is what rescues absolute-numbered
 /// anime, 545 files on this collection that no marker parser reads.
 ///
-/// A file covering two episodes appears twice, deliberately. The local
-/// barrier is keyed on `(item, path)` with the episode outside it, so the
-/// second reservation is refused and the file ends up recorded against
-/// one episode. Hiding the duplicate here would only move that surprise
-/// somewhere less visible.
+/// A file covering two episodes appears twice, deliberately — a 40-minute
+/// `S05E33E34` is two episodes to Sonarr, to Plex and to the operator,
+/// and it is two rows here. The local barrier carries the episode in its
+/// key so both are recorded; see
+/// `migrations/20260813120000_multi_episode_files.sql`.
 fn join_episode_files(episodes: &[ArrEpisode], files: &[ArrFile]) -> Vec<ArrFileRef> {
     let by_id: HashMap<u64, &ArrFile> = files.iter().map(|f| (f.id, f)).collect();
     episodes
@@ -204,6 +212,7 @@ fn join_episode_files(episodes: &[ArrEpisode], files: &[ArrFile]) -> Vec<ArrFile
             (!file.path.is_empty()).then(|| ArrFileRef {
                 path: file.path.clone(),
                 episode: Some((e.season_number, e.episode_number)),
+                absolute: e.absolute_episode_number,
             })
         })
         .collect()
@@ -982,14 +991,12 @@ async fn adopt_files(
     if files.is_empty() {
         return Ok(FileCounts::default());
     }
-    let episodes: HashMap<(i32, i32), Uuid> = if item.media_type == MediaType::Tv {
-        library::episodes(pool, item.id)
-            .await?
-            .into_iter()
-            .map(|e| ((e.season_number, e.episode_number), e.id))
-            .collect()
+    let matcher = if item.media_type == MediaType::Tv {
+        let episodes = library::episodes(pool, item.id).await?;
+        let reverse = episode_numbering::reverse_for_item(pool, item.id).await?;
+        EpisodeMatcher::new(&episodes, reverse)
     } else {
-        HashMap::new()
+        EpisodeMatcher::default()
     };
 
     let mut counts = FileCounts::default();
@@ -1010,12 +1017,16 @@ async fn adopt_files(
             continue;
         }
         let mut episode_id = None;
-        if let Some(key) = file.episode {
-            // TMDB does not always have the episode Sonarr has — the two
-            // numberings disagree more often on anime than anywhere else.
-            // Recording it against the item instead would make one file
-            // look like the whole series to `grabs::blocking_for`.
-            let Some(found) = episodes.get(&key).copied() else {
+        if let Some((season, episode)) = file.episode {
+            // TMDB does not always number a series the way Sonarr does —
+            // they disagree on 29 of this operator's 176 series, and on
+            // anime almost always. `EpisodeMatcher` tries the canonical
+            // coordinate, then the absolute axis, then whatever ordering
+            // the operator applied. A file none of them place is still
+            // dropped: recording it against the item instead would make
+            // one file look like the whole series to
+            // `grabs::blocking_for`.
+            let Some(found) = matcher.resolve(season, episode, file.absolute) else {
                 counts.missing += 1;
                 continue;
             };
@@ -1318,6 +1329,7 @@ mod tests {
             monitored: true,
             has_file: file_id > 0,
             episode_file_id: file_id,
+            absolute_episode_number: None,
         }
     }
 
@@ -1361,9 +1373,9 @@ mod tests {
         assert!(episode_monitoring(&episodes).is_empty());
     }
 
-    /// A file covering two episodes appears twice on purpose — the
-    /// barrier refuses the second, and the alternative is hiding the
-    /// duplicate somewhere less visible.
+    /// A file covering two episodes appears twice on purpose, and since
+    /// `20260813120000` both rows survive the barrier — a 40-minute
+    /// `S05E33E34` really is two episodes.
     #[test]
     fn a_multi_episode_file_appears_once_per_episode() {
         let files = vec![file(9, "/data/Series/X/S01E01E02.mkv")];
@@ -1583,6 +1595,7 @@ mod tests {
         let files = vec![ArrFileRef {
             path: "/data/Series/The Boys - S01E01.mkv".to_owned(),
             episode: Some((1, 1)),
+            absolute: None,
         }];
 
         let counts = adopt_files(&pool, &item, &files, &rules).await.unwrap();
@@ -1615,6 +1628,7 @@ mod tests {
         let files = vec![ArrFileRef {
             path: "/data/Series/The Boys - S01E01.mkv".to_owned(),
             episode: Some((1, 1)),
+            absolute: None,
         }];
         let counts = adopt_files(&pool, &item, &files, &[]).await.unwrap();
         assert_eq!(counts.adopted, 0);
@@ -1646,6 +1660,7 @@ mod tests {
         let files = vec![ArrFileRef {
             path: "/data/Series/x.mkv".to_owned(),
             episode: Some((1, 9)),
+            absolute: None,
         }];
         let counts = adopt_files(&pool, &item, &files, &rules).await.unwrap();
         assert_eq!(counts.adopted, 0);
@@ -1657,5 +1672,142 @@ mod tests {
                 .is_empty()
         );
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// **The Dragon Ball Super regression.** TMDB flattens the series
+    /// into one season of 131; `TheTVDB`, Sonarr and the operator's disk
+    /// split the same episodes into five arcs. Sonarr reports the file as
+    /// S02E01, TMDB calls it episode 15, and before
+    /// [`crate::episode_match`] this fell straight through to
+    /// `counts.missing` — 117 of the 131 files, present on disk, recorded
+    /// as absent.
+    ///
+    /// Run against the previous code this fails with `missing: 1`.
+    #[tokio::test]
+    async fn a_file_the_arr_numbers_differently_still_finds_its_episode() {
+        let pool = open_memory().await.unwrap();
+        let item = seed_flat_series(&pool, 131).await;
+        let dir = std::env::temp_dir().join(format!("brarr-arrimport-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("dbs-s02e01.mkv"), b"x").unwrap();
+        let rules = vec![PrefixRule {
+            id: Uuid::nil(),
+            remote_prefix: "/data/Animes".to_owned(),
+            local_prefix: dir.clone(),
+        }];
+        let files = vec![ArrFileRef {
+            path: "/data/Animes/dbs-s02e01.mkv".to_owned(),
+            episode: Some((2, 1)),
+            // Arc 2 episode 1 is the fifteenth of the series, and Sonarr
+            // says so on every anime episode it holds.
+            absolute: Some(15),
+        }];
+
+        let counts = adopt_files(&pool, &item, &files, &rules).await.unwrap();
+        assert_eq!(counts.adopted, 1, "{counts:?}");
+
+        let live = grabs::live_for_item(&pool, item.id).await.unwrap();
+        assert_eq!(live.len(), 1);
+        let episodes = library::episodes(&pool, item.id).await.unwrap();
+        let fifteenth = episodes
+            .iter()
+            .find(|e| e.season_number == 1 && e.episode_number == 15)
+            .unwrap();
+        assert_eq!(
+            live[0].episode_id,
+            Some(fifteenth.id),
+            "S02E01 is the catalogue's episode 15, not its episode 1"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// One 40-minute file, two episodes — `S05E33E34` on this operator's
+    /// disk, `S33E06E07` on their Simpsons. The local barrier used to be
+    /// keyed on the path alone, so the second episode stayed uncovered
+    /// forever and the scanner could never close the gap: every release
+    /// it found was refused by the same key.
+    #[tokio::test]
+    async fn one_file_can_cover_two_episodes() {
+        let pool = open_memory().await.unwrap();
+        let item = seed_flat_series(&pool, 4).await;
+        let dir = std::env::temp_dir().join(format!("brarr-arrimport-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("double.mkv"), b"x").unwrap();
+        let rules = vec![PrefixRule {
+            id: Uuid::nil(),
+            remote_prefix: "/data/Animes".to_owned(),
+            local_prefix: dir.clone(),
+        }];
+        // What `join_episode_files` emits for a two-episode file: the same
+        // path once per episode.
+        let files = vec![
+            ArrFileRef {
+                path: "/data/Animes/double.mkv".to_owned(),
+                episode: Some((1, 2)),
+                absolute: None,
+            },
+            ArrFileRef {
+                path: "/data/Animes/double.mkv".to_owned(),
+                episode: Some((1, 3)),
+                absolute: None,
+            },
+        ];
+
+        let counts = adopt_files(&pool, &item, &files, &rules).await.unwrap();
+        assert_eq!(counts.adopted, 2, "{counts:?}");
+
+        let live = grabs::live_for_item(&pool, item.id).await.unwrap();
+        let covered: HashSet<Option<Uuid>> = live.iter().map(|g| g.episode_id).collect();
+        assert_eq!(
+            covered.len(),
+            2,
+            "both episodes are covered by the one file"
+        );
+
+        // Still idempotent — the key gained the episode, it did not stop
+        // being a key.
+        let again = adopt_files(&pool, &item, &files, &rules).await.unwrap();
+        assert_eq!(again.adopted, 0);
+        assert_eq!(again.already, 2);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A series TMDB flattens into a single season of `count` episodes —
+    /// Dragon Ball Super's real shape, and Jujutsu Kaisen's, and that of
+    /// thirteen more titles in this operator's catalogue.
+    async fn seed_flat_series(pool: &Pool, count: i32) -> LibraryItem {
+        let item = library::upsert(
+            pool,
+            &NewLibraryItem {
+                media_type: Some(MediaType::Tv),
+                tmdb_id: 62_715,
+                title: "Dragon Ball Super".to_owned(),
+                ..NewLibraryItem::default()
+            },
+        )
+        .await
+        .unwrap();
+        library::sync_seasons(
+            pool,
+            item.id,
+            &[NewSeason {
+                season_number: 1,
+                episode_count: count,
+                air_date: None,
+                episodes: (1..=count)
+                    .map(|episode_number| NewEpisode {
+                        tmdb_episode_id: None,
+                        episode_number,
+                        title: None,
+                        air_date: None,
+                    })
+                    .collect(),
+            }],
+        )
+        .await
+        .unwrap();
+        item
     }
 }

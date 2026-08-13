@@ -29,7 +29,8 @@ use std::path::Path;
 use tracing::{debug, info};
 use uuid::Uuid;
 
-use crate::db::{Pool, grabs, library};
+use crate::db::{Pool, episode_numbering, grabs, library};
+use crate::episode_match::EpisodeMatcher;
 use crate::{AppError, adopt};
 
 /// What one repair pass did.
@@ -73,14 +74,11 @@ pub async fn run(pool: &Pool) -> Result<RelinkReport, AppError> {
     // One tree per series, not one per grab: a repair on a long-running
     // show is hundreds of rows against the same catalogue.
     let items: HashSet<Uuid> = orphans.iter().map(|g| g.item_id).collect();
-    let mut trees: HashMap<Uuid, HashMap<(i32, i32), Uuid>> = HashMap::with_capacity(items.len());
+    let mut trees: HashMap<Uuid, EpisodeMatcher> = HashMap::with_capacity(items.len());
     for item_id in items {
-        let tree = library::episodes(pool, item_id)
-            .await?
-            .into_iter()
-            .map(|e| ((e.season_number, e.episode_number), e.id))
-            .collect();
-        trees.insert(item_id, tree);
+        let episodes = library::episodes(pool, item_id).await?;
+        let reverse = episode_numbering::reverse_for_item(pool, item_id).await?;
+        trees.insert(item_id, EpisodeMatcher::new(&episodes, reverse));
     }
 
     for grab in &orphans {
@@ -97,8 +95,14 @@ pub async fn run(pool: &Pool) -> Result<RelinkReport, AppError> {
             continue;
         };
 
-        let key = (i32::from(season), i32::from(number));
-        let Some(&episode_id) = trees.get(&grab.item_id).and_then(|t| t.get(&key)) else {
+        // The name carries the numbering the release used, which under an
+        // applied ordering is not the catalogue's. No absolute number is
+        // available here — a name carrying one carries no marker to have
+        // reached this line with.
+        let found = trees
+            .get(&grab.item_id)
+            .and_then(|m| m.resolve(i32::from(season), i32::from(number), None));
+        let Some(episode_id) = found else {
             report.unknown_episode += 1;
             continue;
         };

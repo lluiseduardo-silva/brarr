@@ -240,6 +240,53 @@ pub async fn for_item(
     Ok(map)
 }
 
+/// The translation for one title, **group → canonical**.
+///
+/// The mirror of [`for_item`], for the other question: the catalogue
+/// asks "what should I request from the indexer", and the adoption path
+/// asks "the file says S02E01 — which episode is that". Both directions
+/// come out of the same rows, and the reverse is unambiguous because a
+/// group places every episode exactly once (verified against the live
+/// table: zero `(group_season, group_episode)` collisions).
+///
+/// Empty for every title with no ordering applied, so the caller's
+/// fallback is a miss on an empty map rather than a flag to check.
+///
+/// # Errors
+///
+/// Returns [`AppError::Database`] on SQL failure.
+pub async fn reverse_for_item(
+    pool: &Pool,
+    item_id: Uuid,
+) -> Result<HashMap<(i32, i32), Numbering>, AppError> {
+    let rows = sqlx::query(
+        "SELECT canonical_season, canonical_episode, group_season, group_episode \
+         FROM library_episode_numbering WHERE item_id = ?",
+    )
+    .bind(item_id.to_string())
+    .fetch_all(pool)
+    .await?;
+
+    let mut map = HashMap::with_capacity(rows.len());
+    for row in &rows {
+        let cs: i64 = row.try_get("canonical_season")?;
+        let ce: i64 = row.try_get("canonical_episode")?;
+        let gs: i64 = row.try_get("group_season")?;
+        let ge: i64 = row.try_get("group_episode")?;
+        map.insert(
+            (
+                i32::try_from(gs).unwrap_or(0),
+                i32::try_from(ge).unwrap_or(0),
+            ),
+            Numbering {
+                season: i32::try_from(cs).unwrap_or(0),
+                episode: i32::try_from(ce).unwrap_or(0),
+            },
+        );
+    }
+    Ok(map)
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,

@@ -372,6 +372,15 @@ pub struct ArrEpisode {
     /// including absolute-numbered anime that no marker regex reads.
     #[serde(default)]
     pub episode_file_id: u64,
+    /// Position in the series as a whole, ignoring seasons.
+    ///
+    /// Sonarr fills this for anime and leaves it absent elsewhere. It is
+    /// what lets brarr place a file when TMDB flattens a series into one
+    /// season and `TheTVDB` splits it in five — see the orchestrator's
+    /// `episode_match` module. Measured on this operator's catalogue:
+    /// present on every episode of every affected series.
+    #[serde(default)]
+    pub absolute_episode_number: Option<i32>,
 }
 
 /// One wanted-missing episode row from Sonarr `/api/v3/wanted/missing`.

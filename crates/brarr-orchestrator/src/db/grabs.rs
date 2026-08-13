@@ -2100,11 +2100,21 @@ mod tests {
         );
     }
 
-    /// The episode is deliberately outside the key. An operator fixing a
-    /// wrong match by adopting again — instead of undoing first — would
-    /// otherwise get the same file covering two episodes at once.
+    /// The episode is **inside** the key, since `20260813120000`.
+    ///
+    /// It used to be outside, so that an operator fixing a wrong match by
+    /// adopting again — instead of undoing first — could not end up with
+    /// one file covering two episodes. That guard cost more than it saved:
+    /// a two-episode file is a real, ordinary thing (`S05E33E34` here,
+    /// `S33E06E07` on the Simpsons) and Sonarr, Plex and the operator all
+    /// read it as two. Under the old key the second episode was uncovered
+    /// forever *and* unfixable, because every release the scanner found
+    /// for it was refused by the same path key.
+    ///
+    /// The mis-match case is still handled — by undo, which is one row
+    /// delete and touches no file.
     #[tokio::test]
-    async fn the_local_key_ignores_the_episode() {
+    async fn the_local_key_carries_the_episode() {
         let pool = open_memory().await.unwrap();
         let series = library::upsert(
             &pool,
@@ -2129,8 +2139,15 @@ mod tests {
 
         assert!(reserve_local(&pool, &first).await.unwrap().is_some());
         assert!(
-            reserve_local(&pool, &again).await.unwrap().is_none(),
-            "one file cannot cover two episodes by adopting it twice"
+            reserve_local(&pool, &again).await.unwrap().is_some(),
+            "one file covering two episodes is two rows, because it covers two episodes"
+        );
+        // The key gained the episode; it did not stop being a key. Same
+        // path, same episode, still refused — which is what makes the
+        // passive sweep safe to run on a timer.
+        assert!(
+            reserve_local(&pool, &first).await.unwrap().is_none(),
+            "the same file against the same episode is still adopted once"
         );
     }
 

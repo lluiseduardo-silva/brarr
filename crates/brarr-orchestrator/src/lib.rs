@@ -56,6 +56,7 @@ pub mod auth;
 pub mod coverage;
 pub mod db;
 pub mod deliver;
+pub mod episode_match;
 pub mod error;
 pub mod fuzzy;
 pub mod grpc;
