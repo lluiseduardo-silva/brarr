@@ -42,6 +42,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use time::{Date, OffsetDateTime};
 use uuid::Uuid;
 
 use crate::db::episode_numbering::{Numbering, NumberingRow};
@@ -133,7 +134,7 @@ impl EpisodeMatcher {
 /// One episode's coordinates in some external source's numbering.
 ///
 /// Both sources brarr can derive a numbering from — Sonarr and TheTVDB —
-/// hand over the same three values, because Sonarr's numbering *is*
+/// hand over the same values, because Sonarr's numbering *is*
 /// `TheTVDB`'s. One shape, one derivation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExternalNumber {
@@ -143,6 +144,37 @@ pub struct ExternalNumber {
     pub episode: i32,
     /// Position in the series as a whole, when the source has one.
     pub absolute: Option<i32>,
+    /// First air date. **The only value here that belongs to the
+    /// episode rather than to a numbering scheme**, which is what makes
+    /// it the arbiter when the two schemes disagree.
+    pub aired: Option<OffsetDateTime>,
+}
+
+/// The calendar day an air date falls on, for joining two sources that
+/// both know when an episode aired.
+fn day(at: OffsetDateTime) -> Date {
+    at.date()
+}
+
+/// Index of catalogue episodes by air day, keeping only the days that
+/// name exactly one episode.
+///
+/// Uniqueness on both sides is the whole safety of this tier: a
+/// double-length premiere, or a streaming batch drop, puts several
+/// episodes on one day and the date stops identifying anything.
+fn unique_by_day(catalogue: &[Episode]) -> HashMap<Date, (i32, i32)> {
+    let mut seen: HashMap<Date, Vec<(i32, i32)>> = HashMap::new();
+    for e in catalogue.iter().filter(|e| e.season_number > 0) {
+        if let Some(at) = e.air_date {
+            seen.entry(day(at))
+                .or_default()
+                .push((e.season_number, e.episode_number));
+        }
+    }
+    seen.into_iter()
+        .filter(|(_, v)| v.len() == 1)
+        .filter_map(|(k, v)| v.first().map(|c| (k, *c)))
+        .collect()
 }
 
 /// Build the canonical → external translation for one title.
@@ -150,8 +182,28 @@ pub struct ExternalNumber {
 /// **The matcher is built with an empty reverse map on purpose.**
 /// Deriving a translation from a translation this function itself wrote
 /// would be self-referential, and a wrong row would keep re-deriving
-/// itself forever. Only the canonical coordinate and the absolute axis
-/// get a vote.
+/// itself forever.
+///
+/// ## The air date decides, and the absolute number only breaks ties
+///
+/// The absolute axis was the primary join and it is **not** reliable, a
+/// claim this module previously made in the opposite direction. Kaiju
+/// No. 8 is the counterexample, measured live: `TheTVDB` gives absolute
+/// 13 to a special it files under season 0, so its `S02E01` carries
+/// absolute **14** while the same episode — same title, same air date,
+/// 2025-07-19 — sits at position **13** of TMDB's flat season. Joining
+/// on the absolute number shifted every episode of that season by one
+/// and left one unmatched, silently.
+///
+/// The air date is the only value either side reports that belongs to
+/// the *episode* rather than to a numbering scheme, so it arbitrates.
+/// Audited across this operator's catalogue: of 15 titles it agreed with
+/// the absolute axis on 14 and corrected the fifteenth, 11 rows.
+///
+/// It is not sufficient on its own — a batch drop or a double premiere
+/// puts several episodes on one day — so it is used only where it names
+/// exactly one episode on each side, and the absolute axis still answers
+/// the rest.
 ///
 /// Rows where both sides agree are **omitted**: absent *is* the encoding
 /// of "no translation", so the Simpsons would otherwise carry 801 rows
@@ -164,14 +216,33 @@ pub fn derive_numbering(catalogue: &[Episode], external: &[ExternalNumber]) -> V
         .map(|e| (e.id, (e.season_number, e.episode_number)))
         .collect();
     let matcher = EpisodeMatcher::new(catalogue, HashMap::new());
+    let by_day = unique_by_day(catalogue);
+    // The other half of the uniqueness rule: a day several external
+    // episodes share names none of them.
+    let mut external_days: HashMap<Date, usize> = HashMap::new();
+    for n in external.iter().filter(|n| n.season > 0) {
+        if let Some(at) = n.aired {
+            *external_days.entry(day(at)).or_default() += 1;
+        }
+    }
 
     let mut rows = Vec::new();
     for n in external {
-        let Some(found) = matcher.resolve(n.season, n.episode, n.absolute) else {
-            continue;
-        };
-        let Some(&canonical) = coordinates.get(&found) else {
-            continue;
+        let dated = n
+            .aired
+            .map(day)
+            .filter(|d| external_days.get(d) == Some(&1))
+            .and_then(|d| by_day.get(&d).copied());
+        let canonical = if let Some(canonical) = dated {
+            canonical
+        } else {
+            let Some(found) = matcher.resolve(n.season, n.episode, n.absolute) else {
+                continue;
+            };
+            let Some(&canonical) = coordinates.get(&found) else {
+                continue;
+            };
+            canonical
         };
         if canonical == (n.season, n.episode) {
             continue;
@@ -315,6 +386,108 @@ mod tests {
             }
         }
         assert_eq!(seen.len(), 131);
+    }
+
+    /// One catalogue episode, with an air date.
+    fn ep(season: i32, number: i32, aired: Option<OffsetDateTime>) -> Episode {
+        Episode {
+            id: Uuid::new_v4(),
+            tmdb_episode_id: None,
+            item_id: Uuid::nil(),
+            season_id: Uuid::nil(),
+            season_number: season,
+            episode_number: number,
+            title: None,
+            air_date: aired,
+            monitored: true,
+        }
+    }
+
+    /// **Kaiju No. 8, with the real numbers.**
+    ///
+    /// `TheTVDB` gives absolute 13 to a special it files under season 0,
+    /// so its `S02E01` carries absolute **14** — while the same episode,
+    /// same air date, is position **13** of TMDB's flat season. Joining
+    /// on the absolute number shifts the whole season by one and orphans
+    /// the thirteenth; joining on the date does not.
+    ///
+    /// Run against the absolute-first version this fails with the
+    /// mapping one place out, which is exactly how it reached production.
+    #[test]
+    fn the_air_date_outranks_a_shifted_absolute_number() {
+        use time::macros::datetime;
+
+        let catalogue = vec![
+            ep(1, 12, Some(datetime!(2024-06-29 0:00 UTC))),
+            ep(1, 13, Some(datetime!(2025-07-19 0:00 UTC))),
+            ep(1, 14, Some(datetime!(2025-07-26 0:00 UTC))),
+        ];
+        let external = vec![
+            ExternalNumber {
+                season: 1,
+                episode: 12,
+                absolute: Some(12),
+                aired: Some(datetime!(2024-06-29 0:00 UTC)),
+            },
+            ExternalNumber {
+                season: 2,
+                episode: 1,
+                absolute: Some(14),
+                aired: Some(datetime!(2025-07-19 0:00 UTC)),
+            },
+            ExternalNumber {
+                season: 2,
+                episode: 2,
+                absolute: Some(15),
+                aired: Some(datetime!(2025-07-26 0:00 UTC)),
+            },
+        ];
+
+        let rows = derive_numbering(&catalogue, &external);
+        let of = |canonical: i32| {
+            rows.iter()
+                .find(|r| r.canonical.episode == canonical)
+                .map(|r| r.group)
+        };
+        assert_eq!(
+            of(13),
+            Some(Numbering {
+                season: 2,
+                episode: 1
+            }),
+            "canonical 13 is S02E01 — the absolute number says 14 and is wrong"
+        );
+        assert_eq!(
+            of(14),
+            Some(Numbering {
+                season: 2,
+                episode: 2
+            })
+        );
+        // Episode 12 agrees on both sides, so it contributes no row.
+        assert_eq!(of(12), None);
+    }
+
+    /// A day several episodes share names none of them, so the absolute
+    /// axis still answers — a batch drop must not scramble a season.
+    #[test]
+    fn a_shared_air_date_does_not_decide() {
+        use time::macros::datetime;
+
+        let same = Some(datetime!(2024-01-01 0:00 UTC));
+        let catalogue = vec![ep(1, 1, same), ep(1, 2, same), ep(1, 3, same)];
+        let external = vec![ExternalNumber {
+            season: 2,
+            episode: 1,
+            absolute: Some(3),
+            aired: same,
+        }];
+        let rows = derive_numbering(&catalogue, &external);
+        assert_eq!(
+            rows.first().map(|r| r.canonical.episode),
+            Some(3),
+            "the date named three episodes, so the absolute number decided"
+        );
     }
 
     /// A coordinate no tier can place stays unplaced. Guessing is not on

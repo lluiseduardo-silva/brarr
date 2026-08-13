@@ -155,6 +155,8 @@ pub struct ArrNumber {
     pub episode: i32,
     /// Position in the series as a whole, when the \*arr has one.
     pub absolute: Option<i32>,
+    /// First air date, midnight UTC.
+    pub aired: Option<OffsetDateTime>,
 }
 
 /// Radarr row → title. The file comes inline, so a movie never needs a
@@ -245,8 +247,18 @@ fn arr_numbering(episodes: &[ArrEpisode]) -> Vec<ArrNumber> {
             season: e.season_number,
             episode: e.episode_number,
             absolute: e.absolute_episode_number,
+            aired: e.air_date.as_deref().and_then(parse_air_date),
         })
         .collect()
+}
+
+/// `YYYY-MM-DD` at midnight UTC — the same convention `brarr-tmdb` and
+/// `brarr-tvdb` use, so the three sources produce comparable values.
+fn parse_air_date(raw: &str) -> Option<OffsetDateTime> {
+    let format = time::macros::format_description!("[year]-[month]-[day]");
+    time::Date::parse(raw.trim(), &format)
+        .ok()
+        .map(|d| OffsetDateTime::new_in_offset(d, time::Time::MIDNIGHT, time::UtcOffset::UTC))
 }
 
 /// Store the \*arr's numbering as this title's search numbering.
@@ -279,6 +291,7 @@ async fn sync_search_numbering(
             season: n.season,
             episode: n.episode,
             absolute: n.absolute,
+            aired: n.aired,
         })
         .collect();
     let rows = episode_match::derive_numbering(&episodes, &external);
@@ -1415,6 +1428,7 @@ mod tests {
             has_file: file_id > 0,
             episode_file_id: file_id,
             absolute_episode_number: None,
+            air_date: None,
         }
     }
 

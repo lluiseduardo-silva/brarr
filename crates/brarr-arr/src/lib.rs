@@ -381,6 +381,13 @@ pub struct ArrEpisode {
     /// present on every episode of every affected series.
     #[serde(default)]
     pub absolute_episode_number: Option<i32>,
+    /// `YYYY-MM-DD`, when the \*arr knows it.
+    ///
+    /// The only field on this record that belongs to the *episode*
+    /// rather than to a numbering scheme, which is what makes it able to
+    /// arbitrate when two sources number the same series differently.
+    #[serde(default)]
+    pub air_date: Option<String>,
 }
 
 /// One wanted-missing episode row from Sonarr `/api/v3/wanted/missing`.

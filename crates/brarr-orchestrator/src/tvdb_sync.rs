@@ -201,6 +201,7 @@ pub async fn sync_item(
             season: e.season_number,
             episode: e.number,
             absolute: e.absolute_number,
+            aired: e.aired,
         })
         .collect();
 
