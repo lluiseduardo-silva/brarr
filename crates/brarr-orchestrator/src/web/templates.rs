@@ -1683,6 +1683,13 @@ pub struct LibraryGroupsModalPartial {
     /// Whether a `TheTVDB` key is configured, so the button is offered
     /// only when pressing it could do something.
     pub tvdb_available: bool,
+    /// Whether the operator settled this title, as opposed to a sweep.
+    ///
+    /// Drives both the wording and the way out. Without it, `off` — "I
+    /// want the canonical numbering and I mean it" — renders exactly
+    /// like "nobody has decided yet", and the two behave as opposites:
+    /// one is refused by every sweep, the other invites them.
+    pub settled_by_operator: bool,
 }
 
 /// One canonical season, and the blocks the operator has cut it into.

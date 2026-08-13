@@ -127,6 +127,7 @@ pub fn router(state: AppState, static_dir: &std::path::Path) -> Router {
         .route("/library/{id}/groups/clear", post(library_groups_clear))
         .route("/library/{id}/numbering", post(library_numbering))
         .route("/library/{id}/numbering/tvdb", post(library_numbering_tvdb))
+        .route("/library/{id}/numbering/auto", post(library_numbering_auto))
         .route("/library/{id}/refresh", post(library_refresh))
         .route("/library/{id}/scan", post(library_scan_now))
         .route("/library/{id}/scan/status", get(library_scan_status))
@@ -2921,6 +2922,7 @@ async fn groups_panel(
         alternates: rows.iter().filter(|r| r.alternate).count(),
         active_name: active.and_then(|(_, name)| name),
         source: source.map(|s| s.description().to_owned()),
+        settled_by_operator: source.is_some_and(episode_numbering::Source::is_operator),
         seasons,
         error,
         tvdb_available: crate::tvdb_sync::is_configured(state.pool())
@@ -3003,6 +3005,29 @@ async fn library_numbering(
         .await
         .unwrap_or_default();
     groups_panel(&state, &item, rows, episodes, active, failure).await
+}
+
+/// `POST /library/{id}/numbering/auto` — hand this title back to the
+/// sweeps.
+///
+/// **The way out, and it did not exist.** Every operator action here
+/// writes a decision the sweeps must respect, including "voltar ao
+/// original", which stores `off`. The only button that undid anything
+/// was attached to the active group's row — and `clear` nulls the group
+/// id, so after one click there was no row and no button. A title was
+/// stuck on the operator's last word forever.
+async fn library_numbering_auto(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, AppError> {
+    let uuid = Uuid::parse_str(&id)
+        .map_err(|e| AppError::InvalidInput(format!("invalid library id: {e}")))?;
+    let item = library::get_by_id(state.pool(), uuid).await?;
+    episode_numbering::reset_to_automatic(state.pool(), uuid).await?;
+
+    let episodes = i32::try_from(library::episodes(state.pool(), uuid).await?.len()).unwrap_or(0);
+    let rows = group_rows(&state, &item, None).await.unwrap_or_default();
+    groups_panel(&state, &item, rows, episodes, None, None).await
 }
 
 /// `POST /library/{id}/numbering/tvdb` — derive it from `TheTVDB` now.

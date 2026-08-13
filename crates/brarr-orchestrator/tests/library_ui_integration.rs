@@ -1535,6 +1535,7 @@ fn the_numbering_panel_offers_only_alternates_and_declares_what_it_changes() {
         seasons: Vec::new(),
         error: None,
         tvdb_available: false,
+        settled_by_operator: false,
         episodes: 59,
         rows: vec![
             row("ki", "季", "produção", true, 59),
@@ -1580,6 +1581,7 @@ fn the_numbering_panel_offers_only_alternates_and_declares_what_it_changes() {
         seasons: Vec::new(),
         error: None,
         tvdb_available: false,
+        settled_by_operator: false,
         episodes: 59,
         rows: vec![row("arcs", "Story Arcs", "arco narrativo", true, 48)],
     };
@@ -1613,6 +1615,7 @@ fn the_panel_offers_hand_declared_blocks() {
         }],
         error: None,
         tvdb_available: false,
+        settled_by_operator: false,
         episodes: 25,
         rows: Vec::new(),
     };

@@ -535,7 +535,42 @@ pub async fn apply_manual(pool: &Pool, item_id: Uuid, blocks: &[Block]) -> Resul
     Ok(written)
 }
 
-/// Go back to the canonical numbering.
+/// Hand the title back to the sweeps.
+///
+/// **The way out of every operator decision**, and it was missing.
+/// [`clear`] writes `'off'`, which is a decision like any other and is
+/// therefore refused by both sweeps; the panel then rendered no button
+/// at all, because the only one it offered was attached to the active
+/// group's row and `clear` had just nulled the group id. A title that
+/// went through "voltar ao original" was stuck there permanently, and
+/// `off` looked identical on screen to "nobody has decided" while
+/// behaving as its opposite.
+///
+/// Sets the source back to NULL — *nobody has decided* — so the next
+/// sweep may derive one, and drops whatever rows were in force.
+///
+/// # Errors
+///
+/// Returns [`AppError::Database`] on SQL failure.
+pub async fn reset_to_automatic(pool: &Pool, item_id: Uuid) -> Result<(), AppError> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("DELETE FROM library_episode_numbering WHERE item_id = ?")
+        .bind(item_id.to_string())
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(
+        "UPDATE library_items \
+         SET search_group_id = NULL, search_group_name = NULL, search_numbering_source = NULL \
+         WHERE id = ?",
+    )
+    .bind(item_id.to_string())
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Go back to the canonical numbering, **and keep it there**.
 ///
 /// The whole undo, and it is one statement plus a delete — which is the
 /// property that makes this safe to try on a live catalogue.
@@ -773,6 +808,55 @@ mod tests {
                 "{source:?} must read back as itself"
             );
         }
+    }
+
+    /// **The one-way door.** "Voltar ao original" stores `off`, which
+    /// every sweep refuses — correctly, it is a decision. But the only
+    /// button that undid anything hung off the active group's row, and
+    /// `clear` nulls the group id, so after one click the panel showed
+    /// no row and no button and the title was stuck on `off` forever.
+    ///
+    /// This walks the whole loop: settle it, confirm the sweeps are
+    /// locked out, hand it back, confirm they are not.
+    #[tokio::test]
+    async fn a_settled_title_can_be_handed_back_to_the_sweeps() {
+        let pool = open_memory().await.unwrap();
+        let item = library::upsert(
+            &pool,
+            &NewLibraryItem {
+                media_type: Some(MediaType::Tv),
+                tmdb_id: 62_715,
+                title: "Dragon Ball Super".to_owned(),
+                ..NewLibraryItem::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        // Nobody has decided: a sweep may write.
+        assert!(Source::Tvdb.may_replace(super::source(&pool, item.id).await.unwrap()));
+
+        // The operator goes back to the canonical numbering, and means it.
+        clear(&pool, item.id).await.unwrap();
+        let settled = super::source(&pool, item.id).await.unwrap();
+        assert_eq!(settled, Some(Source::Off));
+        assert!(
+            !Source::Tvdb.may_replace(settled),
+            "a sweep must not overrule the operator"
+        );
+
+        // And can take it back. Without this the title never searches
+        // under an alternate numbering again.
+        reset_to_automatic(&pool, item.id).await.unwrap();
+        let freed = super::source(&pool, item.id).await.unwrap();
+        assert_eq!(freed, None, "handing back means nobody has decided");
+        assert!(Source::Tvdb.may_replace(freed));
+        assert!(Source::Arr.may_replace(freed));
+
+        // The rows go with it, or the old translation outlives the
+        // decision that produced it.
+        assert!(for_item(&pool, item.id).await.unwrap().is_empty());
+        assert_eq!(active_group(&pool, item.id).await.unwrap(), None);
     }
 
     /// Every variant round-trips through the column, or a stored value

@@ -28,10 +28,41 @@
             A árvore e os arquivos seguem a numeração original do TMDB.
         </p>
         {% when None %}
+        {# `off` e "ninguém decidiu" mostravam este mesmo texto, e se
+           comportam ao contrário: um é recusado por toda varredura, o
+           outro convida elas. #}
+        {% if settled_by_operator %}
+        <p class="text-sm text-fg-primary mb-4">
+            Você fixou a <strong>numeração original do TMDB</strong> para esta série
+            ({{ episodes }} episódios). Nenhuma varredura vai mexer nisso até você
+            devolvê-la ao automático.
+        </p>
+        {% else %}
         <p class="text-sm text-fg-secondary mb-4">
             Buscando na numeração original do TMDB ({{ episodes }} episódios no catálogo).
+            Ninguém decidiu nada aqui, então a varredura pode derivar uma numeração sozinha.
         </p>
+        {% endif %}
         {% endmatch %}
+
+        {# A saída. Toda ação desta tela grava uma decisão que as
+           varreduras respeitam — inclusive "voltar ao original", que
+           grava `off`. Sem este botão, o título ficava preso na última
+           palavra do operador para sempre: o único botão que desfazia
+           algo morava na linha do grupo ativo, e `clear` zera o id do
+           grupo, então depois de um clique não havia linha nem botão. #}
+        {% if settled_by_operator %}
+        <div class="flex items-center gap-2 mb-4">
+            <button type="button" class="btn btn-sm btn-secondary"
+                    hx-post="/library/{{ item_id }}/numbering/auto"
+                    hx-target="#modal-target" hx-swap="innerHTML">
+                Devolver ao automático
+            </button>
+            <span class="text-xs text-fg-muted">
+                Apaga a decisão e deixa as varreduras derivarem de novo.
+            </span>
+        </div>
+        {% endif %}
 
         {# A TheTVDB é onde a numeração do Sonarr nasce, então é a mesma
            resposta na fonte — e continua funcionando no dia em que o
