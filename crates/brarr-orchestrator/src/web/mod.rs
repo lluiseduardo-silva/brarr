@@ -23,3 +23,23 @@ pub use routes::serve;
 /// the failure it replaces was silent, since fresh markup against old
 /// CSS just renders every new class as a no-op.
 pub const ASSET_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// TMDB's required attribution, re-exported for `base.html`.
+///
+/// **A licence condition, not a courtesy**, and it went unrendered for
+/// as long as `brarr-tmdb` has existed: the constant was there, `pub`,
+/// and no template read it. Verbatim on purpose — the shorter FAQ
+/// wording is not the one the terms require.
+pub const TMDB_ATTRIBUTION: &str = brarr_tmdb::ATTRIBUTION;
+
+/// TheTVDB's required attribution.
+///
+/// The free tier — what a project under $50k/year uses — is conditioned
+/// on it: "attribution with a direct link to TheTVDB.com must be
+/// displayed to end users viewing metadata from our API". The allowance
+/// for an about or readme page covers command line products and
+/// libraries; brarr has a UI.
+pub const TVDB_ATTRIBUTION: &str = brarr_tvdb::ATTRIBUTION;
+
+/// The direct link TheTVDB's attribution must carry.
+pub const TVDB_ATTRIBUTION_URL: &str = brarr_tvdb::ATTRIBUTION_URL;

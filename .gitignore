@@ -21,6 +21,7 @@ config.local.toml
 # Nunca devem ser commitadas — prefira BRARR_TMDB_TOKEN no ambiente ou
 # a chave salva em /settings, que fica no banco (também ignorado).
 tmdbapikey.txt
+tvdbapikey.txt
 *apikey*.txt
 *token*.txt
 *.secret

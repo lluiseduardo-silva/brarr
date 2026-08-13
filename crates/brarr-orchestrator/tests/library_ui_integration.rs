@@ -239,6 +239,40 @@ async fn get(addr: SocketAddr, path: &str) -> String {
         .unwrap()
 }
 
+/// **Both metadata licences are conditioned on this being displayed.**
+///
+/// TMDB requires its phrase verbatim, and TheTVDB's free tier — the one
+/// a project under $50k/year uses — requires "attribution with a direct
+/// link to TheTVDB.com ... displayed to end users viewing metadata from
+/// our API". The allowance for a readme covers command line products;
+/// brarr has a UI.
+///
+/// It went unrendered for as long as `brarr-tmdb` existed: the constant
+/// was there, `pub`, and no template read it. A test rather than a note,
+/// because the failure is silent — nothing breaks when a footer is
+/// dropped in a refactor.
+#[tokio::test]
+async fn every_page_carries_the_metadata_attributions() {
+    let (addr, state) = spawn().await;
+    let item = seed_series(&state).await;
+
+    for path in ["/library", &format!("/library/{item}")] {
+        let html = get(addr, path).await;
+        assert!(
+            html.contains(brarr_orchestrator::web::TMDB_ATTRIBUTION),
+            "{path} must carry TMDB's phrase verbatim"
+        );
+        assert!(
+            html.contains(brarr_orchestrator::web::TVDB_ATTRIBUTION),
+            "{path} must carry TheTVDB's attribution"
+        );
+        assert!(
+            html.contains(brarr_orchestrator::web::TVDB_ATTRIBUTION_URL),
+            "{path} must carry a direct link to TheTVDB.com"
+        );
+    }
+}
+
 /// The operator's own question: with everything monitored and one aired
 /// episode absent, the card says 4/5 and paints red — not "4 of whatever
 /// the series has".

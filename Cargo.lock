@@ -455,6 +455,7 @@ dependencies = [
  "brarr-tmdb",
  "brarr-tracker-newznab",
  "brarr-tracker-unit3d",
+ "brarr-tvdb",
  "fs4",
  "futures",
  "ipnet",
@@ -540,6 +541,21 @@ version = "0.14.0"
 dependencies = [
  "brarr-core",
  "brarr-mediainfo",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "time",
+ "tokio",
+ "tracing",
+ "url",
+ "wiremock",
+]
+
+[[package]]
+name = "brarr-tvdb"
+version = "0.14.0"
+dependencies = [
  "reqwest",
  "serde",
  "serde_json",

@@ -157,6 +157,32 @@
     <main class="flex-1 app-shell px-8 py-8">
         {% block content %}{% endblock %}
     </main>
+
+    {# Atribuição das fontes de metadados.
+
+       Não é cortesia: as duas licenças que o brarr usa são condicionadas
+       a isto. O TMDB exige a frase exata (`brarr_tmdb::ATTRIBUTION`) — a
+       redação curta do FAQ não é a que os termos pedem — e o tier
+       gratuito da TheTVDB, que é o que um projeto abaixo de US$ 50k/ano
+       usa, exige "attribution with a direct link to TheTVDB.com ...
+       displayed to end users viewing metadata from our API". A
+       tolerância para README vale para CLI e biblioteca; o brarr tem
+       interface.
+
+       Ficou sem renderizar desde que o `brarr-tmdb` existe: a constante
+       estava lá, `pub`, e nenhum template a lia. #}
+    <footer class="app-shell px-8 py-6 text-xs text-fg-muted">
+        <p>
+            {{ crate::web::TMDB_ATTRIBUTION }}
+            <a href="https://www.themoviedb.org" target="_blank" rel="noopener noreferrer"
+               class="underline">TMDB</a>.
+        </p>
+        <p class="mt-1">
+            {{ crate::web::TVDB_ATTRIBUTION }}
+            <a href="{{ crate::web::TVDB_ATTRIBUTION_URL }}" target="_blank" rel="noopener noreferrer"
+               class="underline">TheTVDB.com</a>.
+        </p>
+    </footer>
     {% endblock %}
 
     {# HTMX swap target for modal partials (Nova Busca, future
