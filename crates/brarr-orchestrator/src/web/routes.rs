@@ -3028,13 +3028,15 @@ async fn library_numbering_tvdb(
         Err(e) => Err(e),
     };
     // The panel answers either way — a failure here is a sentence in the
-    // dialog, not a page the operator has to navigate back from.
+    // dialog, not a page the operator has to navigate back from. Every
+    // outcome gets its own sentence: the first version said "igual ao
+    // TMDB, ou outra fonte já foi escolhida" for four different
+    // conditions, which told the operator nothing about which one.
     let error = match outcome {
-        Ok(true) => None,
-        Ok(false) => Some(
-            "a TheTVDB numera esta série igual ao TMDB, ou outra fonte já foi escolhida aqui"
-                .to_owned(),
-        ),
+        // Success is not an error, and rendering it as one is how a
+        // working feature reads as broken.
+        Ok(o) if o.wrote() => None,
+        Ok(o) => Some(o.message()),
         Err(e) => Some(e.to_string()),
     };
 

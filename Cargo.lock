@@ -350,7 +350,7 @@ dependencies = [
 
 [[package]]
 name = "brarr-arr"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "reqwest",
  "serde",
@@ -365,7 +365,7 @@ dependencies = [
 
 [[package]]
 name = "brarr-cli"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "anyhow",
  "brarr-core",
@@ -394,7 +394,7 @@ dependencies = [
 
 [[package]]
 name = "brarr-core"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "serde",
  "thiserror 2.0.18",
@@ -405,7 +405,7 @@ dependencies = [
 
 [[package]]
 name = "brarr-decision-service"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "brarr-core",
  "regex",
@@ -418,7 +418,7 @@ dependencies = [
 
 [[package]]
 name = "brarr-download-client"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "reqwest",
  "serde",
@@ -433,7 +433,7 @@ dependencies = [
 
 [[package]]
 name = "brarr-mediainfo"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "brarr-core",
  "thiserror 2.0.18",
@@ -441,7 +441,7 @@ dependencies = [
 
 [[package]]
 name = "brarr-orchestrator"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -488,7 +488,7 @@ dependencies = [
 
 [[package]]
 name = "brarr-plugin-host"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "anyhow",
  "brarr-core",
@@ -506,7 +506,7 @@ dependencies = [
 
 [[package]]
 name = "brarr-tmdb"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "reqwest",
  "serde",
@@ -521,7 +521,7 @@ dependencies = [
 
 [[package]]
 name = "brarr-tracker-newznab"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "brarr-core",
  "quick-xml",
@@ -537,7 +537,7 @@ dependencies = [
 
 [[package]]
 name = "brarr-tracker-unit3d"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "brarr-core",
  "brarr-mediainfo",
@@ -554,7 +554,7 @@ dependencies = [
 
 [[package]]
 name = "brarr-tvdb"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "reqwest",
  "serde",

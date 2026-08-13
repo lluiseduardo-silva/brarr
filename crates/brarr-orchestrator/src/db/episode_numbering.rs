@@ -682,10 +682,13 @@ pub async fn reverse_for_item(
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,
+    clippy::panic,
     reason = "tests assert on happy paths"
 )]
 mod tests {
     use super::*;
+    use crate::db::library::{self, MediaType, NewLibraryItem};
+    use crate::db::open_memory;
     use brarr_tmdb::{EpisodeGroupKind, EpisodeGroupPart, GroupEpisode};
 
     /// **The arbitration.** Four writers, one column, and the rule has to
@@ -721,6 +724,55 @@ mod tests {
         assert!(!Tvdb.is_operator());
         assert!(Arr.is_automatic());
         assert!(Tvdb.is_automatic());
+    }
+
+    /// **Every variant has to survive the round trip through SQLite.**
+    ///
+    /// The guard that was missing. `Source::Tvdb` was added to the enum
+    /// after `20260813130000` wrote its `CHECK` with four values, and
+    /// nothing noticed: the enum matched, clippy passed, 1068 tests
+    /// passed, and every write of a `TheTVDB`-derived numbering died in
+    /// production with `CHECK constraint failed`. The two tests that
+    /// existed were both pure — over `may_replace` and over
+    /// `label`/`parse` — so no test ever *persisted* a `Source`.
+    ///
+    /// Walking the real enum is what makes a new variant fail here
+    /// instead of in a log file, the same way
+    /// `every_status_tone_has_a_rule` walks `ItemStatus`.
+    #[tokio::test]
+    async fn every_source_can_be_persisted() {
+        let pool = open_memory().await.unwrap();
+        let item = library::upsert(
+            &pool,
+            &NewLibraryItem {
+                media_type: Some(MediaType::Tv),
+                tmdb_id: 62_715,
+                title: "Dragon Ball Super".to_owned(),
+                ..NewLibraryItem::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        for source in [
+            Source::Arr,
+            Source::Tvdb,
+            Source::Tmdb,
+            Source::Manual,
+            Source::Off,
+        ] {
+            sqlx::query("UPDATE library_items SET search_numbering_source = ? WHERE id = ?")
+                .bind(source.label())
+                .bind(item.id.to_string())
+                .execute(&pool)
+                .await
+                .unwrap_or_else(|e| panic!("{source:?} must be a value the column accepts: {e}"));
+            assert_eq!(
+                super::source(&pool, item.id).await.unwrap(),
+                Some(source),
+                "{source:?} must read back as itself"
+            );
+        }
     }
 
     /// Every variant round-trips through the column, or a stored value

@@ -109,13 +109,62 @@ pub async fn is_configured(pool: &Pool) -> Result<bool, AppError> {
         .is_some_and(|k| !k.trim().is_empty()))
 }
 
-/// Derive and store one title's search numbering.
+/// What [`sync_item`] concluded about one title.
 ///
-/// Returns whether anything was written. `false` covers both "the two
-/// sources agree" and "somebody better already answered", which the
-/// caller distinguishes by asking [`episode_numbering::source`] — the
-/// sweep counts them separately and a single title's button does not
-/// care.
+/// Four outcomes rather than a `bool`, because they ask for four
+/// different reactions and the operator is the one who has to react. The
+/// first version returned `bool` and the screen said "a TheTVDB numera
+/// esta série igual ao TMDB, ou outra fonte já foi escolhida aqui" — one
+/// sentence covering a title with no TVDB id, a title the operator had
+/// deliberately set aside, and a title where nothing was wrong. Naming
+/// three conditions with an "ou" is the same defect the scan badge had
+/// when it said "nada encontrado" for three different reasons.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NumberingOutcome {
+    /// Written. Carries how many episodes now translate.
+    Numbered(usize),
+    /// `TheTVDB` numbers this title exactly the way TMDB does. Nothing
+    /// was wrong and nothing needed doing — the common answer, 164 of
+    /// this operator's 180 series.
+    Identical,
+    /// Somebody ranking at or above `TheTVDB` already answered.
+    Settled(episode_numbering::Source),
+    /// No TVDB id on the item, so there is nothing to ask about.
+    NoSearchId,
+    /// Not a series.
+    NotSeries,
+}
+
+impl NumberingOutcome {
+    /// What the panel says. Portuguese, and it names the actual
+    /// condition — including the way out, where there is one.
+    #[must_use]
+    pub fn message(self) -> String {
+        match self {
+            Self::Numbered(n) => format!("{n} episódios passaram a ser buscados pela TheTVDB"),
+            Self::Identical => {
+                "a TheTVDB numera esta série igual ao TMDB — não há nada a traduzir".to_owned()
+            }
+            Self::Settled(source) => format!(
+                "a numeração desta série já está definida ({}) — limpe-a antes para usar a TheTVDB",
+                source.description()
+            ),
+            Self::NoSearchId => {
+                "esta série não tem id da TheTVDB no catálogo, então não há o que consultar"
+                    .to_owned()
+            }
+            Self::NotSeries => "agrupamentos só existem para séries".to_owned(),
+        }
+    }
+
+    /// Whether anything changed, for the sweep's counters.
+    #[must_use]
+    pub fn wrote(self) -> bool {
+        matches!(self, Self::Numbered(_))
+    }
+}
+
+/// Derive and store one title's search numbering.
 ///
 /// # Errors
 ///
@@ -124,13 +173,21 @@ pub async fn sync_item(
     pool: &Pool,
     tvdb: &TvdbClient,
     item: &LibraryItem,
-) -> Result<bool, AppError> {
+) -> Result<NumberingOutcome, AppError> {
     if item.media_type != MediaType::Tv {
-        return Ok(false);
+        return Ok(NumberingOutcome::NotSeries);
     }
     let Some(tvdb_id) = item.tvdb_id else {
-        return Ok(false);
+        return Ok(NumberingOutcome::NoSearchId);
     };
+    // Asked before the network call: a title somebody already settled is
+    // a request brarr should not make at all.
+    let current = episode_numbering::source(pool, item.id).await?;
+    if !episode_numbering::Source::Tvdb.may_replace(current) {
+        return Ok(NumberingOutcome::Settled(
+            current.unwrap_or(episode_numbering::Source::Off),
+        ));
+    }
 
     let found = tvdb
         .series_episodes(tvdb_id, SeasonType::Official, None)
@@ -153,14 +210,24 @@ pub async fn sync_item(
         episode_numbering::apply_derived(pool, item.id, episode_numbering::Source::Tvdb, &rows)
             .await?;
 
-    if wrote && !rows.is_empty() {
-        info!(
-            target: "brarr_orchestrator::tvdb_sync",
-            item = %item.id, title = %item.title, episodes = rows.len(),
-            "derived the search numbering from TheTVDB"
-        );
+    // The refusal is re-read rather than assumed: `apply_derived` holds
+    // the rule, and a race between the check above and the write is a
+    // race the write should win.
+    if !wrote {
+        let now = episode_numbering::source(pool, item.id).await?;
+        return Ok(NumberingOutcome::Settled(
+            now.unwrap_or(episode_numbering::Source::Off),
+        ));
     }
-    Ok(wrote && !rows.is_empty())
+    if rows.is_empty() {
+        return Ok(NumberingOutcome::Identical);
+    }
+    info!(
+        target: "brarr_orchestrator::tvdb_sync",
+        item = %item.id, title = %item.title, episodes = rows.len(),
+        "derived the search numbering from TheTVDB"
+    );
+    Ok(NumberingOutcome::Numbered(rows.len()))
 }
 
 /// Sweep every series in the library.
@@ -183,17 +250,19 @@ pub async fn sync_all(state: &AppState) -> Result<SyncReport, AppError> {
         }
         report.examined += 1;
 
-        // Asked before the network call, not after: a title the operator
-        // settled is a request brarr should not make at all.
-        let current = episode_numbering::source(pool, item.id).await?;
-        if !episode_numbering::Source::Tvdb.may_replace(current) {
-            report.skipped += 1;
-            continue;
-        }
-
         match sync_item(pool, &tvdb, &item).await {
-            Ok(true) => report.numbered += 1,
-            Ok(false) => report.identical += 1,
+            Ok(NumberingOutcome::Numbered(_)) => report.numbered += 1,
+            Ok(NumberingOutcome::Identical) => report.identical += 1,
+            Ok(
+                NumberingOutcome::Settled(_)
+                | NumberingOutcome::NoSearchId
+                | NumberingOutcome::NotSeries,
+            ) => {
+                report.skipped += 1;
+                // Nothing was asked of TheTVDB, so nothing to be polite
+                // about — the delay below is for requests, not for rows.
+                continue;
+            }
             Err(e) => {
                 report.failed += 1;
                 warn!(
@@ -280,5 +349,49 @@ fn tvdb_error(e: TvdbError) -> AppError {
         )),
         TvdbError::NotFound(what) => AppError::NotFound(what),
         other => AppError::InvalidInput(other.to_string()),
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, reason = "test assertions")]
+mod tests {
+    use super::*;
+    use episode_numbering::Source;
+
+    /// **Four conditions, four sentences.** The first version returned a
+    /// `bool` and the screen said "a TheTVDB numera esta série igual ao
+    /// TMDB, ou outra fonte já foi escolhida aqui" — which was true for a
+    /// title with no TVDB id, for one the operator had set aside, and for
+    /// one where nothing was wrong. This walks the enum so a new variant
+    /// cannot quietly reuse somebody else's wording.
+    #[test]
+    fn every_outcome_says_something_different() {
+        let all = [
+            NumberingOutcome::Numbered(13),
+            NumberingOutcome::Identical,
+            NumberingOutcome::Settled(Source::Manual),
+            NumberingOutcome::NoSearchId,
+            NumberingOutcome::NotSeries,
+        ];
+        let messages: std::collections::HashSet<String> = all.iter().map(|o| o.message()).collect();
+        assert_eq!(messages.len(), all.len(), "two outcomes share a sentence");
+        assert!(all.iter().all(|o| !o.message().is_empty()));
+
+        // The one that carries a way out has to name it.
+        let settled = NumberingOutcome::Settled(Source::Manual).message();
+        assert!(settled.contains("blocos definidos por você"), "{settled}");
+        assert!(settled.contains("limpe"), "{settled}");
+
+        // And a settled title names *which* source, or the operator has
+        // to guess which of three they set.
+        assert_ne!(settled, NumberingOutcome::Settled(Source::Tmdb).message());
+
+        // Only one of them is success.
+        assert!(NumberingOutcome::Numbered(1).wrote());
+        assert!(
+            all.iter().filter(|o| o.wrote()).count() == 1,
+            "success must be exactly one outcome — rendering it as an error \
+             is how a working feature reads as broken"
+        );
     }
 }
