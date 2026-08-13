@@ -183,6 +183,48 @@
                 <span class="block mt-1.5 text-[11px] text-fg-muted">Os termos do TMDB limitam cache de metadados a seis meses.</span>
             </label>
         </div>
+
+        {# TheTVDB não substitui o TMDB: entra só como fonte de
+           NUMERAÇÃO. A árvore, os nomes em disco e o pareamento com o
+           Sonarr continuam na numeração do TMDB — o que muda é a
+           coordenada que vai ao indexador, quando as duas discordam. #}
+        <div class="h-px bg-border-default mt-6 mb-6"></div>
+        <header class="mb-4">
+            <div class="flex items-center gap-2">
+                <h3 class="text-base font-semibold text-fg-primary">TheTVDB</h3>
+                {% if values.tvdb_configured %}
+                <span class="px-2 py-0.5 rounded-full text-[10px] font-semibold uppercase tracking-[0.06em] bg-success-soft text-success-soft-fg border border-success-solid">configurado</span>
+                {% else %}
+                <span class="px-2 py-0.5 rounded-full text-[10px] font-semibold uppercase tracking-[0.06em] bg-warning-soft text-warning-soft-fg border border-warning-solid">sem credencial</span>
+                {% endif %}
+            </div>
+            <p class="text-xs text-fg-muted mt-1">
+                Fonte de <strong>numeração</strong>, não de catálogo — a biblioteca continua no TMDB.
+                Serve para os títulos que o TMDB achata numa temporada só e a cena divide em várias
+                (Dragon Ball Super, Solo Leveling). Gratuita para projetos abaixo de US$&nbsp;50k/ano,
+                com atribuição. Deixe a chave em branco para manter a atual.
+            </p>
+        </header>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <label class="block md:col-span-2">
+                <span class="block mb-1.5 text-xs font-medium uppercase tracking-[0.06em] text-fg-muted">Chave de API (v4)</span>
+                <input name="tvdb_api_key" type="password" autocomplete="off"
+                       placeholder="{% if values.tvdb_configured %}••••••••  (mantém a atual){% else %}cole a chave do projeto{% endif %}"
+                       class="w-full px-3 h-10 rounded-md bg-bg-canvas border border-border-strong text-sm text-fg-primary placeholder:text-fg-muted focus:outline-none focus:border-accent-solid">
+            </label>
+            <label class="block">
+                <span class="block mb-1.5 text-xs font-medium uppercase tracking-[0.06em] text-fg-muted">PIN de assinante</span>
+                <input name="tvdb_pin" value="{{ values.tvdb_pin }}" autocomplete="off"
+                       class="w-full px-3 h-10 rounded-md bg-bg-canvas border border-border-strong text-sm text-fg-primary placeholder:text-fg-muted focus:outline-none focus:border-accent-solid">
+                <span class="block mt-1.5 text-[11px] text-fg-muted">Só para chave <em>user-supported</em>. Deixe vazio para a chave de projeto.</span>
+            </label>
+            <label class="block">
+                <span class="block mb-1.5 text-xs font-medium uppercase tracking-[0.06em] text-fg-muted">Intervalo da varredura (s)</span>
+                <input name="tvdb_sync_interval_secs" value="{{ values.tvdb_sync_interval_secs }}" inputmode="numeric" placeholder="43200"
+                       class="w-full px-3 h-10 rounded-md bg-bg-canvas border border-border-strong text-sm text-fg-primary placeholder:text-fg-muted focus:outline-none focus:border-accent-solid">
+                <span class="block mt-1.5 text-[11px] text-fg-muted">Padrão 12h. Numeração muda raramente.</span>
+            </label>
+        </div>
     </section>
 
     <section class="settings-section {% if section != "dados" %}hidden{% endif %} card-hairline bg-bg-surface border border-border-default rounded-xl p-5">

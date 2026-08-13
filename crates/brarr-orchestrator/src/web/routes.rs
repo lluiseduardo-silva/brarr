@@ -126,6 +126,7 @@ pub fn router(state: AppState, static_dir: &std::path::Path) -> Router {
         )
         .route("/library/{id}/groups/clear", post(library_groups_clear))
         .route("/library/{id}/numbering", post(library_numbering))
+        .route("/library/{id}/numbering/tvdb", post(library_numbering_tvdb))
         .route("/library/{id}/refresh", post(library_refresh))
         .route("/library/{id}/scan", post(library_scan_now))
         .route("/library/{id}/scan/status", get(library_scan_status))
@@ -2922,6 +2923,9 @@ async fn groups_panel(
         source: source.map(|s| s.description().to_owned()),
         seasons,
         error,
+        tvdb_available: crate::tvdb_sync::is_configured(state.pool())
+            .await
+            .unwrap_or(false),
         episodes,
         rows,
     })
@@ -2999,6 +3003,47 @@ async fn library_numbering(
         .await
         .unwrap_or_default();
     groups_panel(&state, &item, rows, episodes, active, failure).await
+}
+
+/// `POST /library/{id}/numbering/tvdb` — derive it from `TheTVDB` now.
+///
+/// The sweep runs every twelve hours because a numbering changes when a
+/// contributor edits it, which is rare. This is the button for when the
+/// operator is looking at the title *because* it is wrong.
+///
+/// It writes as [`episode_numbering::Source::Tvdb`], so it deliberately
+/// **cannot** overrule hand-declared blocks or a picked TMDB group. The
+/// way to prefer it over those is to clear them first, which is the same
+/// one click it always was.
+async fn library_numbering_tvdb(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, AppError> {
+    let uuid = Uuid::parse_str(&id)
+        .map_err(|e| AppError::InvalidInput(format!("invalid library id: {e}")))?;
+    let item = library::get_by_id(state.pool(), uuid).await?;
+
+    let outcome = match crate::tvdb_sync::client(state.pool()).await {
+        Ok(tvdb) => crate::tvdb_sync::sync_item(state.pool(), &tvdb, &item).await,
+        Err(e) => Err(e),
+    };
+    // The panel answers either way — a failure here is a sentence in the
+    // dialog, not a page the operator has to navigate back from.
+    let error = match outcome {
+        Ok(true) => None,
+        Ok(false) => Some(
+            "a TheTVDB numera esta série igual ao TMDB, ou outra fonte já foi escolhida aqui"
+                .to_owned(),
+        ),
+        Err(e) => Some(e.to_string()),
+    };
+
+    let active = episode_numbering::active_group(state.pool(), uuid).await?;
+    let episodes = i32::try_from(library::episodes(state.pool(), uuid).await?.len()).unwrap_or(0);
+    let rows = group_rows(&state, &item, active.as_ref())
+        .await
+        .unwrap_or_default();
+    groups_panel(&state, &item, rows, episodes, active, error).await
 }
 
 /// The TMDB orderings for one series, alternates first.
@@ -5267,6 +5312,9 @@ async fn load_settings_values(state: &AppState) -> Result<SettingsValues, AppErr
         tmdb_language: get(settings::KEY_TMDB_LANGUAGE),
         tmdb_country: get(settings::KEY_TMDB_COUNTRY),
         tmdb_ttl_days: get(settings::KEY_TMDB_TTL_DAYS),
+        tvdb_configured: crate::tvdb_sync::is_configured(state.pool()).await?,
+        tvdb_pin: get(settings::KEY_TVDB_PIN),
+        tvdb_sync_interval_secs: get(settings::KEY_TVDB_SYNC_INTERVAL_SECS),
     })
 }
 
@@ -5325,6 +5373,13 @@ struct SettingsGeneralForm {
     tmdb_country: String,
     #[serde(default)]
     tmdb_ttl_days: String,
+    // Same contract as `tmdb_token`: blank keeps the stored key.
+    #[serde(default)]
+    tvdb_api_key: String,
+    #[serde(default)]
+    tvdb_pin: String,
+    #[serde(default)]
+    tvdb_sync_interval_secs: String,
 }
 
 #[allow(
@@ -5537,6 +5592,21 @@ async fn settings_general(
     // echoes it back, so a blank box means "leave it alone" rather than
     // "clear it". The other three are plain overrides and blanking them
     // legitimately falls back to the defaults.
+    // The PIN is not a secret the way the key is — it is per-subscriber
+    // and only meaningful for a user-supported key — so it is written
+    // unconditionally, blank included, and clearing it is possible.
+    settings::set(pool, settings::KEY_TVDB_PIN, form.tvdb_pin.trim()).await?;
+    settings::set(
+        pool,
+        settings::KEY_TVDB_SYNC_INTERVAL_SECS,
+        form.tvdb_sync_interval_secs.trim(),
+    )
+    .await?;
+    let tvdb_api_key = form.tvdb_api_key.trim();
+    if !tvdb_api_key.is_empty() {
+        settings::set(pool, settings::KEY_TVDB_API_KEY, tvdb_api_key).await?;
+    }
+
     let tmdb_token = form.tmdb_token.trim();
     if !tmdb_token.is_empty() {
         settings::set(pool, settings::KEY_TMDB_TOKEN, tmdb_token).await?;

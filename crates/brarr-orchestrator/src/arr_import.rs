@@ -63,7 +63,7 @@ use crate::db::arr_instances::{self, ArrInstanceRow};
 use crate::db::arr_root_mappings::{self, ArrRootMapping};
 use crate::db::library::{self, LibraryItem, MediaType, MonitorScope};
 use crate::db::{Pool, episode_numbering, grabs};
-use crate::episode_match::EpisodeMatcher;
+use crate::episode_match::{self, EpisodeMatcher, ExternalNumber};
 use crate::remote_path::{self, PrefixRule};
 use crate::tmdb_sync;
 use crate::{AppError, AppState};
@@ -271,46 +271,22 @@ async fn sync_search_numbering(
     item: &LibraryItem,
     detail: &SeriesDetail,
 ) -> Result<(), AppError> {
-    if matches!(episode_numbering::source(pool, item.id).await?, Some(s) if !s.is_automatic()) {
-        return Ok(());
-    }
     let episodes = library::episodes(pool, item.id).await?;
-    let coordinates: HashMap<Uuid, (i32, i32)> = episodes
+    let external: Vec<ExternalNumber> = detail
+        .numbering
         .iter()
-        .map(|e| (e.id, (e.season_number, e.episode_number)))
+        .map(|n| ExternalNumber {
+            season: n.season,
+            episode: n.episode,
+            absolute: n.absolute,
+        })
         .collect();
-    let matcher = EpisodeMatcher::new(&episodes, HashMap::new());
+    let rows = episode_match::derive_numbering(&episodes, &external);
 
-    let mut rows = Vec::new();
-    for n in &detail.numbering {
-        let Some(found) = matcher.resolve(n.season, n.episode, n.absolute) else {
-            continue;
-        };
-        let Some(&canonical) = coordinates.get(&found) else {
-            continue;
-        };
-        // Absent *is* the encoding of "no translation", so an episode both
-        // sides number the same contributes nothing. Without this the
-        // Simpsons would carry 801 rows that say what their absence says.
-        if canonical == (n.season, n.episode) {
-            continue;
-        }
-        rows.push(episode_numbering::NumberingRow {
-            part_order: n.season,
-            part_name: None,
-            group: episode_numbering::Numbering {
-                season: n.season,
-                episode: n.episode,
-            },
-            canonical: episode_numbering::Numbering {
-                season: canonical.0,
-                episode: canonical.1,
-            },
-            tmdb_episode_id: None,
-        });
-    }
-
-    if episode_numbering::apply_from_arr(pool, item.id, &rows).await? && !rows.is_empty() {
+    if episode_numbering::apply_derived(pool, item.id, episode_numbering::Source::Arr, &rows)
+        .await?
+        && !rows.is_empty()
+    {
         debug!(
             target: "brarr_orchestrator::arr_import",
             item = %item.id, title = %item.title, episodes = rows.len(),

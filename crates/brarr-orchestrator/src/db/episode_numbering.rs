@@ -160,8 +160,14 @@ pub async fn apply(
 /// `migrations/20260813130000_arr_numbering.sql`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Source {
-    /// Derived from the \*arr's own tree. The sweep keeps it current.
+    /// Derived from the \*arr's own tree. The sweep keeps it current,
+    /// and it is the **lowest**-ranking source: it only works while the
+    /// \*arr brarr means to replace is still installed to be read.
     Arr,
+    /// Derived from `TheTVDB` directly. Outranks [`Source::Arr`] because
+    /// it is the same data at its origin — Sonarr is `TheTVDB`-numbered —
+    /// without depending on Sonarr being there.
+    Tvdb,
     /// The operator picked a TMDB episode group. The sweep leaves it be.
     Tmdb,
     /// The operator declared the block boundaries by hand. Also
@@ -178,10 +184,40 @@ pub enum Source {
 }
 
 impl Source {
-    /// Whether an automatic sweep may write this title's numbering.
+    /// Whether a background sweep produced this, as opposed to the
+    /// operator.
     #[must_use]
     pub fn is_automatic(self) -> bool {
-        self == Self::Arr
+        matches!(self, Self::Arr | Self::Tvdb)
+    }
+
+    /// Precedence. Higher wins, and a writer never overwrites something
+    /// that ranks at or above it.
+    ///
+    /// The operator's three all sit at the top and are equal, because
+    /// they are all the same statement — *I decided this* — and the last
+    /// one made should stand. Below them `TheTVDB` beats the \*arr: same
+    /// data at its origin, without needing Sonarr installed to read it.
+    #[must_use]
+    fn rank(self) -> u8 {
+        match self {
+            Self::Arr => 1,
+            Self::Tvdb => 2,
+            Self::Tmdb | Self::Manual | Self::Off => 3,
+        }
+    }
+
+    /// Whether a sweep writing as `self` may replace what `current`
+    /// left. `None` means nobody has decided, so anything may write.
+    #[must_use]
+    pub fn may_replace(self, current: Option<Self>) -> bool {
+        current.is_none_or(|c| self.rank() >= c.rank() && !c.is_operator())
+    }
+
+    /// Whether the operator set this, rather than a sweep.
+    #[must_use]
+    pub fn is_operator(self) -> bool {
+        matches!(self, Self::Tmdb | Self::Manual | Self::Off)
     }
 
     /// Column value.
@@ -189,6 +225,7 @@ impl Source {
     pub fn label(self) -> &'static str {
         match self {
             Self::Arr => "arr",
+            Self::Tvdb => "tvdb",
             Self::Tmdb => "tmdb",
             Self::Manual => "manual",
             Self::Off => "off",
@@ -200,6 +237,7 @@ impl Source {
     pub fn description(self) -> &'static str {
         match self {
             Self::Arr => "derivada do Sonarr",
+            Self::Tvdb => "derivada da TheTVDB",
             Self::Tmdb => "agrupamento do TMDB",
             Self::Manual => "blocos definidos por você",
             Self::Off => "numeração original do TMDB",
@@ -209,6 +247,7 @@ impl Source {
     fn parse(raw: &str) -> Option<Self> {
         match raw {
             "arr" => Some(Self::Arr),
+            "tvdb" => Some(Self::Tvdb),
             "tmdb" => Some(Self::Tmdb),
             "manual" => Some(Self::Manual),
             "off" => Some(Self::Off),
@@ -241,15 +280,22 @@ pub const ARR_NUMBERING_NAME: &str = "numeração do Sonarr";
 /// and must not light one up.
 pub const ARR_GROUP_ID: &str = "arr";
 
-/// Store the numbering the \*arr uses as this title's search numbering.
+/// The name shown for a numbering derived from `TheTVDB`.
+pub const TVDB_NUMBERING_NAME: &str = "numeração da TheTVDB";
+
+/// Synthetic group id for a numbering derived from `TheTVDB`.
+pub const TVDB_GROUP_ID: &str = "tvdb";
+
+/// Store a numbering a background sweep derived.
 ///
-/// **Refuses to overwrite a decision.** A title whose [`Source`] is
-/// `Tmdb` or `Off` is left exactly as it is, and the return says so — an
-/// operator who picked an ordering, or who deliberately went back to the
-/// canonical one, does not get overruled by a background sweep thirty
-/// minutes later.
+/// **Refuses to overwrite a decision, or a better source.** A title the
+/// operator settled ([`Source::is_operator`]) is left exactly as it is,
+/// and so is one a higher-ranking sweep already wrote — the \*arr pass
+/// must not walk back what `TheTVDB` established, since the \*arr is the
+/// fallback for titles `TheTVDB` could not answer for. The return says
+/// which happened.
 ///
-/// Empty `rows` means the \*arr numbers this title exactly the way TMDB
+/// Empty `rows` means the source numbers this title exactly the way TMDB
 /// does, which is the common case (161 of this operator's 176 matched
 /// series). It clears rather than writes: absent *is* the encoding of
 /// "no translation", so 800 identity rows for the Simpsons would be
@@ -258,21 +304,27 @@ pub const ARR_GROUP_ID: &str = "arr";
 /// # Errors
 ///
 /// Returns [`AppError::Database`] on SQL failure.
-pub async fn apply_from_arr(
+pub async fn apply_derived(
     pool: &Pool,
     item_id: Uuid,
+    from: Source,
     rows: &[NumberingRow],
 ) -> Result<bool, AppError> {
     let current = source(pool, item_id).await?;
-    match current {
-        Some(s) if !s.is_automatic() => return Ok(false),
-        // Nothing to say about a title nobody has said anything about.
-        // The sweep runs this for all 176 series every half hour and 161
-        // of them number the same as TMDB; without this they would each
-        // take a transaction to rewrite nothing.
-        None if rows.is_empty() => return Ok(true),
-        _ => {}
+    if !from.may_replace(current) {
+        return Ok(false);
     }
+    // Nothing to say about a title nobody has said anything about. The
+    // sweep runs this for every series every cycle and most of them
+    // number the same as TMDB; without this each would take a
+    // transaction to rewrite nothing.
+    if current.is_none() && rows.is_empty() {
+        return Ok(true);
+    }
+    let (group_id, group_name) = match from {
+        Source::Tvdb => (TVDB_GROUP_ID, TVDB_NUMBERING_NAME),
+        _ => (ARR_GROUP_ID, ARR_NUMBERING_NAME),
+    };
 
     let mut tx = pool.begin().await?;
     sqlx::query("DELETE FROM library_episode_numbering WHERE item_id = ?")
@@ -290,7 +342,7 @@ pub async fn apply_from_arr(
              ON CONFLICT DO NOTHING",
         )
         .bind(item_id.to_string())
-        .bind(ARR_GROUP_ID)
+        .bind(group_id)
         .bind(i64::from(row.part_order))
         .bind(i64::from(row.group.season))
         .bind(i64::from(row.group.episode))
@@ -306,11 +358,7 @@ pub async fn apply_from_arr(
     let (id, name, src) = if rows.is_empty() {
         (None, None, None)
     } else {
-        (
-            Some(ARR_GROUP_ID),
-            Some(ARR_NUMBERING_NAME),
-            Some(Source::Arr.label()),
-        )
+        (Some(group_id), Some(group_name), Some(from.label()))
     };
     sqlx::query(
         "UPDATE library_items \
@@ -639,6 +687,58 @@ pub async fn reverse_for_item(
 mod tests {
     use super::*;
     use brarr_tmdb::{EpisodeGroupKind, EpisodeGroupPart, GroupEpisode};
+
+    /// **The arbitration.** Four writers, one column, and the rule has to
+    /// hold in both directions: a sweep must not walk back what the
+    /// operator settled, and the \*arr fallback must not walk back what
+    /// `TheTVDB` established — the \*arr exists for titles `TheTVDB`
+    /// could not answer for, not to overrule it.
+    #[test]
+    fn a_sweep_never_overrules_a_better_source() {
+        use Source::{Arr, Manual, Off, Tmdb, Tvdb};
+
+        // Nobody has decided: anything may write.
+        assert!(Arr.may_replace(None));
+        assert!(Tvdb.may_replace(None));
+
+        // TheTVDB outranks the *arr, both ways.
+        assert!(Tvdb.may_replace(Some(Arr)));
+        assert!(!Arr.may_replace(Some(Tvdb)));
+
+        // A sweep refreshing its own work is the ordinary case.
+        assert!(Arr.may_replace(Some(Arr)));
+        assert!(Tvdb.may_replace(Some(Tvdb)));
+
+        // The operator's three are untouchable by any sweep, including
+        // `Off` — which is the whole reason `Off` is a value rather than
+        // a NULL.
+        for settled in [Tmdb, Manual, Off] {
+            assert!(!Arr.may_replace(Some(settled)), "arr over {settled:?}");
+            assert!(!Tvdb.may_replace(Some(settled)), "tvdb over {settled:?}");
+            assert!(settled.is_operator());
+        }
+        assert!(!Arr.is_operator());
+        assert!(!Tvdb.is_operator());
+        assert!(Arr.is_automatic());
+        assert!(Tvdb.is_automatic());
+    }
+
+    /// Every variant round-trips through the column, or a stored value
+    /// reads back as "nobody decided" and a sweep overwrites a decision.
+    #[test]
+    fn every_source_round_trips_through_its_column_value() {
+        for source in [
+            Source::Arr,
+            Source::Tvdb,
+            Source::Tmdb,
+            Source::Manual,
+            Source::Off,
+        ] {
+            assert_eq!(Source::parse(source.label()), Some(source));
+            assert!(!source.description().is_empty());
+        }
+        assert_eq!(Source::parse("nonsense"), None);
+    }
 
     /// **Solo Leveling.** One season of 25 on TMDB, and every release is
     /// `S01E01`–`S01E12` then `S02E01`–`S02E13`. The operator says

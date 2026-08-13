@@ -44,7 +44,7 @@ use std::collections::{HashMap, HashSet};
 
 use uuid::Uuid;
 
-use crate::db::episode_numbering::Numbering;
+use crate::db::episode_numbering::{Numbering, NumberingRow};
 use crate::db::library::Episode;
 
 /// Resolves a file's coordinates onto a catalogue episode.
@@ -128,6 +128,69 @@ impl EpisodeMatcher {
     pub fn has_ordering(&self) -> bool {
         !self.reverse.is_empty()
     }
+}
+
+/// One episode's coordinates in some external source's numbering.
+///
+/// Both sources brarr can derive a numbering from — Sonarr and TheTVDB —
+/// hand over the same three values, because Sonarr's numbering *is*
+/// `TheTVDB`'s. One shape, one derivation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExternalNumber {
+    /// Season the source puts it in.
+    pub season: i32,
+    /// Number within that season.
+    pub episode: i32,
+    /// Position in the series as a whole, when the source has one.
+    pub absolute: Option<i32>,
+}
+
+/// Build the canonical → external translation for one title.
+///
+/// **The matcher is built with an empty reverse map on purpose.**
+/// Deriving a translation from a translation this function itself wrote
+/// would be self-referential, and a wrong row would keep re-deriving
+/// itself forever. Only the canonical coordinate and the absolute axis
+/// get a vote.
+///
+/// Rows where both sides agree are **omitted**: absent *is* the encoding
+/// of "no translation", so the Simpsons would otherwise carry 801 rows
+/// saying what their absence says. An empty result therefore means "this
+/// title is numbered the same by both", not "nothing was found".
+#[must_use]
+pub fn derive_numbering(catalogue: &[Episode], external: &[ExternalNumber]) -> Vec<NumberingRow> {
+    let coordinates: HashMap<Uuid, (i32, i32)> = catalogue
+        .iter()
+        .map(|e| (e.id, (e.season_number, e.episode_number)))
+        .collect();
+    let matcher = EpisodeMatcher::new(catalogue, HashMap::new());
+
+    let mut rows = Vec::new();
+    for n in external {
+        let Some(found) = matcher.resolve(n.season, n.episode, n.absolute) else {
+            continue;
+        };
+        let Some(&canonical) = coordinates.get(&found) else {
+            continue;
+        };
+        if canonical == (n.season, n.episode) {
+            continue;
+        }
+        rows.push(NumberingRow {
+            part_order: n.season,
+            part_name: None,
+            group: Numbering {
+                season: n.season,
+                episode: n.episode,
+            },
+            canonical: Numbering {
+                season: canonical.0,
+                episode: canonical.1,
+            },
+            tmdb_episode_id: None,
+        });
+    }
+    rows
 }
 
 #[cfg(test)]

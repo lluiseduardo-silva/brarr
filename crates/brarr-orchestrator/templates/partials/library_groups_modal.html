@@ -33,6 +33,24 @@
         </p>
         {% endmatch %}
 
+        {# A TheTVDB é onde a numeração do Sonarr nasce, então é a mesma
+           resposta na fonte — e continua funcionando no dia em que o
+           \*arr sair. A varredura roda a cada 12h; este botão é para
+           quando o operador está olhando o título justamente porque
+           está errado. #}
+        {% if tvdb_available %}
+        <div class="flex items-center gap-2 mt-4">
+            <button type="button" class="btn btn-sm btn-secondary"
+                    hx-post="/library/{{ item_id }}/numbering/tvdb"
+                    hx-target="#modal-target" hx-swap="innerHTML">
+                Derivar da TheTVDB agora
+            </button>
+            <span class="text-xs text-fg-muted">
+                Não sobrescreve blocos definidos por você nem um agrupamento escolhido.
+            </span>
+        </div>
+        {% endif %}
+
         {% if !seasons.is_empty() %}
         {# Blocos declarados à mão.
 

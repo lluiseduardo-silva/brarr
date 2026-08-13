@@ -73,6 +73,7 @@ pub mod search;
 pub mod state;
 pub mod tmdb_sync;
 pub mod ttl_cache;
+pub mod tvdb_sync;
 pub mod verify;
 pub mod web;
 

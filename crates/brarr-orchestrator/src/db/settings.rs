@@ -52,6 +52,24 @@ pub const KEY_TMDB_COUNTRY: &str = "tmdb_country";
 /// months, so values above ~180 are not legitimate.
 pub const KEY_TMDB_TTL_DAYS: &str = "tmdb_ttl_days";
 
+/// `TheTVDB` v4 project API key. A UUID.
+///
+/// Write-only in the UI, like [`KEY_TMDB_TOKEN`]: blank means "keep what
+/// is stored", because the field never echoes a credential back and so
+/// blank cannot mean "erase".
+pub const KEY_TVDB_API_KEY: &str = "tvdb_api_key";
+
+/// Subscriber PIN, for a **user-supported** `TheTVDB` key only.
+///
+/// Empty for brarr's own key, which is funded by the revenue tier (free
+/// under $50k/year, conditioned on attribution). Sending a PIN with a
+/// project key is refused upstream, so this is omitted rather than sent
+/// blank — see `brarr_tvdb::TvdbAuth::pin`.
+pub const KEY_TVDB_PIN: &str = "tvdb_pin";
+
+/// How often the `TheTVDB` numbering sweep runs, in seconds.
+pub const KEY_TVDB_SYNC_INTERVAL_SECS: &str = "tvdb_sync_interval_secs";
+
 /// `tracing-subscriber` env filter (replaces `RUST_LOG`).
 pub const KEY_LOG_LEVEL: &str = "log_level";
 /// Backtrace mode — `0` / `1` / `full`. Restart required (workspace

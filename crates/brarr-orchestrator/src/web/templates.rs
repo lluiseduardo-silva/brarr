@@ -1108,6 +1108,10 @@ pub struct SettingsTemplate {
 /// template can stuff them straight into `<input value="...">` without
 /// further formatting.
 #[derive(Debug, Default)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "one badge per independent credential or toggle on a form of thirty fields — they answer different questions and collapsing them into an enum would say a form can only be in one state at a time"
+)]
 pub struct SettingsValues {
     /// `true` when an admin token is currently configured. Drives the
     /// "auth enabled / disabled" badge and hides the token-rotation
@@ -1167,6 +1171,12 @@ pub struct SettingsValues {
     pub tmdb_country: String,
     /// Metadata refresh window in days.
     pub tmdb_ttl_days: String,
+    /// Whether a `TheTVDB` key is stored. The key itself is never echoed.
+    pub tvdb_configured: bool,
+    /// Subscriber PIN, for a user-supported key. Blank for brarr's own.
+    pub tvdb_pin: String,
+    /// Seconds between numbering sweeps; blank means the default.
+    pub tvdb_sync_interval_secs: String,
 }
 
 /// One-shot flash message rendered above the settings form. `kind`
@@ -1670,6 +1680,9 @@ pub struct LibraryGroupsModalPartial {
     pub seasons: Vec<NumberingSeasonRow>,
     /// What went wrong with the last hand-declared blocks, if anything.
     pub error: Option<String>,
+    /// Whether a `TheTVDB` key is configured, so the button is offered
+    /// only when pressing it could do something.
+    pub tvdb_available: bool,
 }
 
 /// One canonical season, and the blocks the operator has cut it into.
