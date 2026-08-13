@@ -1663,6 +1663,32 @@ pub struct LibraryGroupsModalPartial {
     pub rows: Vec<GroupRow>,
     /// How many of them renumber. Zero is the common answer.
     pub alternates: usize,
+    /// Who set the numbering in force — derived, picked, hand-declared,
+    /// or turned off.
+    pub source: Option<String>,
+    /// One row per canonical season, for declaring blocks by hand.
+    pub seasons: Vec<NumberingSeasonRow>,
+    /// What went wrong with the last hand-declared blocks, if anything.
+    pub error: Option<String>,
+}
+
+/// One canonical season, and the blocks the operator has cut it into.
+///
+/// Exists because TMDB is not wrong and the scene is not wrong either —
+/// Solo Leveling is one season of 25 to TMDB and `S01`+`S02` to everyone
+/// publishing it. Declaring where the cut falls is the escape hatch for
+/// when neither TMDB nor the \*arr has the split.
+#[derive(Debug, Clone)]
+pub struct NumberingSeasonRow {
+    /// Canonical season number.
+    pub season: i32,
+    /// How many episodes the catalogue has in it.
+    pub episodes: i32,
+    /// Current block sizes, comma-separated, ready to edit. Empty when
+    /// the season is not cut.
+    pub sizes: String,
+    /// Season number the first block answers to.
+    pub first_season: i32,
 }
 
 /// "Where and how" for one title, in a dialog.

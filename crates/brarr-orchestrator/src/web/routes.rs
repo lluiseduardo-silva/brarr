@@ -17,6 +17,7 @@
 //! the auth middleware. When [`crate::AuthConfig::Disabled`] is in
 //! effect the middleware no-ops.
 
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -124,6 +125,7 @@ pub fn router(state: AppState, static_dir: &std::path::Path) -> Router {
             post(library_groups_apply),
         )
         .route("/library/{id}/groups/clear", post(library_groups_clear))
+        .route("/library/{id}/numbering", post(library_numbering))
         .route("/library/{id}/refresh", post(library_refresh))
         .route("/library/{id}/scan", post(library_scan_now))
         .route("/library/{id}/scan/status", get(library_scan_status))
@@ -2859,15 +2861,159 @@ async fn library_groups(
             "agrupamentos só existem para séries".to_owned(),
         ));
     }
-    let tmdb = crate::tmdb_sync::client(state.pool()).await?;
-    let groups = tmdb.episode_groups(item.tmdb_id).await?;
     let active = episode_numbering::active_group(state.pool(), uuid).await?;
     let episodes = i32::try_from(library::episodes(state.pool(), uuid).await?.len()).unwrap_or(0);
+    let rows = group_rows(&state, &item, active.as_ref()).await?;
 
-    let mut rows: Vec<crate::web::templates::GroupRow> = groups
+    groups_panel(&state, &item, rows, episodes, active, None).await
+}
+
+/// Render the numbering panel. Shared by the read route and by every
+/// action that answers with the panel again, so a form error and a fresh
+/// open cannot drift apart.
+async fn groups_panel(
+    state: &AppState,
+    item: &library::LibraryItem,
+    rows: Vec<crate::web::templates::GroupRow>,
+    episodes: i32,
+    active: Option<(String, Option<String>)>,
+    error: Option<String>,
+) -> Result<Response, AppError> {
+    let source = episode_numbering::source(state.pool(), item.id).await?;
+    let stored = episode_numbering::for_item(state.pool(), item.id).await?;
+    let tree = library::episodes(state.pool(), item.id).await?;
+
+    // One row per canonical season, carrying the block sizes already in
+    // force so the operator edits what is there instead of retyping it.
+    let mut counts: BTreeMap<i32, i32> = BTreeMap::new();
+    for e in &tree {
+        if e.season_number > 0 {
+            *counts.entry(e.season_number).or_default() += 1;
+        }
+    }
+    let seasons = counts
+        .into_iter()
+        .map(|(season, episodes)| {
+            let mut sizes: BTreeMap<i32, i32> = BTreeMap::new();
+            for ((cs, _), n) in &stored {
+                if *cs == season {
+                    *sizes.entry(n.season).or_default() += 1;
+                }
+            }
+            let first_season = sizes.keys().next().copied().unwrap_or(season);
+            crate::web::templates::NumberingSeasonRow {
+                season,
+                episodes,
+                sizes: sizes
+                    .values()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                first_season,
+            }
+        })
+        .collect();
+
+    html(&crate::web::templates::LibraryGroupsModalPartial {
+        item_id: item.id.to_string(),
+        item_title: item.title.clone(),
+        alternates: rows.iter().filter(|r| r.alternate).count(),
+        active_name: active.and_then(|(_, name)| name),
+        source: source.map(|s| s.description().to_owned()),
+        seasons,
+        error,
+        episodes,
+        rows,
+    })
+}
+
+/// `POST /library/{id}/numbering` — declare the block cuts by hand.
+///
+/// The escape hatch for when neither TMDB nor the \*arr has the split
+/// the scene uses. TMDB is not wrong about Solo Leveling being one
+/// season of 25; the people publishing it cut at 13, and that is a
+/// peculiarity rather than an error — so it is declared, not corrected.
+///
+/// `Form<Vec<(String, String)>>` because the form carries one pair of
+/// fields per season and `serde_urlencoded` collapses repeated keys —
+/// the same reason `/library/bulk` takes its selection this way.
+async fn library_numbering(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    axum::extract::Form(fields): axum::extract::Form<Vec<(String, String)>>,
+) -> Result<Response, AppError> {
+    let uuid = Uuid::parse_str(&id)
+        .map_err(|e| AppError::InvalidInput(format!("invalid library id: {e}")))?;
+    let item = library::get_by_id(state.pool(), uuid).await?;
+
+    let mut counts: BTreeMap<i32, i32> = BTreeMap::new();
+    for e in library::episodes(state.pool(), uuid).await? {
+        if e.season_number > 0 {
+            *counts.entry(e.season_number).or_default() += 1;
+        }
+    }
+
+    let value = |prefix: &str, season: i32| {
+        fields
+            .iter()
+            .find(|(k, _)| k == &format!("{prefix}_{season}"))
+            .map(|(_, v)| v.trim().to_owned())
+            .unwrap_or_default()
+    };
+
+    let mut blocks = Vec::new();
+    let mut failure = None;
+    for (&season, &episodes) in &counts {
+        let sizes = match episode_numbering::parse_block_sizes(&value("sizes", season)) {
+            Ok(sizes) => sizes,
+            Err(e) => {
+                failure = Some(e);
+                break;
+            }
+        };
+        let first = value("first", season)
+            .parse::<i32>()
+            .unwrap_or(season)
+            .max(0);
+        match episode_numbering::blocks_for_season(season, episodes, &sizes, first) {
+            Ok(mut found) => blocks.append(&mut found),
+            Err(e) => {
+                failure = Some(e);
+                break;
+            }
+        }
+    }
+
+    // Nothing is written when anything failed: a half-applied numbering
+    // is the one outcome worse than a rejected form.
+    if failure.is_none() {
+        episode_numbering::apply_manual(state.pool(), uuid, &blocks).await?;
+    }
+
+    let active = episode_numbering::active_group(state.pool(), uuid).await?;
+    let episodes = i32::try_from(library::episodes(state.pool(), uuid).await?.len()).unwrap_or(0);
+    // Best-effort: the TMDB list is context for the panel, not the point
+    // of this request, and a metadata hiccup must not swallow a numbering
+    // the operator just declared.
+    let rows = group_rows(&state, &item, active.as_ref())
+        .await
+        .unwrap_or_default();
+    groups_panel(&state, &item, rows, episodes, active, failure).await
+}
+
+/// The TMDB orderings for one series, alternates first.
+async fn group_rows(
+    state: &AppState,
+    item: &library::LibraryItem,
+    active: Option<&(String, Option<String>)>,
+) -> Result<Vec<crate::web::templates::GroupRow>, AppError> {
+    let tmdb = crate::tmdb_sync::client(state.pool()).await?;
+    let mut rows: Vec<crate::web::templates::GroupRow> = tmdb
+        .episode_groups(item.tmdb_id)
+        .await?
         .into_iter()
         .map(|g| crate::web::templates::GroupRow {
-            active: active.as_ref().is_some_and(|(id, _)| *id == g.id),
+            active: active.is_some_and(|(id, _)| *id == g.id),
             id: g.id,
             name: g.name.unwrap_or_else(|| "sem nome".to_owned()),
             kind: group_kind_label(g.kind).to_owned(),
@@ -2878,15 +3024,7 @@ async fn library_groups(
         .collect();
     // Alternates first: they are the reason anyone opened this.
     rows.sort_by_key(|r| !r.alternate);
-
-    html(&crate::web::templates::LibraryGroupsModalPartial {
-        item_id: item.id.to_string(),
-        item_title: item.title,
-        alternates: rows.iter().filter(|r| r.alternate).count(),
-        active_name: active.and_then(|(_, name)| name),
-        episodes,
-        rows,
-    })
+    Ok(rows)
 }
 
 /// `POST /library/{id}/groups/{group_id}/apply` — search this title

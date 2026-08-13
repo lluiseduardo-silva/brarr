@@ -137,6 +137,24 @@ pub struct SeriesDetail {
     /// `(season, episode, monitored)` for every episode, file or not —
     /// which is what [`MonitorChoice::Mirror`] copies.
     pub monitoring: Vec<(i32, i32, bool)>,
+    /// Every episode's coordinates in the \*arr's numbering, file or not.
+    ///
+    /// This is the **scene's** numbering: Sonarr is `TheTVDB`-numbered and
+    /// releases follow `TheTVDB`. Carried for every episode, not just the
+    /// ones with files, because the numbering exists to find what is
+    /// *missing*.
+    pub numbering: Vec<ArrNumber>,
+}
+
+/// One episode's coordinates in the \*arr's numbering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArrNumber {
+    /// Season the \*arr puts it in.
+    pub season: i32,
+    /// Number within that season.
+    pub episode: i32,
+    /// Position in the series as a whole, when the \*arr has one.
+    pub absolute: Option<i32>,
 }
 
 /// Radarr row → title. The file comes inline, so a movie never needs a
@@ -218,6 +236,90 @@ fn join_episode_files(episodes: &[ArrEpisode], files: &[ArrFile]) -> Vec<ArrFile
         .collect()
 }
 
+/// Every episode's coordinates in the \*arr's numbering.
+fn arr_numbering(episodes: &[ArrEpisode]) -> Vec<ArrNumber> {
+    episodes
+        .iter()
+        .filter(|e| e.season_number > 0 && e.episode_number > 0)
+        .map(|e| ArrNumber {
+            season: e.season_number,
+            episode: e.episode_number,
+            absolute: e.absolute_episode_number,
+        })
+        .collect()
+}
+
+/// Store the \*arr's numbering as this title's search numbering.
+///
+/// **The point of the whole feature.** `20260808130000` gave brarr a
+/// translation table and a screen to pick a TMDB episode group; two
+/// titles got one in a week, out of the fifteen that need it, because
+/// picking an ordering by hand per title — after discovering it exists
+/// and which of eleven is right — is work nobody does. The \*arr already
+/// holds the answer and brarr already reads it every pass.
+///
+/// The matcher here is built with an **empty** reverse map on purpose:
+/// deriving the translation from a translation this function itself
+/// wrote would be self-referential, and a wrong row would then keep
+/// re-deriving itself. Only the canonical coordinate and the absolute
+/// axis get a vote.
+///
+/// Best-effort by design — a title whose numbering cannot be derived is
+/// left on the canonical one, which is where it already was.
+async fn sync_search_numbering(
+    pool: &Pool,
+    item: &LibraryItem,
+    detail: &SeriesDetail,
+) -> Result<(), AppError> {
+    if matches!(episode_numbering::source(pool, item.id).await?, Some(s) if !s.is_automatic()) {
+        return Ok(());
+    }
+    let episodes = library::episodes(pool, item.id).await?;
+    let coordinates: HashMap<Uuid, (i32, i32)> = episodes
+        .iter()
+        .map(|e| (e.id, (e.season_number, e.episode_number)))
+        .collect();
+    let matcher = EpisodeMatcher::new(&episodes, HashMap::new());
+
+    let mut rows = Vec::new();
+    for n in &detail.numbering {
+        let Some(found) = matcher.resolve(n.season, n.episode, n.absolute) else {
+            continue;
+        };
+        let Some(&canonical) = coordinates.get(&found) else {
+            continue;
+        };
+        // Absent *is* the encoding of "no translation", so an episode both
+        // sides number the same contributes nothing. Without this the
+        // Simpsons would carry 801 rows that say what their absence says.
+        if canonical == (n.season, n.episode) {
+            continue;
+        }
+        rows.push(episode_numbering::NumberingRow {
+            part_order: n.season,
+            part_name: None,
+            group: episode_numbering::Numbering {
+                season: n.season,
+                episode: n.episode,
+            },
+            canonical: episode_numbering::Numbering {
+                season: canonical.0,
+                episode: canonical.1,
+            },
+            tmdb_episode_id: None,
+        });
+    }
+
+    if episode_numbering::apply_from_arr(pool, item.id, &rows).await? && !rows.is_empty() {
+        debug!(
+            target: "brarr_orchestrator::arr_import",
+            item = %item.id, title = %item.title, episodes = rows.len(),
+            "derived the search numbering from the *arr"
+        );
+    }
+    Ok(())
+}
+
 /// Per-episode monitoring, specials excluded like everywhere else.
 fn episode_monitoring(episodes: &[ArrEpisode]) -> Vec<(i32, i32, bool)> {
     episodes
@@ -271,6 +373,7 @@ pub async fn series_detail(client: &ArrClient, arr_id: u64) -> Result<SeriesDeta
     Ok(SeriesDetail {
         files: join_episode_files(&episodes, &files),
         monitoring: episode_monitoring(&episodes),
+        numbering: arr_numbering(&episodes),
     })
 }
 
@@ -839,6 +942,12 @@ async fn import_title(
     };
     if created && ctx.monitoring == MonitorChoice::Mirror {
         mirror_monitoring(pool, &item, title, &detail).await?;
+    }
+    if title.media_type == MediaType::Tv {
+        // After the tree, because it reads it; before the files, because
+        // a numbering is what makes the *next* sweep able to search for
+        // what the files do not cover.
+        sync_search_numbering(pool, &item, &detail).await?;
     }
 
     let files = if title.media_type == MediaType::Tv {
@@ -1505,6 +1614,7 @@ mod tests {
             // Sonarr has episode 2 switched off; brarr must end up
             // agreeing with it.
             monitoring: vec![(1, 1, true), (1, 2, false)],
+            numbering: Vec::new(),
         };
         mirror_monitoring(&pool, &item, &title, &detail)
             .await
@@ -1537,6 +1647,7 @@ mod tests {
         let detail = SeriesDetail {
             files: Vec::new(),
             monitoring: vec![(1, 1, false), (1, 2, false)],
+            numbering: Vec::new(),
         };
         mirror_monitoring(&pool, &item, &title, &detail)
             .await

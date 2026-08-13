@@ -1497,6 +1497,9 @@ fn the_numbering_panel_offers_only_alternates_and_declares_what_it_changes() {
         item_title: "Jujutsu Kaisen".to_owned(),
         alternates: 1,
         active_name: None,
+        source: None,
+        seasons: Vec::new(),
+        error: None,
         episodes: 59,
         rows: vec![
             row("ki", "季", "produção", true, 59),
@@ -1538,6 +1541,9 @@ fn the_numbering_panel_offers_only_alternates_and_declares_what_it_changes() {
         item_title: "Jujutsu Kaisen".to_owned(),
         alternates: 1,
         active_name: None,
+        source: None,
+        seasons: Vec::new(),
+        error: None,
         episodes: 59,
         rows: vec![row("arcs", "Story Arcs", "arco narrativo", true, 48)],
     };
@@ -1546,5 +1552,57 @@ fn the_numbering_panel_offers_only_alternates_and_declares_what_it_changes() {
             .render()
             .unwrap()
             .contains("cobre menos episódios do que o catálogo tem")
+    );
+}
+
+/// The escape hatch for a title neither TMDB nor the \*arr splits the way
+/// releases do. Solo Leveling: one season of 25 in the catalogue, two
+/// blocks of 12 and 13 in every release name.
+#[test]
+fn the_panel_offers_hand_declared_blocks() {
+    use askama::Template as _;
+    use brarr_orchestrator::web::templates::{LibraryGroupsModalPartial, NumberingSeasonRow};
+
+    let panel = LibraryGroupsModalPartial {
+        item_id: "33333333-3333-4333-8333-333333333333".to_owned(),
+        item_title: "Solo Leveling".to_owned(),
+        alternates: 0,
+        active_name: None,
+        source: None,
+        seasons: vec![NumberingSeasonRow {
+            season: 1,
+            episodes: 25,
+            sizes: String::new(),
+            first_season: 1,
+        }],
+        error: None,
+        episodes: 25,
+        rows: Vec::new(),
+    };
+    let html = panel.render().unwrap();
+    assert!(html.contains("/numbering"), "the form posts the blocks");
+    assert!(html.contains("sizes_1"), "one field per canonical season");
+    assert!(html.contains("first_1"));
+    assert!(
+        html.contains("25 episódios"),
+        "the operator needs the total to make the sizes add up"
+    );
+
+    // A rejected form says why, and keeps what was typed.
+    let failed = LibraryGroupsModalPartial {
+        error: Some("a temporada 1 tem 25 episódios e seus blocos somam 24".to_owned()),
+        seasons: vec![NumberingSeasonRow {
+            season: 1,
+            episodes: 25,
+            sizes: "12, 12".to_owned(),
+            first_season: 1,
+        }],
+        ..panel
+    };
+    let html = failed.render().unwrap();
+    assert!(html.contains("seus blocos somam 24"));
+    assert!(
+        html.contains("value=\"12, 12\""),
+        "a rejected form must not eat what was typed"
     );
 }

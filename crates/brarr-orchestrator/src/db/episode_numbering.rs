@@ -140,13 +140,350 @@ pub async fn apply(
         .rows_affected();
     }
 
-    sqlx::query("UPDATE library_items SET search_group_id = ?, search_group_name = ? WHERE id = ?")
-        .bind(group_id)
-        .bind(group_name)
+    sqlx::query(
+        "UPDATE library_items \
+         SET search_group_id = ?, search_group_name = ?, search_numbering_source = 'tmdb' \
+         WHERE id = ?",
+    )
+    .bind(group_id)
+    .bind(group_name)
+    .bind(item_id.to_string())
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(written)
+}
+
+/// Who decided how a title is numbered for search.
+///
+/// The question every writer has to answer before writing. See
+/// `migrations/20260813130000_arr_numbering.sql`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Source {
+    /// Derived from the \*arr's own tree. The sweep keeps it current.
+    Arr,
+    /// The operator picked a TMDB episode group. The sweep leaves it be.
+    Tmdb,
+    /// The operator declared the block boundaries by hand. Also
+    /// hands-off. Exists because not every title has an \*arr behind it
+    /// and the \*arr is not always right either — Solo Leveling is one
+    /// season of 25 on TMDB, two of 12 and 13 on TheTVDB, and releases
+    /// follow the split. TMDB is not wrong; the people publishing cut
+    /// somewhere else.
+    Manual,
+    /// The operator went back to the canonical numbering. Also
+    /// hands-off — without this, "voltar ao original" would be undone by
+    /// the next sweep half an hour later.
+    Off,
+}
+
+impl Source {
+    /// Whether an automatic sweep may write this title's numbering.
+    #[must_use]
+    pub fn is_automatic(self) -> bool {
+        self == Self::Arr
+    }
+
+    /// Column value.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Arr => "arr",
+            Self::Tmdb => "tmdb",
+            Self::Manual => "manual",
+            Self::Off => "off",
+        }
+    }
+
+    /// What the panel calls it.
+    #[must_use]
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::Arr => "derivada do Sonarr",
+            Self::Tmdb => "agrupamento do TMDB",
+            Self::Manual => "blocos definidos por você",
+            Self::Off => "numeração original do TMDB",
+        }
+    }
+
+    fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "arr" => Some(Self::Arr),
+            "tmdb" => Some(Self::Tmdb),
+            "manual" => Some(Self::Manual),
+            "off" => Some(Self::Off),
+            _ => None,
+        }
+    }
+}
+
+/// Who set this title's numbering. `None` means nobody has, which is
+/// what lets the \*arr sweep derive one.
+///
+/// # Errors
+///
+/// Returns [`AppError::Database`] on SQL failure.
+pub async fn source(pool: &Pool, item_id: Uuid) -> Result<Option<Source>, AppError> {
+    let row = sqlx::query("SELECT search_numbering_source FROM library_items WHERE id = ?")
+        .bind(item_id.to_string())
+        .fetch_optional(pool)
+        .await?;
+    let Some(row) = row else { return Ok(None) };
+    let raw: Option<String> = row.try_get("search_numbering_source")?;
+    Ok(raw.as_deref().and_then(Source::parse))
+}
+
+/// The name shown for a numbering the sweep derived.
+pub const ARR_NUMBERING_NAME: &str = "numeração do Sonarr";
+
+/// Synthetic group id for a numbering the sweep derived. Not a TMDB id,
+/// and deliberately not shaped like one — the panel matches rows by id
+/// and must not light one up.
+pub const ARR_GROUP_ID: &str = "arr";
+
+/// Store the numbering the \*arr uses as this title's search numbering.
+///
+/// **Refuses to overwrite a decision.** A title whose [`Source`] is
+/// `Tmdb` or `Off` is left exactly as it is, and the return says so — an
+/// operator who picked an ordering, or who deliberately went back to the
+/// canonical one, does not get overruled by a background sweep thirty
+/// minutes later.
+///
+/// Empty `rows` means the \*arr numbers this title exactly the way TMDB
+/// does, which is the common case (161 of this operator's 176 matched
+/// series). It clears rather than writes: absent *is* the encoding of
+/// "no translation", so 800 identity rows for the Simpsons would be
+/// storage that says nothing.
+///
+/// # Errors
+///
+/// Returns [`AppError::Database`] on SQL failure.
+pub async fn apply_from_arr(
+    pool: &Pool,
+    item_id: Uuid,
+    rows: &[NumberingRow],
+) -> Result<bool, AppError> {
+    let current = source(pool, item_id).await?;
+    match current {
+        Some(s) if !s.is_automatic() => return Ok(false),
+        // Nothing to say about a title nobody has said anything about.
+        // The sweep runs this for all 176 series every half hour and 161
+        // of them number the same as TMDB; without this they would each
+        // take a transaction to rewrite nothing.
+        None if rows.is_empty() => return Ok(true),
+        _ => {}
+    }
+
+    let mut tx = pool.begin().await?;
+    sqlx::query("DELETE FROM library_episode_numbering WHERE item_id = ?")
         .bind(item_id.to_string())
         .execute(&mut *tx)
         .await?;
+
+    for row in rows {
+        sqlx::query(
+            "INSERT INTO library_episode_numbering ( \
+                item_id, group_id, part_order, part_name, \
+                group_season, group_episode, canonical_season, canonical_episode, \
+                tmdb_episode_id \
+             ) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, NULL) \
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(item_id.to_string())
+        .bind(ARR_GROUP_ID)
+        .bind(i64::from(row.part_order))
+        .bind(i64::from(row.group.season))
+        .bind(i64::from(row.group.episode))
+        .bind(i64::from(row.canonical.season))
+        .bind(i64::from(row.canonical.episode))
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    // Nothing to translate reads as "no numbering applied", not as an
+    // applied numbering that happens to be empty — otherwise the panel
+    // would claim an ordering for every normal series in the catalogue.
+    let (id, name, src) = if rows.is_empty() {
+        (None, None, None)
+    } else {
+        (
+            Some(ARR_GROUP_ID),
+            Some(ARR_NUMBERING_NAME),
+            Some(Source::Arr.label()),
+        )
+    };
+    sqlx::query(
+        "UPDATE library_items \
+         SET search_group_id = ?, search_group_name = ?, search_numbering_source = ? \
+         WHERE id = ?",
+    )
+    .bind(id)
+    .bind(name)
+    .bind(src)
+    .bind(item_id.to_string())
+    .execute(&mut *tx)
+    .await?;
     tx.commit().await?;
+    Ok(true)
+}
+
+/// One stretch of a canonical season that releases call a season of its
+/// own.
+///
+/// Solo Leveling's shape: TMDB has one season of 25, releases have
+/// `S01E01`–`S01E12` and `S02E01`–`S02E13`. Two blocks, cutting at 13.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Block {
+    /// Canonical season the block is cut out of.
+    pub canonical_season: i32,
+    /// First canonical episode in the block, inclusive.
+    pub first_episode: i32,
+    /// Last canonical episode in the block, inclusive.
+    pub last_episode: i32,
+    /// Season number releases give this block.
+    pub season: i32,
+}
+
+/// Turn declared blocks into translation rows.
+///
+/// Pure, and separate from the persistence for the same reason
+/// [`rows_from_group`] is: the arithmetic is the part worth testing.
+///
+/// Episode numbering inside a block **restarts at 1**, which is the
+/// whole point — `S01E13` becomes `S02E01`. A block whose bounds are
+/// inverted contributes nothing rather than a reversed range.
+#[must_use]
+pub fn rows_from_blocks(blocks: &[Block]) -> Vec<NumberingRow> {
+    let mut rows = Vec::new();
+    for block in blocks {
+        if block.last_episode < block.first_episode {
+            continue;
+        }
+        for (offset, canonical) in (block.first_episode..=block.last_episode).enumerate() {
+            let within = i32::try_from(offset).unwrap_or(0) + 1;
+            rows.push(NumberingRow {
+                part_order: block.season,
+                part_name: None,
+                group: Numbering {
+                    season: block.season,
+                    episode: within,
+                },
+                canonical: Numbering {
+                    season: block.canonical_season,
+                    episode: canonical,
+                },
+                tmdb_episode_id: None,
+            });
+        }
+    }
+    rows
+}
+
+/// Read block sizes the operator typed — `"12, 13"`, `"14 13 19 30 55"`.
+///
+/// Sizes rather than ranges because that is how the split is described
+/// by the people who make it, and how the operator described it: two
+/// blocks, of twelve and thirteen. Separators are commas, spaces or
+/// semicolons, in any mixture, because insisting on one of them is a
+/// form that rejects work for no reason.
+///
+/// # Errors
+///
+/// Returns a sentence for the operator when a token is not a positive
+/// number.
+pub fn parse_block_sizes(raw: &str) -> Result<Vec<i32>, String> {
+    let mut sizes = Vec::new();
+    for token in raw.split([',', ';', ' ', '\t', '\n']) {
+        let token = token.trim();
+        if token.is_empty() {
+            continue;
+        }
+        let value: i32 = token
+            .parse()
+            .map_err(|_| format!("\"{token}\" não é um número de episódios"))?;
+        if value <= 0 {
+            return Err(format!("um bloco não pode ter {value} episódios"));
+        }
+        sizes.push(value);
+    }
+    Ok(sizes)
+}
+
+/// Cut one canonical season into blocks of the given sizes.
+///
+/// The sizes must account for **every** episode in the season. A short
+/// list would leave the tail on the canonical numbering while the head
+/// was renumbered around it — half a season searched one way and half
+/// the other, which is worse than either. Saying so is one sentence; the
+/// silent version is a bug report three weeks later.
+///
+/// # Errors
+///
+/// Returns a sentence for the operator when the sizes do not add up.
+pub fn blocks_for_season(
+    canonical_season: i32,
+    episodes: i32,
+    sizes: &[i32],
+    first_season: i32,
+) -> Result<Vec<Block>, String> {
+    if sizes.is_empty() {
+        return Ok(Vec::new());
+    }
+    let total: i32 = sizes.iter().sum();
+    if total != episodes {
+        return Err(format!(
+            "a temporada {canonical_season} tem {episodes} episódios e seus blocos somam {total}"
+        ));
+    }
+    let mut blocks = Vec::with_capacity(sizes.len());
+    let mut next = 1;
+    for (index, &size) in sizes.iter().enumerate() {
+        let season = first_season + i32::try_from(index).unwrap_or(0);
+        blocks.push(Block {
+            canonical_season,
+            first_episode: next,
+            last_episode: next + size - 1,
+            season,
+        });
+        next += size;
+    }
+    Ok(blocks)
+}
+
+/// Synthetic group id for a numbering the operator declared by hand.
+pub const MANUAL_GROUP_ID: &str = "manual";
+
+/// The name shown for a numbering the operator declared by hand.
+pub const MANUAL_NUMBERING_NAME: &str = "blocos definidos por você";
+
+/// Persist hand-declared blocks as this title's search numbering.
+///
+/// Unlike [`apply_from_arr`] this **always** wins: it is the operator
+/// speaking, and it is the escape hatch for the case where neither TMDB
+/// nor the \*arr has the split the scene uses. Empty `blocks` is the
+/// same as [`clear`].
+///
+/// # Errors
+///
+/// Returns [`AppError::Database`] on SQL failure.
+pub async fn apply_manual(pool: &Pool, item_id: Uuid, blocks: &[Block]) -> Result<u64, AppError> {
+    let rows = rows_from_blocks(blocks);
+    if rows.is_empty() {
+        clear(pool, item_id).await?;
+        return Ok(0);
+    }
+    let written = apply(
+        pool,
+        item_id,
+        MANUAL_GROUP_ID,
+        Some(MANUAL_NUMBERING_NAME),
+        &rows,
+    )
+    .await?;
+    sqlx::query("UPDATE library_items SET search_numbering_source = 'manual' WHERE id = ?")
+        .bind(item_id.to_string())
+        .execute(pool)
+        .await?;
     Ok(written)
 }
 
@@ -164,8 +501,14 @@ pub async fn clear(pool: &Pool, item_id: Uuid) -> Result<(), AppError> {
         .bind(item_id.to_string())
         .execute(&mut *tx)
         .await?;
+    // `'off'`, not NULL. NULL means "nobody decided" and the \*arr sweep
+    // would re-derive a numbering within the half hour — a button that
+    // undoes itself is a broken lever, which this repository has already
+    // said once about season 0.
     sqlx::query(
-        "UPDATE library_items SET search_group_id = NULL, search_group_name = NULL WHERE id = ?",
+        "UPDATE library_items \
+         SET search_group_id = NULL, search_group_name = NULL, search_numbering_source = 'off' \
+         WHERE id = ?",
     )
     .bind(item_id.to_string())
     .execute(&mut *tx)
@@ -296,6 +639,119 @@ pub async fn reverse_for_item(
 mod tests {
     use super::*;
     use brarr_tmdb::{EpisodeGroupKind, EpisodeGroupPart, GroupEpisode};
+
+    /// **Solo Leveling.** One season of 25 on TMDB, and every release is
+    /// `S01E01`–`S01E12` then `S02E01`–`S02E13`. The operator says
+    /// "12, 13" and the split falls where the publishers put it.
+    #[test]
+    fn hand_declared_blocks_cut_a_flat_season_where_releases_do() {
+        let sizes = parse_block_sizes("12, 13").unwrap();
+        let blocks = blocks_for_season(1, 25, &sizes, 1).unwrap();
+        assert_eq!(
+            blocks,
+            vec![
+                Block {
+                    canonical_season: 1,
+                    first_episode: 1,
+                    last_episode: 12,
+                    season: 1,
+                },
+                Block {
+                    canonical_season: 1,
+                    first_episode: 13,
+                    last_episode: 25,
+                    season: 2,
+                },
+            ]
+        );
+
+        let rows = rows_from_blocks(&blocks);
+        assert_eq!(rows.len(), 25);
+        // The whole point: canonical 13 is asked for as S02E01.
+        let thirteenth = rows
+            .iter()
+            .find(|r| r.canonical.episode == 13)
+            .expect("canonical 13 is covered");
+        assert_eq!(
+            thirteenth.group,
+            Numbering {
+                season: 2,
+                episode: 1
+            }
+        );
+        // And the first block is untouched, which is why it must still be
+        // written: absent would mean canonical, and it *is* canonical
+        // here — but the row costs nothing and keeps the block visible.
+        let first = rows
+            .iter()
+            .find(|r| r.canonical.episode == 1)
+            .expect("canonical 1 is covered");
+        assert_eq!(
+            first.group,
+            Numbering {
+                season: 1,
+                episode: 1
+            }
+        );
+    }
+
+    /// Dragon Ball Super by hand, for an operator with no Sonarr behind
+    /// the title: five arcs, and canonical 47 is the first of the fourth.
+    #[test]
+    fn blocks_can_express_an_arc_split() {
+        let sizes = parse_block_sizes("14 13 19 30 55").unwrap();
+        let rows = rows_from_blocks(&blocks_for_season(1, 131, &sizes, 1).unwrap());
+        assert_eq!(rows.len(), 131);
+        let forty_seventh = rows
+            .iter()
+            .find(|r| r.canonical.episode == 47)
+            .expect("canonical 47 is covered");
+        assert_eq!(
+            forty_seventh.group,
+            Numbering {
+                season: 4,
+                episode: 1
+            }
+        );
+    }
+
+    /// Sizes that do not account for every episode are refused with the
+    /// arithmetic spelled out. Half a season searched one way and half
+    /// the other is worse than either.
+    #[test]
+    fn blocks_that_do_not_add_up_are_refused() {
+        let sizes = parse_block_sizes("12, 12").unwrap();
+        let err = blocks_for_season(1, 25, &sizes, 1).unwrap_err();
+        assert!(err.contains("25"), "{err}");
+        assert!(err.contains("24"), "{err}");
+    }
+
+    /// A block list can start anywhere — a title whose first block the
+    /// scene calls S02.
+    #[test]
+    fn blocks_need_not_start_at_season_one() {
+        let blocks = blocks_for_season(1, 24, &[12, 12], 2).unwrap();
+        assert_eq!(blocks[0].season, 2);
+        assert_eq!(blocks[1].season, 3);
+    }
+
+    #[test]
+    fn block_sizes_are_read_in_any_reasonable_spelling() {
+        assert_eq!(parse_block_sizes("12,13").unwrap(), vec![12, 13]);
+        assert_eq!(parse_block_sizes(" 12 ; 13 ").unwrap(), vec![12, 13]);
+        assert_eq!(parse_block_sizes("14 13 19").unwrap(), vec![14, 13, 19]);
+        assert!(parse_block_sizes("").unwrap().is_empty());
+        assert!(parse_block_sizes("doze").is_err());
+        assert!(parse_block_sizes("12, 0").is_err());
+        assert!(parse_block_sizes("12, -3").is_err());
+    }
+
+    /// Nothing declared is not an error, it is "leave it alone".
+    #[test]
+    fn no_sizes_means_no_blocks() {
+        assert!(blocks_for_season(1, 25, &[], 1).unwrap().is_empty());
+        assert!(rows_from_blocks(&[]).is_empty());
+    }
 
     /// Jujutsu Kaisen's `季` group, reduced to the boundary that matters:
     /// the end of block 1 and the ends of blocks 2 and 3. Numbers are
