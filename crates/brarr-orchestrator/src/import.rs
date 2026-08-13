@@ -59,7 +59,7 @@ use tracing::{debug, info, warn};
 use crate::db::grabs::{self, Grab, GrabStatus};
 use crate::db::library::{self, LibraryItem};
 use crate::db::root_folders::{self, RootFolder};
-use crate::db::{download_clients, path_mappings, settings};
+use crate::db::{download_clients, episode_numbering, path_mappings, settings};
 use crate::{AppError, AppState};
 
 /// How often the importer looks for finished downloads.
@@ -298,11 +298,21 @@ async fn plan_and_place(state: &AppState, grab: &Grab) -> Result<ImportOutcome, 
             .find(|e| e.id == id),
         None => None,
     };
+    // **The name on disk follows the numbering the release used**, which
+    // under an applied ordering is not the catalogue's. Dragon Ball Super
+    // is one season of 131 to TMDB and five arcs to everybody else; the
+    // 130 files already there are `Season 2/… S02E01`, and writing
+    // `Season 01/… S01E15` beside them gives Plex a second show. The
+    // catalogue keeps its own numbers — `grabs.episode_id` is what says
+    // which episode this is, and it is untouched.
+    let numbering = episode_numbering::for_item(state.pool(), item.id).await?;
     let marker = episode.as_ref().and_then(|e| {
-        Some((
-            u16::try_from(e.season_number).ok()?,
-            u16::try_from(e.episode_number).ok()?,
-        ))
+        let (season, number) = numbering
+            .get(&(e.season_number, e.episode_number))
+            .map_or((e.season_number, e.episode_number), |n| {
+                (n.season, n.episode)
+            });
+        Some((u16::try_from(season).ok()?, u16::try_from(number).ok()?))
     });
 
     let plan = Placement {
@@ -540,6 +550,7 @@ fn place_download(source: &Path, plan: &Placement) -> ImportOutcome {
         |e| e.to_string_lossy().to_ascii_lowercase(),
     );
     let destination = destination(&plan.root, &plan.title, plan.year, plan.episode, &extension);
+    let destination = reuse_existing_season_folder(&destination);
 
     match place(&video, &destination, plan.mode) {
         Ok(used) => ImportOutcome::Imported {
@@ -705,6 +716,59 @@ pub(crate) fn destination(
         None => path.push(sanitize(&format!("{folder}.{extension}"))),
     }
     path
+}
+
+/// Swap in the season folder that is already there, when its name only
+/// differs from ours in spelling.
+///
+/// [`destination`] writes `Season 02`; Sonarr writes `Season 2`, and this
+/// operator's library is Sonarr's work. Plex and Jellyfin read both as
+/// season 2, so the cost is not a broken library — it is two folders side
+/// by side for one season, half the episodes in each, which is confusing
+/// in exactly the place brarr is trying to stop being confusing.
+///
+/// Deliberately conservative: it only ever replaces a component with one
+/// that **exists** and that names the **same number**, so it cannot
+/// invent a destination. Anything it cannot read leaves the path alone —
+/// the caller creates the folder as spelled, which is the behaviour this
+/// had before.
+fn reuse_existing_season_folder(path: &Path) -> PathBuf {
+    let (Some(file), Some(season_dir), Some(item_dir)) = (
+        path.file_name(),
+        path.parent().and_then(Path::file_name),
+        path.parent().and_then(Path::parent),
+    ) else {
+        return path.to_path_buf();
+    };
+    let Some(wanted) = season_number(&season_dir.to_string_lossy()) else {
+        return path.to_path_buf();
+    };
+    let Ok(entries) = std::fs::read_dir(item_dir) else {
+        return path.to_path_buf();
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if name == season_dir || !entry.path().is_dir() {
+            continue;
+        }
+        if season_number(&name.to_string_lossy()) == Some(wanted) {
+            return item_dir.join(name).join(file);
+        }
+    }
+    path.to_path_buf()
+}
+
+/// The season a folder name names, in either language brarr writes or
+/// reads. `None` for anything that is not a season folder.
+fn season_number(name: &str) -> Option<u16> {
+    let lowered = name.trim().to_ascii_lowercase();
+    let digits = lowered
+        .strip_prefix("season")
+        .or_else(|| lowered.strip_prefix("temporada"))?
+        .trim();
+    (!digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
+        .then(|| digits.parse().ok())
+        .flatten()
 }
 
 /// Make one path component safe on every filesystem brarr might run on.
@@ -881,6 +945,63 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    /// The operator's library is Sonarr's work and spells it `Season 2`.
+    /// brarr spells it `Season 02`, and two folders for one season is
+    /// the confusion this whole block exists to remove.
+    #[test]
+    fn an_existing_season_folder_wins_over_our_spelling() {
+        let dir = TempDir::new("season-folder");
+        dir.file("Dragon Ball Super/Season 2/existing.mkv", 4);
+
+        let wanted = dir
+            .path()
+            .join("Dragon Ball Super/Season 02/Dragon Ball Super - S02E01.mkv");
+        assert_eq!(
+            reuse_existing_season_folder(&wanted),
+            dir.path()
+                .join("Dragon Ball Super/Season 2/Dragon Ball Super - S02E01.mkv")
+        );
+    }
+
+    /// Only the *same* season is a match. Finding `Season 3` next door
+    /// must not drag episode 1 of season 2 into it.
+    #[test]
+    fn a_different_season_is_not_a_match() {
+        let dir = TempDir::new("other-season");
+        dir.file("Serie/Season 3/existing.mkv", 4);
+
+        let wanted = dir.path().join("Serie/Season 02/Serie - S02E01.mkv");
+        assert_eq!(reuse_existing_season_folder(&wanted), wanted);
+    }
+
+    /// Nothing there yet, or nothing readable: the path is written as
+    /// spelled, which is what happened before this existed.
+    #[test]
+    fn an_absent_item_folder_leaves_the_path_alone() {
+        let dir = TempDir::new("absent");
+        let wanted = dir.path().join("Serie/Season 02/Serie - S02E01.mkv");
+        assert_eq!(reuse_existing_season_folder(&wanted), wanted);
+    }
+
+    /// A movie has no season component to reconsider.
+    #[test]
+    fn a_movie_path_is_untouched() {
+        let dir = TempDir::new("movie");
+        dir.file("filmes/Duna (2024)/Duna (2024).mkv", 4);
+        let wanted = dir.path().join("filmes/Duna (2024)/Duna (2024).mkv");
+        assert_eq!(reuse_existing_season_folder(&wanted), wanted);
+    }
+
+    #[test]
+    fn season_folders_are_read_in_either_spelling() {
+        assert_eq!(season_number("Season 02"), Some(2));
+        assert_eq!(season_number("season 2"), Some(2));
+        assert_eq!(season_number("Temporada 11"), Some(11));
+        assert_eq!(season_number("Especiais"), None);
+        assert_eq!(season_number("Season"), None);
+        assert_eq!(season_number("Seasons of Love"), None);
     }
 
     #[test]
