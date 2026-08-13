@@ -2444,7 +2444,17 @@ async fn library_interactive(
     let item = library::get_by_id(state.pool(), uuid).await?;
     let (season, episode) = q.parsed();
 
-    let keys = interactive_keys(&item, season, episode);
+    // The picker offers the **catalogue's** numbers, and the catalogue is
+    // not always numbered the way releases are. The sweep has translated
+    // since v0.14.0 and this screen did not, so the magnifier asked for
+    // `S01E47` while every release for it was named `S02E23`. Only the
+    // query is translated: the values echoed back into the form stay
+    // canonical, because `library_grab` resolves the episode row from
+    // them and every grab is keyed on the catalogue's numbering.
+    let numbering = episode_numbering::for_item(state.pool(), uuid).await?;
+    let (asked_season, asked_episode) = search_coordinates(&numbering, season, episode);
+
+    let keys = interactive_keys(&item, asked_season, asked_episode);
     if !keys.has_any() {
         return html(&InteractiveResultsPartial {
             item_id: id,
@@ -2504,7 +2514,15 @@ async fn library_interactive(
     // Best first — the operator scans down from the top.
     results.sort_by_key(|r| std::cmp::Reverse(r.score));
 
+    // Say what was actually asked when it differs from what was clicked.
+    // The operator picked episode 47 and the indexer was asked for
+    // S02E23; a screen that shows only one of those makes the result
+    // list look like it belongs to something else.
     let axis = match (season, episode) {
+        (Some(s), Some(e)) if (asked_season, asked_episode) != (season, episode) => {
+            let (gs, ge) = (asked_season.unwrap_or(s), asked_episode.unwrap_or(e));
+            format!("S{s:02}E{e:02} · buscado como S{gs:02}E{ge:02}")
+        }
         (Some(s), Some(e)) => format!("S{s:02}E{e:02}"),
         (Some(s), None) => format!("temporada {s} (pack)"),
         _ => String::new(),
@@ -2522,6 +2540,31 @@ async fn library_interactive(
         results,
         message,
     })
+}
+
+/// The coordinates to ask an indexer for, given the catalogue's.
+///
+/// **Only a complete pair translates.** A season on its own is the pack
+/// request, and under an ordering that regroups episodes across seasons
+/// it has no single answer — Dragon Ball Super's canonical season 1 is
+/// all five arcs at once. Guessing one would search the wrong arc and
+/// return a confidently wrong list, so the season passes through and the
+/// operator sees what their number really means.
+fn search_coordinates(
+    numbering: &std::collections::HashMap<(i32, i32), episode_numbering::Numbering>,
+    season: Option<u16>,
+    episode: Option<u16>,
+) -> (Option<u16>, Option<u16>) {
+    let (Some(s), Some(e)) = (season, episode) else {
+        return (season, episode);
+    };
+    let Some(found) = numbering.get(&(i32::from(s), i32::from(e))) else {
+        return (season, episode);
+    };
+    match (u16::try_from(found.season), u16::try_from(found.episode)) {
+        (Ok(gs), Ok(ge)) => (Some(gs), Some(ge)),
+        _ => (season, episode),
+    }
 }
 
 /// Search axis for a manual search. A series with a season asks the TVDB
@@ -6695,8 +6738,56 @@ fn humanize_bytes(b: u64) -> String {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-    use super::{audio_chips_from_languages, subtitle_chips_from_languages};
+    use super::{audio_chips_from_languages, search_coordinates, subtitle_chips_from_languages};
+    use crate::db::episode_numbering::Numbering;
     use brarr_core::Language;
+    use std::collections::HashMap;
+
+    /// Dragon Ball Super's applied ordering, the part of it that matters
+    /// here: canonical episode 47 is the first of the fourth arc.
+    fn dbs() -> HashMap<(i32, i32), Numbering> {
+        let mut map = HashMap::new();
+        map.insert(
+            (1, 47),
+            Numbering {
+                season: 4,
+                episode: 1,
+            },
+        );
+        map
+    }
+
+    /// The gap this closes: the magnifier asked the indexer for `S01E47`
+    /// while every release for it is named `S04E01`.
+    #[test]
+    fn the_manual_search_asks_for_the_numbering_releases_use() {
+        assert_eq!(
+            search_coordinates(&dbs(), Some(1), Some(47)),
+            (Some(4), Some(1))
+        );
+    }
+
+    /// A title with no ordering applied — almost all of them — is
+    /// untouched, and so is an episode the ordering does not cover.
+    #[test]
+    fn an_untranslated_coordinate_passes_through() {
+        assert_eq!(
+            search_coordinates(&HashMap::new(), Some(4), Some(7)),
+            (Some(4), Some(7))
+        );
+        assert_eq!(
+            search_coordinates(&dbs(), Some(1), Some(48)),
+            (Some(1), Some(48))
+        );
+    }
+
+    /// A pack request is a season with no episode, and under an ordering
+    /// that regroups across seasons one canonical season is every arc at
+    /// once. It passes through rather than being guessed at.
+    #[test]
+    fn a_pack_request_is_not_translated() {
+        assert_eq!(search_coordinates(&dbs(), Some(1), None), (Some(1), None));
+    }
 
     #[test]
     fn pt_br_audio_renders_as_green_pt_chip() {
