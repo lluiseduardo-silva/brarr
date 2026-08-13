@@ -8,11 +8,21 @@
 
 name: ci
 
+# DESABILITADA — só roda por acionamento manual.
+#
+# Os quatro jobs falham em "The job was not acquired by Runner of type
+# hosted even after multiple attempts / Internal server error", **antes
+# de qualquer passo**: é indisponibilidade de runner hospedado, não o
+# código. A assinatura é falharem os quatro de forma idêntica; uma falha
+# real falharia diferente em cada um.
+#
+# Enquanto isso, o contrato é verificado localmente antes de cada tag —
+# `cargo test --workspace --all-targets`, `cargo clippy --workspace
+# --all-targets -- -D warnings`, `cargo fmt --all -- --check` — e a
+# imagem é construída e publicada da máquina local.
+#
+# Para reativar: devolver os gatilhos `push` e `pull_request` abaixo.
 on:
-  push:
-    branches: [master, main]
-  pull_request:
-    branches: [master, main]
   workflow_dispatch:
 
 env:

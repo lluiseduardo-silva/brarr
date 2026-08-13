@@ -23,12 +23,18 @@
 
 name: docker
 
+# DESABILITADA — só roda por acionamento manual. Mesma razão da `ci.yml`:
+# os runners hospedados não são alocados, e a falha acontece antes de
+# qualquer passo.
+#
+# A imagem é construída e publicada da máquina local, com as **seis
+# tags** que este workflow geraria (`X.Y.Z`, `X.Y`, `X`, `latest`,
+# `main`, `sha-<short>`) e com `--label org.opencontainers.image.source`,
+# que é o que vincula o pacote ao repositório e faz herdar a
+# visibilidade. Sem o label o pacote nasce órfão na conta.
+#
+# Para reativar: devolver os gatilhos `push` e `pull_request` abaixo.
 on:
-  push:
-    branches: [master, main]
-    tags: ["v*"]
-  pull_request:
-    branches: [master, main]
   workflow_dispatch:
 
 env:
