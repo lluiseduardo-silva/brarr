@@ -907,6 +907,15 @@ pub async fn apply_with(
                 *pinned,
             )
             .await?;
+
+            // The tree now *is* the numbering releases carry, so the
+            // translation that used to bridge the two describes a
+            // distance that no longer exists. Left in place it is
+            // applied a second time, and a title that has just been
+            // corrected starts asking for coordinates further wrong than
+            // before anyone touched it. Retiring it is part of the
+            // choice, not a follow-up an operator could forget.
+            episode_numbering::retire(pool, item_id).await?;
         }
     }
 
@@ -1729,6 +1738,267 @@ mod tests {
         // impacts — only a season that already had one can change what
         // it means.
         assert!(plan.packs_affected.iter().all(|p| p.grabs > 0));
+    }
+
+    /// Every episode's UUID and where it sits, so a round trip can be
+    /// compared against itself rather than against a hand-written list.
+    async fn fingerprint(pool: &DbPool, item: Uuid) -> Vec<(Uuid, i32, i32)> {
+        let mut rows: Vec<(Uuid, i32, i32)> = library::episodes(pool, item)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|e| (e.id, e.season_number, e.episode_number))
+            .collect();
+        rows.sort_unstable();
+        rows
+    }
+
+    /// Which grab points at which episode, which is the thing a flip
+    /// must not disturb and the one whose damage is invisible.
+    async fn links(pool: &DbPool, item: Uuid) -> Vec<(String, Option<Uuid>)> {
+        let mut rows: Vec<(String, Option<Uuid>)> =
+            sqlx::query("SELECT release_id_remote, episode_id FROM grabs WHERE item_id = ?")
+                .bind(item.to_string())
+                .fetch_all(pool)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|r| {
+                    let key: String = r.try_get("release_id_remote").unwrap();
+                    let episode: Option<String> = r.try_get("episode_id").unwrap();
+                    (key, episode.and_then(|e| Uuid::parse_str(&e).ok()))
+                })
+                .collect();
+        rows.sort_unstable();
+        rows
+    }
+
+    /// **The test that says the flip is safe to try.** Dragon Ball
+    /// Super goes from TMDB's flat 131 to TheTVDB's 14 / 13 / 19 / 30 /
+    /// 55 and back, and every row and every link survives both trips.
+    ///
+    /// Reversibility is what makes the whole phase a decision the
+    /// operator can unmake. It rests on two things this module already
+    /// does and one it now does: identity columns are `COALESCE`d, so
+    /// the TMDB episode id set on the way out is still there on the way
+    /// back and the return trip pairs on identity rather than on a
+    /// guess; `park` vacates the number space, so a permuting rewrite
+    /// does not trip the uniqueness index mid-transaction; and
+    /// `Intent::Choice` lets the operator move a title the recorded
+    /// owner would otherwise refuse — while every gate that protects a
+    /// *file* still runs, which is why the assertion on `links` is the
+    /// real one.
+    /// TMDB's shape for Dragon Ball Super: one flat season, numeric
+    /// external ids because that is what TMDB's episode ids are — and
+    /// what makes `tmdb_episode_id` land, which is what the return trip
+    /// pairs on.
+    fn dbs_flat(episodes: i32) -> SeriesTree {
+        tree(
+            MetadataSource::Tmdb,
+            vec![incoming(
+                1,
+                (1..=episodes)
+                    .map(|n| TreeEpisode {
+                        air_date: Some(day(i64::from(n))),
+                        ..ep(n, &(5_000_000 + n).to_string())
+                    })
+                    .collect(),
+            )],
+        )
+    }
+
+    /// TheTVDB's cut of the same series, and the translation that says
+    /// which of its coordinates is which of TMDB's.
+    fn dbs_cut(shape: &[i32]) -> (SeriesTree, Vec<Rewrite>) {
+        let mut flat = 0_i64;
+        let mut translation: Vec<Rewrite> = Vec::new();
+        let seasons = shape
+            .iter()
+            .enumerate()
+            .map(|(index, count)| {
+                let season = i32::try_from(index).unwrap() + 1;
+                let episodes = (1..=*count)
+                    .map(|n| {
+                        flat += 1;
+                        translation.push(((season, n), (1, i32::try_from(flat).unwrap())));
+                        TreeEpisode {
+                            air_date: Some(day(flat)),
+                            ..ep(n, &format!("tvdb-{flat}"))
+                        }
+                    })
+                    .collect();
+                incoming(season, episodes)
+            })
+            .collect();
+        (tree(MetadataSource::Tvdb, seasons), translation)
+    }
+
+    #[tokio::test]
+    async fn a_flip_is_reversible() {
+        const SHAPE: [i32; 5] = [14, 13, 19, 30, 55];
+
+        let pool = open_memory().await.unwrap();
+        let provider_id = provider(&pool).await;
+        let item = library::upsert(&pool, &Seed::series(62_715, "Dragon Ball Super").build())
+            .await
+            .unwrap()
+            .id;
+        let canonical = dbs_flat(131);
+        apply(&pool, item, &canonical).await.unwrap();
+
+        // Hang acquisitions off episodes spread across what will become
+        // four different seasons.
+        let stored = library::episodes(&pool, item).await.unwrap();
+        for n in [1_usize, 20, 60, 130] {
+            grab_on(&pool, item, provider_id, stored[n].id, &format!("dbs-{n}")).await;
+        }
+
+        let before = fingerprint(&pool, item).await;
+        let links_before = links(&pool, item).await;
+        assert_eq!(before.len(), 131);
+
+        // Out: TheTVDB's cut. The stored rows are TMDB-owned, so the
+        // pairing reaches neither identity tier and rests on the
+        // translation the operator verified — the flip as it really
+        // happens.
+        let (out, translation) = dbs_cut(&SHAPE);
+        translate(&pool, item, &translation).await;
+        let outbound = plan(&pool, item, &out).await.unwrap();
+        assert!(
+            outbound
+                .pairs
+                .iter()
+                .all(|p| p.method == LinkMethod::Operator),
+            "the trip out is the flip as it really happens: neither identity tier \
+             can reach a TheTVDB tree from TMDB-owned rows, so it rests on what the \
+             operator verified"
+        );
+
+        apply_with(
+            &pool,
+            item,
+            &out,
+            &Intent::Choice {
+                pinned: false,
+                recipe: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let moved = fingerprint(&pool, item).await;
+        assert_eq!(moved.len(), 131, "no row was added or pruned");
+        assert_eq!(
+            moved.iter().map(|(id, ..)| *id).collect::<HashSet<_>>(),
+            before.iter().map(|(id, ..)| *id).collect::<HashSet<_>>(),
+            "every UUID survived the trip out"
+        );
+        assert_eq!(library::seasons(&pool, item).await.unwrap().len(), 5);
+        assert_eq!(
+            links(&pool, item).await,
+            links_before,
+            "no acquisition changed episode on the way out"
+        );
+
+        // Back: TMDB's flat season. The translation does not apply in
+        // this direction and does not need to — `tmdb_episode_id` is
+        // `COALESCE`d and so survived the trip out, which is what makes
+        // the return exact rather than a guess.
+        let back = canonical;
+        let inbound = plan(&pool, item, &back).await.unwrap();
+        assert!(
+            inbound
+                .pairs
+                .iter()
+                .all(|p| p.method == LinkMethod::ExternalId),
+            "an id can be set but never cleared, so the way home is identity"
+        );
+
+        apply_with(
+            &pool,
+            item,
+            &back,
+            &Intent::Choice {
+                pinned: false,
+                recipe: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            fingerprint(&pool, item).await,
+            before,
+            "every UUID came home to the coordinate it started at"
+        );
+        assert_eq!(
+            links(&pool, item).await,
+            links_before,
+            "and every acquisition still names the episode it always did"
+        );
+        assert_eq!(orphan_count(&pool).await, 0);
+    }
+
+    /// The translation and the new tree cannot both be in force.
+    ///
+    /// A translation is a *distance* between two numberings. Once the
+    /// tree is rebuilt in the release numbering the distance is zero,
+    /// and applying the stored one anyway sends the sweep further from
+    /// the target than it was before the title was corrected — a
+    /// regression that looks exactly like the defect the flip exists to
+    /// fix, which is the worst way for it to present.
+    #[tokio::test]
+    async fn a_choice_retires_the_translation_it_replaces() {
+        let pool = open_memory().await.unwrap();
+        let item = series_with(&pool, &[20], true).await;
+
+        let pairs: Vec<Rewrite> = (1..=20).map(|n| ((2, n), (1, n))).collect();
+        translate(&pool, item, &pairs).await;
+        assert_eq!(
+            episode_numbering::for_item(&pool, item)
+                .await
+                .unwrap()
+                .len(),
+            20
+        );
+
+        let declared = tree(
+            MetadataSource::Tmdb,
+            vec![incoming(
+                1,
+                (1..=20)
+                    .map(|n| TreeEpisode {
+                        air_date: Some(day(i64::from(n))),
+                        ..ep(n, &format!("tmdb-{n}"))
+                    })
+                    .collect(),
+            )],
+        );
+        apply_with(
+            &pool,
+            item,
+            &declared,
+            &Intent::Choice {
+                pinned: true,
+                recipe: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            episode_numbering::for_item(&pool, item)
+                .await
+                .unwrap()
+                .is_empty(),
+            "the tree is the numbering now; translating again applies the distance twice"
+        );
+        // `'off'` and not NULL, or the \*arr sweep re-derives one within
+        // the half hour over a tree that no longer needs it.
+        assert_eq!(
+            episode_numbering::source(&pool, item).await.unwrap(),
+            Some(episode_numbering::Source::Off)
+        );
     }
 
     async fn orphan_count(pool: &DbPool) -> i64 {

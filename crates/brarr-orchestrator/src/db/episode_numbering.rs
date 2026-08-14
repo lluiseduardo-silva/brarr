@@ -586,6 +586,46 @@ pub async fn reset_to_automatic(pool: &Pool, item_id: Uuid) -> Result<(), AppErr
     Ok(())
 }
 
+/// Retire a translation that a structure choice has superseded.
+///
+/// **The counterpart of a flip, and not optional.** A translation says
+/// how to get from the catalogue's coordinates to the ones releases
+/// carry. The moment the tree itself is rebuilt in the release
+/// numbering, those are the same thing — and translating again applies
+/// the distance twice, so a title that has just been corrected starts
+/// asking for coordinates further wrong than before it was touched.
+///
+/// `'off'` and not NULL, for the reason [`clear`] says: NULL invites the
+/// sweeps to derive a numbering again, over a tree that no longer needs
+/// one.
+///
+/// Unlike every other writer in this module it does **not** consult the
+/// pause, and by the same argument [`crate::structure::apply`] does not:
+/// this is not a numbering decision, it is the removal of one the
+/// operator has just replaced, and the migration it belongs to is meant
+/// to be run against a frozen brarr. Refusing here would leave the
+/// tree rebuilt and the stale translation live, which is the one state
+/// worse than either.
+///
+/// # Errors
+///
+/// Returns [`AppError::Database`] on SQL failure.
+pub async fn retire(pool: &Pool, item_id: Uuid) -> Result<(), AppError> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("DELETE FROM library_episode_numbering WHERE item_id = ?")
+        .bind(item_id.to_string())
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(
+        "UPDATE library_items          SET search_group_id = NULL, search_group_name = NULL, search_numbering_source = 'off'          WHERE id = ?",
+    )
+    .bind(item_id.to_string())
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
 /// Go back to the canonical numbering, **and keep it there**.
 ///
 /// The whole undo, and it is one statement plus a delete — which is the
@@ -593,7 +633,8 @@ pub async fn reset_to_automatic(pool: &Pool, item_id: Uuid) -> Result<(), AppErr
 ///
 /// # Errors
 ///
-/// Returns [`AppError::Database`] on SQL failure.
+/// Returns [`AppError::Paused`] while brarr is paused, or
+/// [`AppError::Database`] on SQL failure.
 pub async fn clear(pool: &Pool, item_id: Uuid) -> Result<(), AppError> {
     settings::refuse_if_paused(pool, NUMBERING_ACTION).await?;
     let mut tx = pool.begin().await?;
