@@ -92,7 +92,7 @@ Implemented end-to-end pipeline plus rules engine, orchestrator service, and WAS
 - **`tests/metadata_boundary.rs`** fecha as duas fronteiras que fazem "acrescentar um provedor" ser trabalho finito: nenhum tipo de crate de provedor em `src/db/` ou `src/web/` (exceção única e documentada: o texto de atribuição, que as duas licenças condicionam a exibir e que precisa aparecer esteja a credencial configurada ou não), e nenhum braço `_ =>` em `match` sobre `MetadataSource`. Havia três violações vivas quando o bloco começou. Ambos foram rodados **contra violação deliberada** antes de entrar; o primeiro rascunho do varredor de curinga acusava dois handlers inocentes por ler um `match` aninhado dentro do corpo de um braço, e por isso agora olha só os braços do próprio `match` — a contagem de chaves pode terminar um bloco cedo, e isso só produz falso *passe*, nunca falsa acusação.
 - **O que falta da fase 8** são as colunas de identidade de `library_items` (`tmdb_id`, `imdb_id`, `tvdb_id`, `tmdb_status`, `metadata_refreshed_at`). Entregam uma capacidade distinta — catalogar um título que o TMDB não tem — e são a parte com risco de correção real, porque `upsert` resolve conflito por `ON CONFLICT(media_type, tmdb_id)` e passaria a ter de procurar por qualquer id antes de inserir.
 
-1165 tests pass (`cargo test --workspace --all-targets`). `INITIAL_PROMPT.md` remains the authoritative spec — consult before adding crates, dependencies, or making architectural decisions.
+1164 tests pass (`cargo test --workspace --all-targets`). `INITIAL_PROMPT.md` remains the authoritative spec — consult before adding crates, dependencies, or making architectural decisions.
 
 ### Running the orchestrator
 
