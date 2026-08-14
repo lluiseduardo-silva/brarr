@@ -109,6 +109,15 @@ impl DeliveryOutcome {
 /// file — is a [`DeliveryOutcome`], not an `Err`: those are results the
 /// operator needs to see, not bugs to propagate.
 pub async fn deliver(state: &AppState, grab: &Grab) -> Result<DeliveryOutcome, AppError> {
+    // The global switch, checked here and not only in the loop: a button
+    // on a screen has to be as paused as the sweep behind it. `Retryable`
+    // rather than `Permanent` releases the reservation, so a pause
+    // consumes no barrier key and leaves nothing to clean up after.
+    if crate::db::settings::is_paused(state.pool()).await {
+        return Ok(DeliveryOutcome::Retryable(
+            "o brarr está pausado — nada é entregue a cliente de download".to_owned(),
+        ));
+    }
     let Some(transport) = protocol(grab) else {
         return record(
             state,

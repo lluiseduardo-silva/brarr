@@ -52,6 +52,21 @@ pub const KEY_TMDB_COUNTRY: &str = "tmdb_country";
 /// months, so values above ~180 are not legitimate.
 pub const KEY_TMDB_TTL_DAYS: &str = "tmdb_ttl_days";
 
+/// Global pause. `"1"` stops every side effect brarr has.
+///
+/// **A switch rather than commented-out spawns**, because the reason to
+/// reach for it is that something is writing wrong data and the operator
+/// needs it to stop *now* — and then to start again without another
+/// deploy. It gates at the point of effect, not only in the loops, so a
+/// button on a screen is as paused as the sweep behind it.
+///
+/// What it stops: searching, reserving, delivering to a download client,
+/// importing files, writing \*arr bindings, deriving numberings, advancing
+/// the queue, and marking files missing. What it leaves alone: reading.
+/// The UI stays fully usable, which is the point — the operator is
+/// pausing brarr to *look* at something.
+pub const KEY_PAUSED: &str = "paused";
+
 /// `TheTVDB` v4 project API key. A UUID.
 ///
 /// Write-only in the UI, like [`KEY_TMDB_TOKEN`]: blank means "keep what
@@ -148,6 +163,25 @@ pub fn parse_flag(value: &str) -> bool {
         value.trim().to_ascii_lowercase().as_str(),
         "1" | "true" | "yes" | "on"
     )
+}
+
+/// Whether every side effect is currently switched off.
+///
+/// **Fails closed.** A database brarr cannot read is not a licence to go
+/// and download things; the one caller that would rather keep working is
+/// the one rendering a screen, and it does not ask.
+pub async fn is_paused(pool: &Pool) -> bool {
+    match get_all(pool).await {
+        Ok(stored) => stored.get(KEY_PAUSED).is_some_and(|v| parse_flag(v)),
+        Err(e) => {
+            tracing::warn!(
+                target: "brarr_orchestrator::settings",
+                error = %e,
+                "could not read the pause switch — treating brarr as paused"
+            );
+            true
+        }
+    }
 }
 
 fn row_to_setting(row: &SqliteRow) -> Result<SettingRow, AppError> {

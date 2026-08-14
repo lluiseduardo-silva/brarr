@@ -281,6 +281,10 @@ async fn probe_all(state: &AppState, grabs: Vec<Grab>) -> Result<Vec<QueueEntry>
 ///
 /// Returns [`AppError::Database`] on a DB failure.
 pub async fn sync_once(state: &AppState) -> Result<SyncSummary, AppError> {
+    // Advancing a grab can fail it, which is a write.
+    if crate::db::settings::is_paused(state.pool()).await {
+        return Ok(SyncSummary::default());
+    }
     let entries = snapshot(state).await?;
     let mut summary = SyncSummary::default();
     let now = OffsetDateTime::now_utc();

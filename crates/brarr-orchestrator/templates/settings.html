@@ -94,6 +94,38 @@
    filled. #}
 <form method="post" action="/settings/general" class="space-y-6">
 
+    {# O interruptor geral. Fica na primeira seção porque a razão de
+       procurá-lo é urgente: algo está gravando errado e precisa parar
+       agora. Ele mora aqui e não em spawns comentados justamente para
+       poder voltar sem novo deploy. #}
+    <section class="settings-section {% if section != "acesso" %}hidden{% endif %} card-hairline bg-bg-surface border {% if values.paused %}border-warning-solid{% else %}border-border-default{% endif %} rounded-xl p-5">
+        <header class="mb-4">
+            <div class="flex items-center gap-2">
+                <h2 class="text-lg font-semibold text-fg-primary">Operação</h2>
+                {% if values.paused %}
+                <span class="badge bg-warning-soft text-warning-soft-fg">pausado</span>
+                {% endif %}
+            </div>
+            <p class="text-xs text-fg-muted mt-1">
+                Pausar desliga <strong>todos</strong> os efeitos: nada é buscado, reservado,
+                entregue a cliente de download, importado, vinculado a episódio ou marcado como
+                ausente. Ler continua funcionando — a interface inteira segue utilizável, que é
+                justamente o motivo de pausar.
+            </p>
+        </header>
+        <label class="flex items-start gap-3">
+            <input type="checkbox" name="paused" value="1" {% if values.paused %}checked{% endif %}
+                   class="mt-0.5">
+            <span>
+                <span class="block text-sm text-fg-primary">Pausar o brarr</span>
+                <span class="block mt-1 text-[11px] text-fg-muted">
+                    Reservas em voo não são consumidas: a entrega devolve o alvo em vez de queimar
+                    a chave da barreira, então retomar não deixa nada para limpar.
+                </span>
+            </span>
+        </label>
+    </section>
+
     <section class="settings-section {% if section != "acesso" %}hidden{% endif %} card-hairline bg-bg-surface border border-border-default rounded-xl p-5">
         <header class="mb-4">
             <h2 class="text-lg font-semibold text-fg-primary">Conectividade</h2>

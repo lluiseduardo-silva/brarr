@@ -153,6 +153,12 @@
 
     {# Authenticated pages live inside `main`; the centred-card pages
        (login, 404) override `main` with their own layout. #}
+    {# Aviso de pausa. Buscado em vez de renderizado aqui porque este
+       arquivo é herdado por toda tela do app, e passar um flag por
+       trinta structs para dizer uma frase não se paga. Ele mesmo se
+       re-pergunta, então uma pausa feita em outra aba aparece aqui. #}
+    <div id="pause-banner" hx-get="/pause-banner" hx-trigger="load, every 60s" hx-swap="outerHTML"></div>
+
     {% block main %}
     <main class="flex-1 app-shell px-8 py-8">
         {% block content %}{% endblock %}

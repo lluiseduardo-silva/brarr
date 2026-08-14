@@ -1113,6 +1113,8 @@ pub struct SettingsTemplate {
     reason = "one badge per independent credential or toggle on a form of thirty fields — they answer different questions and collapsing them into an enum would say a form can only be in one state at a time"
 )]
 pub struct SettingsValues {
+    /// Every side effect is switched off.
+    pub paused: bool,
     /// `true` when an admin token is currently configured. Drives the
     /// "auth enabled / disabled" badge and hides the token-rotation
     /// form's `current_token` requirement when there's nothing to

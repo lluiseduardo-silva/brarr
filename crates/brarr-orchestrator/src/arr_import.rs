@@ -720,6 +720,12 @@ pub struct FileCounts {
     /// Sonarr knows an absolute-numbered anime file is S04E07, and the
     /// name does not say so. See [`crate::relink`].
     pub relinked: usize,
+    /// Adoptions dropped because the \*arr no longer pairs that file with
+    /// that episode. What a corrected numbering leaves behind: since a
+    /// file may cover two episodes the barrier does not refuse the same
+    /// path against a different one, so the right row would otherwise
+    /// land beside the wrong one instead of replacing it.
+    pub repaired: usize,
     /// Files whose translated path brarr cannot see.
     pub missing: usize,
     /// Files no mapping covers *and* that are not where the \*arr says.
@@ -1098,6 +1104,7 @@ async fn adopt_files(
     };
 
     let mut counts = FileCounts::default();
+    let mut covered: HashMap<String, Vec<Uuid>> = HashMap::new();
     for file in files {
         let local = locate(file, rules).await;
         if !local.present {
@@ -1134,6 +1141,30 @@ async fn adopt_files(
             Recorded::Adopted => counts.adopted += 1,
             Recorded::Already => counts.already += 1,
             Recorded::Relinked => counts.relinked += 1,
+        }
+        if let Some(id) = episode_id {
+            covered
+                .entry(local.path.to_string_lossy().into_owned())
+                .or_default()
+                .push(id);
+        }
+    }
+
+    // Anything else recorded for one of these paths is stale. A file may
+    // legitimately cover two episodes, so the barrier no longer refuses
+    // the same path against a different one — which means a corrected
+    // numbering *adds* the right row and leaves the wrong one beside it
+    // rather than replacing it. The \*arr's pairing says which episodes
+    // a file covers; nothing else brarr stored for it survives that.
+    for (path, keep) in &covered {
+        let dropped = grabs::prune_stale_local(pool, item.id, path, keep).await?;
+        if dropped > 0 {
+            counts.repaired += usize::try_from(dropped).unwrap_or(usize::MAX);
+            info!(
+                target: "brarr_orchestrator::arr_import",
+                item = %item.id, path, dropped,
+                "dropped adoptions the *arr no longer pairs with this file"
+            );
         }
     }
     Ok(counts)
@@ -1208,14 +1239,42 @@ async fn repair(
     else {
         return Ok(Recorded::Already);
     };
-    if stored.episode_id.is_some() {
+    // A row already pointing at the episode the *arr names is simply
+    // correct, and the common case.
+    if stored.episode_id == Some(episode_id) {
         return Ok(Recorded::Already);
     }
-    match grabs::relink_episode(pool, stored.id, episode_id).await? {
+
+    // Two different repairs, and the difference is what the row lost.
+    //
+    // A blank episode is the metadata-refresh damage `relink` documents:
+    // fill it, never move it, because the evidence there is a file name.
+    //
+    // A *wrong* episode is what a corrected numbering leaves behind, and
+    // the path key means a re-run would otherwise report "already
+    // adopted" and stop. Moving it is safe precisely here: the *arr's
+    // own pairing is the strongest evidence brarr has, which is the
+    // whole reason this module reads from the *arr rather than the disk.
+    let outcome = if stored.episode_id.is_none() {
+        grabs::relink_episode(pool, stored.id, episode_id).await?
+    } else {
+        let moved = grabs::repoint_episode(pool, stored.id, episode_id).await?;
+        if moved == grabs::Relink::Linked {
+            info!(
+                target: "brarr_orchestrator::arr_import",
+                %item_id, path,
+                from = ?stored.episode_id, to = %episode_id,
+                "moved an adopted file to the episode the *arr pairs it with"
+            );
+        }
+        moved
+    };
+
+    match outcome {
         grabs::Relink::Linked => {
             debug!(
                 target: "brarr_orchestrator::arr_import",
-                %item_id, path, "re-pointed an orphaned file at the episode the *arr paired it with"
+                %item_id, path, "re-pointed a file at the episode the *arr paired it with"
             );
             Ok(Recorded::Relinked)
         }
@@ -1371,6 +1430,11 @@ async fn run_cycle(state: &AppState) {
 /// Returns [`AppError::Database`] when the instance list cannot be read.
 /// A failure on one *instance* is logged and the sweep continues.
 pub async fn sync_all(state: &AppState) -> Result<ImportReport, AppError> {
+    // No bindings are written while paused — the *arr sweep is the one
+    // that records which file is which episode.
+    if crate::db::settings::is_paused(state.pool()).await {
+        return Ok(ImportReport::default());
+    }
     let sources = arr_instances::list_sync_sources(state.pool()).await?;
     let mut total = ImportReport::default();
     let mut seen: HashSet<Uuid> = HashSet::new();
@@ -1772,6 +1836,78 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// **Kaiju No. 8's repair.** A corrected numbering does not heal
+    /// what the previous one recorded: the local barrier is keyed on the
+    /// path, so a re-run finds the file already adopted and stops. Ten
+    /// of its files sat one episode too high until the \*arr pass could
+    /// move them.
+    ///
+    /// Filling a blank and moving a wrong binding are different repairs
+    /// with different evidence, and only the second is allowed here —
+    /// `relink`, which guesses from a file name, still may not move.
+    #[tokio::test]
+    async fn a_file_bound_to_the_wrong_episode_is_moved_to_the_right_one() {
+        let pool = open_memory().await.unwrap();
+        let item = seed_flat_series(&pool, 23).await;
+        let dir = std::env::temp_dir().join(format!("brarr-arrimport-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("kaiju-s02e01.mkv"), b"x").unwrap();
+        let rules = vec![PrefixRule {
+            id: Uuid::nil(),
+            remote_prefix: "/data/Animes".to_owned(),
+            local_prefix: dir.clone(),
+        }];
+
+        let episodes = library::episodes(&pool, item.id).await.unwrap();
+        let at = |n: i32| episodes.iter().find(|e| e.episode_number == n).unwrap().id;
+
+        // What the shifted absolute axis recorded: the file of canonical
+        // 13 bound to canonical 14.
+        let wrong = grabs::reserve_local(
+            &pool,
+            &grabs::LocalGrab {
+                item_id: item.id,
+                episode_id: Some(at(14)),
+                source_path: dir.join("kaiju-s02e01.mkv").to_str().unwrap(),
+                release_name: "kaiju-s02e01.mkv",
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        grabs::mark_imported(
+            &pool,
+            wrong.id,
+            dir.join("kaiju-s02e01.mkv").to_str().unwrap(),
+        )
+        .await
+        .unwrap();
+
+        // Sonarr pairs that file with its S02E01, which is canonical 13.
+        let files = vec![ArrFileRef {
+            path: "/data/Animes/kaiju-s02e01.mkv".to_owned(),
+            episode: Some((1, 13)),
+            absolute: Some(14),
+        }];
+        let counts = adopt_files(&pool, &item, &files, &rules).await.unwrap();
+        assert_eq!(counts.repaired, 1, "{counts:?}");
+
+        let live = grabs::live_for_item(&pool, item.id).await.unwrap();
+        assert_eq!(live.len(), 1, "moved, not duplicated");
+        assert_eq!(
+            live[0].episode_id,
+            Some(at(13)),
+            "the *arr's pairing is the authority on which file is which episode"
+        );
+
+        // Idempotent: a second pass finds it already correct.
+        let again = adopt_files(&pool, &item, &files, &rules).await.unwrap();
+        assert_eq!(again.repaired, 0);
+        assert_eq!(again.already, 1);
+
         std::fs::remove_dir_all(&dir).ok();
     }
 

@@ -151,6 +151,10 @@ pub struct ScanSummary {
     /// most: a series imported without a TVDB id can never be swept, and
     /// the badge said the trackers had nothing.
     pub no_search_axis: bool,
+    /// The operator switched brarr off. A **fourth** way to do nothing,
+    /// and the one most likely to be forgotten — which is exactly why it
+    /// gets its own answer instead of joining "nada encontrado".
+    pub paused: bool,
     /// `(target, reason)` for everything that went wrong — a dead
     /// client, a provider error, a release the client refused.
     pub failures: Vec<(String, String)>,
@@ -193,6 +197,10 @@ pub fn spawn(state: AppState) -> JoinHandle<()> {
 /// One scheduled sweep. Errors are logged, never propagated — a
 /// transient DB or tracker hiccup must not kill the long-lived task.
 async fn run_one_cycle(state: &AppState) {
+    // Nothing is searched, reserved or delivered while paused.
+    if crate::db::settings::is_paused(state.pool()).await {
+        return;
+    }
     // Nothing to deliver to means every reservation would immediately be
     // released again. Skipping keeps brarr inert for anyone who has not
     // configured a client yet.
@@ -254,6 +262,12 @@ pub async fn run_once_for_item(
     state: &AppState,
     item: &LibraryItem,
 ) -> Result<ScanSummary, AppError> {
+    if crate::db::settings::is_paused(state.pool()).await {
+        return Ok(ScanSummary {
+            paused: true,
+            ..ScanSummary::default()
+        });
+    }
     let mut budget = usize::MAX;
     scan_item(state, item, &mut budget, Scope::Item).await
 }
@@ -313,6 +327,12 @@ pub async fn run_once_for_target(
     item: &LibraryItem,
     scope: Scope,
 ) -> Result<ScanSummary, AppError> {
+    if crate::db::settings::is_paused(state.pool()).await {
+        return Ok(ScanSummary {
+            paused: true,
+            ..ScanSummary::default()
+        });
+    }
     let mut budget = usize::MAX;
     scan_item(state, item, &mut budget, scope).await
 }

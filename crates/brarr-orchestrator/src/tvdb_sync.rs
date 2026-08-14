@@ -241,6 +241,9 @@ pub async fn sync_item(
 /// Returns [`AppError`] only for failures that affect the whole sweep —
 /// no credentials, or the database.
 pub async fn sync_all(state: &AppState) -> Result<SyncReport, AppError> {
+    if crate::db::settings::is_paused(state.pool()).await {
+        return Ok(SyncReport::default());
+    }
     let pool = state.pool();
     let tvdb = client(pool).await?;
     let mut report = SyncReport::default();

@@ -13,16 +13,22 @@
 //!
 //! 1. **Canonical.** The coordinate as given. Every title where the two
 //!    numberings agree resolves here and nothing below ever runs.
-//! 2. **Absolute**, and only when the catalogue tree is a *single*
-//!    season. That condition is not a heuristic: a one-season tree is
-//!    precisely the shape TMDB produces when it flattens a series into
-//!    airing order, and airing order is what an absolute number counts.
-//!    Sonarr carries `absoluteEpisodeNumber` on **every** episode of this
-//!    operator's anime catalogue, so this tier alone answers the fifteen
-//!    affected series that have no episode group applied.
-//! 3. **The applied episode group**, read backwards. Covers a title whose
-//!    alternate ordering is not plain absolute — an arc split where the
-//!    operator picked the ordering by hand.
+//! 2. **The applied numbering**, read backwards. It is derived for this
+//!    exact title with the air date arbitrating, so where it has an
+//!    answer it is the better one.
+//! 3. **Absolute**, and only when the catalogue tree is a *single*
+//!    season — the shape TMDB produces when it flattens a series into
+//!    airing order. This answers every title whose numbering nobody has
+//!    derived yet, which is most of them.
+//!
+//! **The last two used to be the other way round, and this module called
+//! the absolute axis "not a heuristic".** It is one. `TheTVDB` gives
+//! absolute 13 to a Kaiju No. 8 special it files under season 0, so its
+//! `S02E01` carries absolute 14 — and the absolute tier bound that file
+//! to canonical 14. Every file above it landed one episode too high,
+//! canonical 13 got nothing, and `S02E10` and `S02E11` both resolved
+//! onto canonical 23: two files on one episode, one of them silently
+//! ignored. Nothing errored, and the library simply read wrong.
 //!
 //! **Canonical first is the whole safety argument.** Os Simpsons has 801
 //! files and thirty-seven seasons that both sides agree on; every one of
@@ -113,15 +119,34 @@ impl EpisodeMatcher {
         if let Some(id) = self.tree.get(&(season, episode)) {
             return Some(*id);
         }
+        // **The applied numbering outranks the absolute axis**, and the
+        // order used to be the other way round. The table is derived for
+        // this exact title with the air date arbitrating; the absolute
+        // number is a generic inference that this module wrongly called
+        // "not a heuristic". Where the table has an answer it is the
+        // better one, always.
+        //
+        // Kaiju No. 8 is what the old order cost: TheTVDB gives absolute
+        // 13 to a special, so its `S02E01` carries absolute 14 and the
+        // absolute tier bound that file to canonical 14. Every file from
+        // there up landed one episode too high, canonical 13 got
+        // nothing, and `S02E10` and `S02E11` both resolved onto
+        // canonical 23 — two files on one episode, one of them silently
+        // ignored.
+        if let Some(canonical) = self.reverse.get(&(season, episode))
+            && let Some(id) = self.tree.get(&(canonical.season, canonical.episode))
+        {
+            return Some(*id);
+        }
+        // Last: a title with no ordering applied has an empty table, and
+        // this is the tier that answers every anime whose numbering
+        // nobody has derived yet.
         if let (Some(flat), Some(abs)) = (self.flat_season, absolute)
             && let Some(id) = self.tree.get(&(flat, abs))
         {
             return Some(*id);
         }
-        let canonical = self.reverse.get(&(season, episode))?;
-        self.tree
-            .get(&(canonical.season, canonical.episode))
-            .copied()
+        None
     }
 
     /// Whether an alternate ordering is in play for this title.
@@ -354,6 +379,55 @@ mod tests {
         map.extend(tree(&[(0, 2)]));
         let wanted = *map.get(&(1, 47)).unwrap();
         let matcher = EpisodeMatcher::from_tree(map, HashMap::new());
+        assert_eq!(matcher.resolve(4, 1, Some(47)), Some(wanted));
+    }
+
+    /// **Kaiju No. 8's files.** The applied numbering has to beat the
+    /// absolute axis, not the other way round.
+    ///
+    /// `TheTVDB` gives absolute 13 to a special, so its `S02E01` carries
+    /// absolute 14. Under the old order that file bound to canonical 14,
+    /// every file above it landed one episode too high, canonical 13 got
+    /// nothing, and `S02E10` (absolute 23) collided with `S02E11` on
+    /// canonical 23 — two files on one episode and one of them dropped.
+    ///
+    /// Run against the absolute-first version this fails on the first
+    /// assertion, which is exactly what reached the operator's screen.
+    #[test]
+    fn the_applied_numbering_beats_a_shifted_absolute_number() {
+        let tree = tree(&[(1, 23)]);
+        let thirteenth = *tree.get(&(1, 13)).unwrap();
+        let twentysecond = *tree.get(&(1, 22)).unwrap();
+        let twentythird = *tree.get(&(1, 23)).unwrap();
+
+        // The table, as `derive_numbering` now builds it: arc 2 starts at
+        // canonical 13.
+        let mut reverse = HashMap::new();
+        for (within, canonical) in (13..=23).enumerate() {
+            reverse.insert(
+                (2, i32::try_from(within).unwrap() + 1),
+                Numbering {
+                    season: 1,
+                    episode: canonical,
+                },
+            );
+        }
+        let matcher = EpisodeMatcher::from_tree(tree, reverse);
+
+        // Sonarr's S02E01 carries absolute 14 and is canonical 13.
+        assert_eq!(matcher.resolve(2, 1, Some(14)), Some(thirteenth));
+        // And the two that used to collide now land one apart.
+        assert_eq!(matcher.resolve(2, 10, Some(23)), Some(twentysecond));
+        assert_eq!(matcher.resolve(2, 11, Some(24)), Some(twentythird));
+    }
+
+    /// The absolute axis still answers when no ordering is applied —
+    /// which is every anime whose numbering nobody has derived yet.
+    #[test]
+    fn the_absolute_axis_still_answers_an_untranslated_title() {
+        let tree = tree(&[(1, 131)]);
+        let wanted = *tree.get(&(1, 47)).unwrap();
+        let matcher = EpisodeMatcher::from_tree(tree, HashMap::new());
         assert_eq!(matcher.resolve(4, 1, Some(47)), Some(wanted));
     }
 

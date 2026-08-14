@@ -105,6 +105,9 @@ pub fn spawn(state: AppState) -> JoinHandle<()> {
 }
 
 async fn run_one_cycle(state: &AppState) -> Result<(), AppError> {
+    if crate::db::settings::is_paused(state.pool()).await {
+        return Ok(());
+    }
     let arr_rows = arr_instances::list_enabled(state.pool()).await?;
     if arr_rows.is_empty() {
         debug!(

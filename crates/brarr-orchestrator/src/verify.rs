@@ -96,6 +96,10 @@ pub fn spawn(state: AppState) -> JoinHandle<()> {
 /// Returns [`AppError::Database`] when the grab list cannot be read or a
 /// finding cannot be recorded.
 pub async fn run_once(state: &AppState) -> Result<VerifySummary, AppError> {
+    // Marking a file missing is a write, and a wrong one is expensive.
+    if crate::db::settings::is_paused(state.pool()).await {
+        return Ok(VerifySummary::default());
+    }
     let imported = grabs::imported_present(state.pool()).await?;
     if imported.is_empty() {
         return Ok(VerifySummary::default());

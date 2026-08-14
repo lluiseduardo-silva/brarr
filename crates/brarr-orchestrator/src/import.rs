@@ -191,6 +191,10 @@ pub fn spawn(state: AppState) -> JoinHandle<()> {
 /// Returns [`AppError::Database`] when the grab list cannot be read.
 /// Per-grab problems become an [`ImportOutcome`], not an error.
 pub async fn import_pending(state: &AppState) -> Result<ImportSummary, AppError> {
+    // Nothing is written to the operator's files while paused.
+    if crate::db::settings::is_paused(state.pool()).await {
+        return Ok(ImportSummary::default());
+    }
     let pending = grabs::awaiting_import(state.pool()).await?;
     let mut summary = ImportSummary::default();
     for grab in pending.into_iter().take(MAX_IMPORTS_PER_PASS) {

@@ -128,6 +128,7 @@ pub fn router(state: AppState, static_dir: &std::path::Path) -> Router {
         .route("/library/{id}/numbering", post(library_numbering))
         .route("/library/{id}/numbering/tvdb", post(library_numbering_tvdb))
         .route("/library/{id}/numbering/auto", post(library_numbering_auto))
+        .route("/pause-banner", get(pause_banner))
         .route("/library/{id}/refresh", post(library_refresh))
         .route("/library/{id}/scan", post(library_scan_now))
         .route("/library/{id}/scan/status", get(library_scan_status))
@@ -3058,6 +3059,40 @@ async fn library_numbering(
     groups_panel(&state, &item, rows, episodes, active, failure).await
 }
 
+/// `GET /pause-banner` — the strip that says brarr is switched off.
+///
+/// **A forgotten pause is the worst shape a defect can take**: every
+/// screen keeps working, nothing errors, and the operator concludes the
+/// feature is broken. So it is loud, it is on every page, and it
+/// re-asks — a pause set from another tab shows up here within the
+/// minute.
+///
+/// Fetched rather than rendered inline because `base.html` is inherited
+/// by every template in the app, and threading a flag through all of
+/// them to say one sentence is a change to thirty structs for nothing.
+async fn pause_banner(State(state): State<AppState>) -> Response {
+    if !settings::is_paused(state.pool()).await {
+        // Still re-asks: the operator may pause from another tab.
+        return html_string(
+            "<div id=\"pause-banner\" hx-get=\"/pause-banner\" \
+             hx-trigger=\"every 60s\" hx-swap=\"outerHTML\"></div>"
+                .to_owned(),
+        );
+    }
+    html_string(
+        "<div id=\"pause-banner\" hx-get=\"/pause-banner\" hx-trigger=\"every 20s\" \
+         hx-swap=\"outerHTML\" \
+         class=\"app-shell px-8 py-3\">\
+           <div class=\"px-4 py-3 rounded-md bg-warning-soft text-warning-soft-fg text-sm\">\
+             <strong>O brarr está pausado.</strong> Nada é buscado, baixado, importado ou \
+             vinculado. A leitura continua normal. \
+             <a href=\"/settings?s=acesso\" class=\"underline\">Retomar em Configurações</a>.\
+           </div>\
+         </div>"
+            .to_owned(),
+    )
+}
+
 /// `POST /library/{id}/numbering/auto` — hand this title back to the
 /// sweeps.
 ///
@@ -3295,6 +3330,17 @@ async fn library_scan_status(
 /// Shared by the synchronous answer and the polled one, so a sweep that
 /// beat [`MANUAL_SCAN_WAIT`] and one that did not read identically.
 fn scan_badge(summary: &crate::scan::ScanSummary) -> PingBadge {
+    // First, and above even the grab count: a paused brarr did nothing
+    // for a reason the operator set and may well have forgotten. Every
+    // other answer here would be a lie about the trackers.
+    if summary.paused {
+        return PingBadge {
+            ok: false,
+            label: "pausado".to_string(),
+            detail: "o brarr está pausado em Configurações — nada é buscado, baixado ou importado"
+                .to_string(),
+        };
+    }
     if summary.grabbed > 0 {
         PingBadge {
             ok: true,
@@ -5336,6 +5382,7 @@ async fn load_settings_values(state: &AppState) -> Result<SettingsValues, AppErr
         .map(|p| (p.id.to_string(), p.name))
         .collect();
     Ok(SettingsValues {
+        paused: settings::is_paused(state.pool()).await,
         auth_enabled: state.auth().is_enabled(),
         bypass_auth_from: get(settings::KEY_BYPASS_AUTH_FROM),
         trusted_proxies: get(settings::KEY_TRUSTED_PROXIES),
@@ -5451,6 +5498,10 @@ struct SettingsGeneralForm {
     tmdb_country: String,
     #[serde(default)]
     tmdb_ttl_days: String,
+    /// Checkbox: present when ticked, absent when not — so it is written
+    /// unconditionally from its presence rather than from a value.
+    #[serde(default)]
+    paused: String,
     // Same contract as `tmdb_token`: blank keeps the stored key.
     #[serde(default)]
     tvdb_api_key: String,
@@ -5670,6 +5721,20 @@ async fn settings_general(
     // echoes it back, so a blank box means "leave it alone" rather than
     // "clear it". The other three are plain overrides and blanking them
     // legitimately falls back to the defaults.
+    // A checkbox is absent when unticked, so this writes from presence.
+    // Unconditional on purpose: it is the one setting whose *off* state
+    // has to be storable, or brarr could be paused and never resumed.
+    settings::set(
+        pool,
+        settings::KEY_PAUSED,
+        if form.paused.trim().is_empty() {
+            "0"
+        } else {
+            "1"
+        },
+    )
+    .await?;
+
     // The PIN is not a secret the way the key is — it is per-subscriber
     // and only meaningful for a user-supported key — so it is written
     // unconditionally, blank included, and clearing it is possible.

@@ -1192,6 +1192,97 @@ pub async fn relink_episode(pool: &Pool, id: Uuid, episode_id: Uuid) -> Result<R
     }
 }
 
+/// Drop adopted rows for `path` that name an episode `keep` does not.
+///
+/// **The repair a corrected numbering needs.** Since one file may cover
+/// two episodes (`20260813120000`), the local barrier no longer refuses
+/// the same path against a different episode — so re-running the \*arr
+/// import under a fixed numbering *adds* the right row and leaves the
+/// wrong one beside it. Kaiju No. 8 would have ended with 21 rows for 11
+/// files, half of them pointing one episode too high.
+///
+/// The \*arr's pairing is the authority on which episodes a file covers,
+/// which is this module's founding premise; anything else recorded for
+/// that path is stale by definition.
+///
+/// **Deleting an in-place adoption touches no file** — source and
+/// destination are the same path, which is what `is_in_place` reads —
+/// so the worst case is a row the next sweep records again.
+///
+/// A `keep` that is empty deletes nothing: "the \*arr paired this file
+/// with no episode" is not a statement that brarr's rows are wrong, it
+/// is the absence of a statement.
+///
+/// # Errors
+///
+/// Returns [`AppError::Database`] on SQL failure.
+pub async fn prune_stale_local(
+    pool: &Pool,
+    item_id: Uuid,
+    path: &str,
+    keep: &[Uuid],
+) -> Result<u64, AppError> {
+    if keep.is_empty() {
+        return Ok(0);
+    }
+    let placeholders = vec!["?"; keep.len()].join(", ");
+    let sql = format!(
+        "DELETE FROM grabs \
+         WHERE item_id = ? AND release_id_remote = ? AND protocol = 'local' \
+           AND episode_id IS NOT NULL AND episode_id NOT IN ({placeholders})"
+    );
+    let mut query = sqlx::query(&sql).bind(item_id.to_string()).bind(path);
+    for id in keep {
+        query = query.bind(id.to_string());
+    }
+    Ok(query.execute(pool).await?.rows_affected())
+}
+
+/// Move an **adopted local file** from one episode to another.
+///
+/// The deliberate exception to [`relink_episode`]'s rule that a binding
+/// is only ever filled, never moved. That rule is right where the
+/// evidence is a file name — [`crate::relink`] guesses from a marker and
+/// a wrong guess looks correct — and wrong here, because the \*arr's own
+/// file-to-episode pairing is the strongest evidence brarr has and is
+/// the founding premise of [`crate::arr_import`].
+///
+/// It exists because a corrected numbering does not heal what the
+/// previous one recorded: `reserve_local` is keyed on the path, so a
+/// re-run reports the file as already adopted and stops. Kaiju No. 8 sat
+/// with ten files one episode too high and two files on one episode
+/// until this could move them.
+///
+/// **Restricted to `protocol = 'local'` and to a row that already holds
+/// a file where it stands.** A tracker grab is acquisition history and a
+/// download in flight has a target it was reserved against; neither is
+/// something a metadata sweep may re-point.
+///
+/// # Errors
+///
+/// Returns [`AppError::Database`] on SQL failure.
+pub async fn repoint_episode(pool: &Pool, id: Uuid, episode_id: Uuid) -> Result<Relink, AppError> {
+    let now = OffsetDateTime::now_utc().unix_timestamp();
+    let res = sqlx::query(
+        "UPDATE grabs SET episode_id = ?, updated_at = ? \
+         WHERE id = ? AND protocol = 'local' AND episode_id IS NOT NULL \
+           AND episode_id IS NOT ?",
+    )
+    .bind(episode_id.to_string())
+    .bind(now)
+    .bind(id.to_string())
+    .bind(episode_id.to_string())
+    .execute(pool)
+    .await;
+    match res {
+        Ok(done) if done.rows_affected() > 0 => Ok(Relink::Linked),
+        // The episode already has this exact file under another row.
+        Err(sqlx::Error::Database(e)) if e.is_unique_violation() => Ok(Relink::Occupied),
+        Err(e) => Err(e.into()),
+        Ok(_) => Ok(Relink::AlreadyLinked),
+    }
+}
+
 /// Grabs taken for an episode that no longer name one, and hold a file.
 ///
 /// This is the shape a metadata refresh left behind. Before `scope`

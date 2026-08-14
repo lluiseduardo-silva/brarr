@@ -239,6 +239,58 @@ async fn get(addr: SocketAddr, path: &str) -> String {
         .unwrap()
 }
 
+/// **The switch really switches everything off.**
+///
+/// Gated at each point of effect rather than only in the loops, so a
+/// button on a screen is as paused as the sweep behind it — this asserts
+/// the button, because that is the half a loop-only guard would miss.
+///
+/// And the badge says *why*. A paused brarr that answered "nada
+/// encontrado" would blame the trackers for a decision the operator made
+/// and probably forgot, which is the failure this repository has already
+/// fixed three times under other names.
+#[tokio::test]
+async fn pausing_stops_the_sweep_and_says_so() {
+    use brarr_orchestrator::db::settings;
+    use brarr_orchestrator::scan;
+
+    let (addr, state) = spawn().await;
+    let item_id = seed_series(&state).await;
+    let item = library::get_by_id(state.pool(), item_id).await.unwrap();
+
+    settings::set(state.pool(), settings::KEY_PAUSED, "1")
+        .await
+        .unwrap();
+    assert!(settings::is_paused(state.pool()).await);
+
+    let summary = scan::run_once_for_item(&state, &item).await.unwrap();
+    assert!(summary.paused, "{summary:?}");
+    assert_eq!(summary.targets, 0, "nothing was even looked at");
+    assert_eq!(summary.searches, 0);
+    assert_eq!(summary.grabbed, 0);
+    assert!(
+        grabs::live_for_item(state.pool(), item_id)
+            .await
+            .unwrap()
+            .is_empty(),
+        "a paused sweep reserves nothing"
+    );
+
+    // Loud, on every page, and it re-asks — a pause set in another tab
+    // has to surface without a reload.
+    let banner = get(addr, "/pause-banner").await;
+    assert!(banner.contains("O brarr está pausado"), "{banner}");
+    assert!(banner.contains("hx-trigger"), "the banner keeps asking");
+
+    // And back: the switch has to be a switch, not a trapdoor.
+    settings::set(state.pool(), settings::KEY_PAUSED, "0")
+        .await
+        .unwrap();
+    assert!(!settings::is_paused(state.pool()).await);
+    let resumed = scan::run_once_for_item(&state, &item).await.unwrap();
+    assert!(!resumed.paused);
+}
+
 /// **Kaiju No. 8's shape, on screen.**
 ///
 /// TMDB flattens the series and the scene cuts it in two, so canonical
