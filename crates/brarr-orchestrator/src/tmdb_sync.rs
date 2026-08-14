@@ -12,6 +12,7 @@
 //! functions only ever write TMDB-owned columns. Monitoring, profile and
 //! root folder belong to the operator and are set elsewhere.
 
+use brarr_core::{ExternalId, MetadataSource};
 use brarr_tmdb::{MovieDetails, SeasonDetails, TmdbClient, TmdbError, TvDetails};
 use time::{Date, OffsetDateTime, Time};
 use uuid::Uuid;
@@ -20,7 +21,9 @@ use crate::{
     AppError,
     db::{
         Pool,
-        library::{self, LibraryItem, MediaType, NewEpisode, NewLibraryItem, NewSeason},
+        library::{
+            self, LibraryItem, MediaType, NewEpisode, NewLibraryItem, NewSeason, ProductionStatus,
+        },
         settings,
     },
     structure,
@@ -74,23 +77,67 @@ pub fn canonical_imdb(raw: &str) -> Option<String> {
     }
 }
 
+/// The ids a TMDB payload carries, as a set.
+///
+/// An id that will not build is **dropped rather than propagated**: the
+/// constructor already refuses the shapes TMDB does not emit, and the
+/// alternative — failing the whole conversion — would keep a title out
+/// of the catalogue because one of its three ids was malformed.
+/// `upsert` refuses an empty set, so a payload with nothing usable still
+/// cannot produce an unnameable row.
+fn identity(tmdb: i64, imdb: Option<&str>, thetvdb: Option<i64>) -> Vec<ExternalId> {
+    let mut ids = Vec::with_capacity(3);
+    if let Ok(id) = ExternalId::new(MetadataSource::Tmdb, &tmdb.to_string()) {
+        ids.push(id);
+    }
+    if let Some(raw) = imdb.and_then(canonical_imdb)
+        && let Ok(id) = ExternalId::new(MetadataSource::Imdb, &raw)
+    {
+        ids.push(id);
+    }
+    if let Some(raw) = thetvdb
+        && let Ok(id) = ExternalId::new(MetadataSource::Tvdb, &raw.to_string())
+    {
+        ids.push(id);
+    }
+    ids
+}
+
+/// TMDB's status words, in brarr's vocabulary.
+///
+/// The mapping lives here rather than in `db::library` because it is
+/// **one provider's dialect**: TheTVDB says `Continuing` for what TMDB
+/// calls `Returning Series`, and a column that accepts both is a column
+/// whose comparisons depend on who wrote the row. An unrecognised word
+/// reads as unknown rather than being stored raw — the same rule the
+/// CHECK enforces one layer down.
+fn status_of(raw: Option<&str>) -> Option<ProductionStatus> {
+    match raw?.trim() {
+        "Returning Series" => Some(ProductionStatus::Returning),
+        "Ended" => Some(ProductionStatus::Ended),
+        "Canceled" | "Cancelled" => Some(ProductionStatus::Cancelled),
+        "In Production" | "Post Production" => Some(ProductionStatus::InProduction),
+        "Released" => Some(ProductionStatus::Released),
+        "Planned" | "Rumored" => Some(ProductionStatus::Announced),
+        _ => None,
+    }
+}
+
 /// TMDB movie → library row input.
 #[must_use]
 pub fn movie_to_item(details: &MovieDetails) -> NewLibraryItem {
     NewLibraryItem {
         media_type: Some(MediaType::Movie),
-        tmdb_id: details.tmdb_id,
-        imdb_id: details.imdb_id.as_deref().and_then(canonical_imdb),
-        // TMDB has no tvdb mapping for movies; leaving this Some would be
-        // a lie the UI would happily render.
-        tvdb_id: None,
+        // TMDB publishes no tvdb id for a film, so the set carries the
+        // two it has and no placeholder for the one it does not.
+        ids: identity(details.tmdb_id, details.imdb_id.as_deref(), None),
         title: details.title.clone(),
         original_title: details.original_title.clone(),
         year: details.release_date.map(Date::year),
         overview: details.overview.clone(),
         poster_path: details.poster_path.clone(),
         backdrop_path: details.backdrop_path.clone(),
-        tmdb_status: details.status.clone(),
+        status: status_of(details.status.as_deref()),
         runtime_minutes: details.runtime_minutes,
         next_air_date: None,
         digital_release_at: details.digital_release.map(at_midnight),
@@ -103,16 +150,14 @@ pub fn movie_to_item(details: &MovieDetails) -> NewLibraryItem {
 pub fn tv_to_item(details: &TvDetails) -> NewLibraryItem {
     NewLibraryItem {
         media_type: Some(MediaType::Tv),
-        tmdb_id: details.tmdb_id,
-        imdb_id: details.imdb_id.as_deref().and_then(canonical_imdb),
-        tvdb_id: details.tvdb_id,
+        ids: identity(details.tmdb_id, details.imdb_id.as_deref(), details.tvdb_id),
         title: details.name.clone(),
         original_title: details.original_name.clone(),
         year: details.first_air_date.map(Date::year),
         overview: details.overview.clone(),
         poster_path: details.poster_path.clone(),
         backdrop_path: details.backdrop_path.clone(),
-        tmdb_status: details.status.clone(),
+        status: status_of(details.status.as_deref()),
         runtime_minutes: details.episode_runtime,
         next_air_date: details.next_air_date.map(at_midnight),
         digital_release_at: None,
@@ -344,22 +389,48 @@ pub async fn refresh(
     item_id: Uuid,
 ) -> Result<LibraryItem, AppError> {
     let item = library::get_by_id(pool, item_id).await?;
+    // Asked of the identity set, not of a column. A title brarr holds
+    // under no TMDB id is one this refresh cannot do — and saying so is
+    // better than the `unwrap_or(0)` that a required column invited.
+    let tmdb_id = tmdb_id_of(pool, item_id).await?;
     match item.media_type {
-        MediaType::Movie => add_movie(pool, tmdb, item.tmdb_id).await,
+        MediaType::Movie => add_movie(pool, tmdb, tmdb_id).await,
         // The two facets have two owners, and a refresh has to ask each
         // of them its own question. Title, synopsis and artwork are
         // TMDB's and stay TMDB's; the shape belongs to whoever the item
-        // records, which for a flipped title is not TMDB — and handing
+        // records, which for a declared title is not TMDB — and handing
         // it TMDB's tree anyway is a write the source gate refuses, so
         // the title would simply stop refreshing.
         MediaType::Tv => {
-            let details = tmdb.tv(item.tmdb_id).await?;
+            let details = tmdb.tv(tmdb_id).await?;
             let refreshed = library::upsert(pool, &tv_to_item(&details)).await?;
             let tree = crate::metadata::owned::tree(pool, registry, refreshed.id).await?;
             structure::apply(pool, refreshed.id, &tree).await?;
             Ok(refreshed)
         }
     }
+}
+
+/// The TMDB id an item is catalogued under.
+///
+/// # Errors
+///
+/// [`AppError::InvalidInput`] when the item carries none. That is a real
+/// state now that identity is a set — a title only TheTVDB knows has no
+/// TMDB metadata to refresh — and naming it beats the alternative a
+/// required column produced, where the absence became id `0` and the
+/// request went out anyway.
+async fn tmdb_id_of(pool: &Pool, item_id: Uuid) -> Result<i64, AppError> {
+    let ids = crate::db::item_ids::for_item(pool, item_id).await?;
+    ids.iter()
+        .find(|stored| stored.id.source() == MetadataSource::Tmdb)
+        .and_then(|stored| stored.id.value().parse::<i64>().ok())
+        .ok_or_else(|| {
+            AppError::InvalidInput(
+                "este título não guarda um id do TMDB, que é de onde vêm título, sinopse e arte"
+                    .to_owned(),
+            )
+        })
 }
 
 /// Items whose metadata is older than the configured TTL, oldest first.
@@ -427,12 +498,20 @@ mod tests {
         }
     }
 
+    /// The ids a payload carries, as `source:value` for readable
+    /// assertions.
+    fn ids_of(item: &NewLibraryItem) -> Vec<String> {
+        item.ids
+            .iter()
+            .map(|id| format!("{}:{}", id.source().label(), id.value()))
+            .collect()
+    }
+
     #[test]
     fn movie_maps_dates_and_ids() {
         let item = movie_to_item(&movie());
         assert_eq!(item.media_type, Some(MediaType::Movie));
-        assert_eq!(item.tmdb_id, 603);
-        assert_eq!(item.imdb_id.as_deref(), Some("tt0133093"));
+        assert_eq!(ids_of(&item), vec!["tmdb:603", "imdb:tt0133093"]);
         assert_eq!(item.year, Some(1999));
         assert_eq!(item.runtime_minutes, Some(136));
         assert_eq!(
@@ -444,15 +523,20 @@ mod tests {
     #[test]
     fn a_movie_never_carries_a_tvdb_id() {
         // TMDB has no tvdb mapping for movies; inventing one would put a
-        // wrong chip on the detail screen.
-        assert_eq!(movie_to_item(&movie()).tvdb_id, None);
+        // wrong chip on the detail screen — and, now that the axis is
+        // resolved from the set, send a query no indexer answers.
+        assert!(
+            !ids_of(&movie_to_item(&movie()))
+                .iter()
+                .any(|id| id.starts_with("tvdb:"))
+        );
     }
 
     #[test]
     fn series_maps_tvdb_id_and_next_air_date() {
         let item = tv_to_item(&series());
         assert_eq!(item.media_type, Some(MediaType::Tv));
-        assert_eq!(item.tvdb_id, Some(355_567));
+        assert!(ids_of(&item).contains(&"tvdb:355567".to_owned()));
         assert_eq!(item.title, "The Boys");
         assert_eq!(item.year, Some(2019));
         assert_eq!(
@@ -586,8 +670,14 @@ mod tests {
         tmdb.verify_token().await.expect("credential must work");
 
         let matrix = add_movie(&pool, &tmdb, 603).await.unwrap();
-        assert_eq!(matrix.tmdb_id, 603);
-        assert_eq!(matrix.imdb_id.as_deref(), Some("tt0133093"));
+        let matrix_ids = crate::db::item_ids::for_item(&pool, matrix.id)
+            .await
+            .unwrap();
+        assert!(
+            matrix_ids
+                .iter()
+                .any(|s| s.id.source() == MetadataSource::Imdb && s.id.value() == "tt0133093")
+        );
         assert!(!matrix.title.is_empty());
 
         // No TheTVDB credential in this test, so the registry offers
@@ -597,7 +687,11 @@ mod tests {
             .await
             .unwrap();
         let boys = add_series(&pool, &tmdb, &registry, 76_479).await.unwrap();
-        assert_eq!(boys.tvdb_id, Some(355_567));
+        assert_eq!(
+            tmdb_id_of(&pool, boys.id).await.unwrap(),
+            76_479,
+            "catalogued under the id it was added by"
+        );
         let seasons = library::seasons(&pool, boys.id).await.unwrap();
         let episodes = library::episodes(&pool, boys.id).await.unwrap();
         assert!(seasons.len() >= 5, "got {} seasons", seasons.len());

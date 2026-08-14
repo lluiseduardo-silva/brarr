@@ -17,9 +17,9 @@
 --
 -- ## Why this is a `DROP COLUMN` and not a table rebuild
 --
--- `library_items` has five children — `library_seasons`,
--- `library_episodes`, `library_item_ids`, `library_item_facets` (CASCADE)
--- and `grabs` (SET NULL). `PRAGMA foreign_keys = OFF` is a **no-op
+-- `library_items` has four children — `library_seasons`,
+-- `library_episodes`, `library_item_ids` (CASCADE) and `grabs`
+-- (SET NULL). `PRAGMA foreign_keys = OFF` is a **no-op
 -- inside a transaction**, which is how sqlx runs every migration here,
 -- so the 12-step rebuild would fire an implicit DELETE and take the
 -- catalogue, the tree and every grab link with it. Nothing below

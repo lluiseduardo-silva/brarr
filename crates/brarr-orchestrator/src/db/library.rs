@@ -15,7 +15,6 @@ use uuid::Uuid;
 
 use brarr_core::{ExternalId, MetadataSource, Ordering, OrderingFamily};
 
-use crate::db::item_ids;
 use crate::{AppError, db::Pool};
 
 /// Movie or series. Persisted as the short label in `media_type`.
@@ -137,6 +136,65 @@ impl MonitorScope {
     }
 }
 
+/// Where a work stands, in brarr's own words.
+///
+/// `tmdb_status` was free text carrying **one** provider's vocabulary —
+/// `Returning Series`, `Ended`, `Released`. TheTVDB says `Continuing`
+/// for the same state, so with no closed set both dialects entered the
+/// same column and every comparison started depending on who wrote the
+/// row. The neutral column and its CHECK arrived with the identity
+/// migration and, until now, nothing read it: a value backfilled and
+/// never consulted is the worst of the three states, so this is the read
+/// side arriving.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProductionStatus {
+    /// Still airing, or between seasons.
+    Returning,
+    /// Finished as planned.
+    Ended,
+    /// Stopped before it was finished. Kept apart from [`Self::Ended`]
+    /// because "will there be more?" has different answers.
+    Cancelled,
+    /// Announced and being made.
+    InProduction,
+    /// Out.
+    Released,
+    /// Announced, nothing shot.
+    Announced,
+}
+
+impl ProductionStatus {
+    /// Every variant, for the guards and the parser.
+    const ALL: [Self; 6] = [
+        Self::Returning,
+        Self::Ended,
+        Self::Cancelled,
+        Self::InProduction,
+        Self::Released,
+        Self::Announced,
+    ];
+
+    /// The `library_items.status` value.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Returning => "returning",
+            Self::Ended => "ended",
+            Self::Cancelled => "cancelled",
+            Self::InProduction => "in-production",
+            Self::Released => "released",
+            Self::Announced => "announced",
+        }
+    }
+
+    /// Inverse of [`Self::label`]. `None` for anything the CHECK would
+    /// have refused, which a hand-edited row is the only way to produce.
+    #[must_use]
+    pub fn parse(raw: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|s| s.label() == raw)
+    }
+}
+
 /// One catalogue entry.
 #[derive(Debug, Clone)]
 pub struct LibraryItem {
@@ -144,12 +202,6 @@ pub struct LibraryItem {
     pub id: Uuid,
     /// Movie or series.
     pub media_type: MediaType,
-    /// TMDB id — the library's canonical axis.
-    pub tmdb_id: i64,
-    /// Canonical `ttNNNNNNN` form, prefix included.
-    pub imdb_id: Option<String>,
-    /// Series only; TMDB does not expose a tvdb id for movies.
-    pub tvdb_id: Option<i64>,
     /// Localised title (pt-BR when a translation exists).
     pub title: String,
     /// Original-language title.
@@ -172,8 +224,8 @@ pub struct LibraryItem {
     pub poster_source: Option<MetadataSource>,
     /// Who stored [`Self::backdrop_path`].
     pub backdrop_source: Option<MetadataSource>,
-    /// TMDB status string (`Returning Series`, `Ended`, `Released`, …).
-    pub tmdb_status: Option<String>,
+    /// Where the work stands, in brarr's own words.
+    pub status: Option<ProductionStatus>,
     /// Runtime in minutes (movies; episode average for series).
     pub runtime_minutes: Option<i32>,
     /// Air date of the next unaired episode, when known.
@@ -205,12 +257,17 @@ pub struct LibraryItem {
 pub struct NewLibraryItem {
     /// Movie or series.
     pub media_type: Option<MediaType>,
-    /// TMDB id.
-    pub tmdb_id: i64,
-    /// Canonical `ttNNNNNNN`.
-    pub imdb_id: Option<String>,
-    /// Series only.
-    pub tvdb_id: Option<i64>,
+    /// Every catalogue this title is known by.
+    ///
+    /// A set rather than three named columns, which is what makes a
+    /// title only TheTVDB knows representable at all — and what stops
+    /// adding one through TMDB and meeting it again on the \*arr's TVDB
+    /// axis from producing two rows for one series.
+    ///
+    /// **Empty is refused** by [`upsert`]: a catalogue row nothing can
+    /// name is one nothing can find again, so it would be created afresh
+    /// on every sweep.
+    pub ids: Vec<ExternalId>,
     /// Localised title.
     pub title: String,
     /// Original-language title.
@@ -223,8 +280,9 @@ pub struct NewLibraryItem {
     pub poster_path: Option<String>,
     /// Backdrop path.
     pub backdrop_path: Option<String>,
-    /// TMDB status string.
-    pub tmdb_status: Option<String>,
+    /// Where the work stands, mapped into brarr's vocabulary by
+    /// whoever read the provider.
+    pub status: Option<ProductionStatus>,
     /// Runtime in minutes.
     pub runtime_minutes: Option<i32>,
     /// Next episode air date.
@@ -379,9 +437,6 @@ fn row_to_item(row: &SqliteRow) -> Result<LibraryItem, AppError> {
     Ok(LibraryItem {
         id: uuid_at(row, "id")?,
         media_type: media_type_from_label(&media_type_raw)?,
-        tmdb_id: row.try_get("tmdb_id")?,
-        imdb_id: row.try_get("imdb_id")?,
-        tvdb_id: row.try_get("tvdb_id")?,
         title: row.try_get("title")?,
         original_title: row.try_get("original_title")?,
         year: row
@@ -392,7 +447,13 @@ fn row_to_item(row: &SqliteRow) -> Result<LibraryItem, AppError> {
         backdrop_path: row.try_get("backdrop_path")?,
         poster_source: source_of(row, "poster_source")?,
         backdrop_source: source_of(row, "backdrop_source")?,
-        tmdb_status: row.try_get("tmdb_status")?,
+        // An unreadable value degrades to `None` rather than failing the
+        // row: only a hand-edited database can produce one, and refusing
+        // to render a catalogue over it would be the larger harm.
+        status: row
+            .try_get::<Option<String>, _>("status")?
+            .as_deref()
+            .and_then(ProductionStatus::parse),
         runtime_minutes: row
             .try_get::<Option<i64>, _>("runtime_minutes")?
             .and_then(|v| i32::try_from(v).ok()),
@@ -408,115 +469,210 @@ fn row_to_item(row: &SqliteRow) -> Result<LibraryItem, AppError> {
     })
 }
 
-const ITEM_COLUMNS: &str = "id, media_type, tmdb_id, imdb_id, tvdb_id, title, original_title, \
+const ITEM_COLUMNS: &str = "id, media_type, title, original_title, \
      year, overview, poster_path, backdrop_path, poster_source, backdrop_source, \
-     tmdb_status, runtime_minutes, \
+     status, runtime_minutes, \
      next_air_date, digital_release_at, physical_release_at, monitored, \
      profile_id, root_folder, monitor_scope, added_at, metadata_refreshed_at";
 
-/// Insert a catalogue entry, or refresh the metadata of the existing one
-/// with the same `(media_type, tmdb_id)`.
+/// Insert a catalogue entry, or refresh the metadata of the one any of
+/// `new.ids` already names.
 ///
-/// The `ON CONFLICT` branch updates only TMDB-owned columns. `monitored`,
-/// `profile_id`, `root_folder` and `added_at` are left untouched, so a
+/// Only provider-owned columns are refreshed. `monitored`, `profile_id`,
+/// `root_folder`, `monitor_scope` and `added_at` are left untouched, so a
 /// metadata sweep can run over the whole library without resetting what
-/// the operator configured.
+/// the operator configured — the rule `db::library` has had since it
+/// existed, restated here because the mechanism changed underneath it.
+///
+/// ## Why this is a transaction, and why it did not need to be before
+///
+/// Identity used to be `ON CONFLICT(media_type, tmdb_id)`: one statement,
+/// and the database refused a second row for the same title on its own.
+/// Identity is now a set in `library_item_ids`, so the sequence is
+/// *look up, then insert or update, then record the ids* — three
+/// statements, and between the first and the third a concurrent caller
+/// can look up the same absent title and also decide to insert.
+///
+/// The unique index on `(source, media_type, external_id)` is what stops
+/// two rows existing, but it fires on the **third** statement, and a
+/// non-transactional loser would leave behind a `library_items` row that
+/// no id names: invisible to `get_by_external`, so created afresh on
+/// every sweep, and carrying whatever the operator later set on it.
+/// Inside a transaction that violation rolls the insert back with it.
+///
+/// This is also why `write_identity` stopped being deliberately
+/// non-transactional. That was correct while nothing read the table —
+/// a failed mirror must not roll back a catalogue write — and is exactly
+/// wrong now that the mirror *is* the identity.
 ///
 /// # Errors
 ///
-/// Returns [`AppError::InvalidInput`] when `media_type` is absent, and
-/// [`AppError::Database`] on SQL failure.
+/// - [`AppError::InvalidInput`] when `media_type` is absent, or when
+///   `ids` is empty: a row nothing can name is one nothing can find
+///   again, so it would be created afresh on every sweep.
+/// - [`AppError::Database`] on SQL failure, including the unique index
+///   when a concurrent caller won the race.
 pub async fn upsert(pool: &Pool, new: &NewLibraryItem) -> Result<LibraryItem, AppError> {
     let media_type = new
         .media_type
         .ok_or_else(|| AppError::InvalidInput("library item needs a media_type".to_owned()))?;
-    let id = Uuid::new_v4();
+    if new.ids.is_empty() {
+        return Err(AppError::InvalidInput(
+            "library item needs at least one external id".to_owned(),
+        ));
+    }
+
+    let mut tx = pool.begin().await?;
     let now = OffsetDateTime::now_utc().unix_timestamp();
+
+    let id = match find_by_any_id(&mut tx, media_type, &new.ids).await? {
+        Some(existing) => {
+            refresh_metadata(&mut tx, existing, new, now).await?;
+            existing
+        }
+        None => insert_row(&mut tx, media_type, new, now).await?,
+    };
+    record_ids(&mut tx, id, media_type, &new.ids).await?;
+
+    tx.commit().await?;
+    get_by_id(pool, id).await
+}
+
+/// The item any of `ids` already names.
+///
+/// **Any** of them, which is the whole point of identity being a set: a
+/// series added through TMDB and met again on the \*arr's TVDB axis is
+/// one row, not two.
+async fn find_by_any_id(
+    tx: &mut sqlx::SqliteConnection,
+    media_type: MediaType,
+    ids: &[ExternalId],
+) -> Result<Option<Uuid>, AppError> {
+    for id in ids {
+        let row = sqlx::query(
+            "SELECT item_id FROM library_item_ids \
+             WHERE source = ? AND media_type = ? AND external_id = ?",
+        )
+        .bind(id.source().label())
+        .bind(media_type.label())
+        .bind(id.value())
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some(row) = row {
+            let raw: String = row.try_get("item_id")?;
+            if let Ok(parsed) = Uuid::parse_str(&raw) {
+                return Ok(Some(parsed));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Overwrite the provider-owned columns of a row that already exists.
+///
+/// The list is the contract: `monitored`, `profile_id`, `root_folder`,
+/// `monitor_scope` and `added_at` are absent from it, so a metadata sweep
+/// over the whole library resets nothing the operator configured.
+async fn refresh_metadata(
+    tx: &mut sqlx::SqliteConnection,
+    id: Uuid,
+    new: &NewLibraryItem,
+    now: i64,
+) -> Result<(), AppError> {
     sqlx::query(
-        "INSERT INTO library_items ( \
-            id, media_type, tmdb_id, imdb_id, tvdb_id, title, original_title, year, \
-            overview, poster_path, backdrop_path, tmdb_status, runtime_minutes, \
-            next_air_date, digital_release_at, physical_release_at, \
-            monitored, added_at, metadata_refreshed_at \
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?) \
-         ON CONFLICT(media_type, tmdb_id) DO UPDATE SET \
-            imdb_id = excluded.imdb_id, \
-            tvdb_id = excluded.tvdb_id, \
-            title = excluded.title, \
-            original_title = excluded.original_title, \
-            year = excluded.year, \
-            overview = excluded.overview, \
-            poster_path = excluded.poster_path, \
-            backdrop_path = excluded.backdrop_path, \
-            tmdb_status = excluded.tmdb_status, \
-            runtime_minutes = excluded.runtime_minutes, \
-            next_air_date = excluded.next_air_date, \
-            digital_release_at = excluded.digital_release_at, \
-            physical_release_at = excluded.physical_release_at, \
-            metadata_refreshed_at = excluded.metadata_refreshed_at",
+        "UPDATE library_items SET \
+            title = ?, original_title = ?, year = ?, overview = ?, \
+            poster_path = ?, backdrop_path = ?, status = ?, runtime_minutes = ?, \
+            next_air_date = ?, digital_release_at = ?, physical_release_at = ?, \
+            metadata_refreshed_at = ? \
+         WHERE id = ?",
     )
-    .bind(id.to_string())
-    .bind(media_type.label())
-    .bind(new.tmdb_id)
-    .bind(new.imdb_id.as_deref())
-    .bind(new.tvdb_id)
     .bind(&new.title)
     .bind(new.original_title.as_deref())
     .bind(new.year.map(i64::from))
     .bind(new.overview.as_deref())
     .bind(new.poster_path.as_deref())
     .bind(new.backdrop_path.as_deref())
-    .bind(new.tmdb_status.as_deref())
+    .bind(new.status.map(ProductionStatus::label))
+    .bind(new.runtime_minutes.map(i64::from))
+    .bind(new.next_air_date.map(OffsetDateTime::unix_timestamp))
+    .bind(new.digital_release_at.map(OffsetDateTime::unix_timestamp))
+    .bind(new.physical_release_at.map(OffsetDateTime::unix_timestamp))
+    .bind(now)
+    .bind(id.to_string())
+    .execute(&mut *tx)
+    .await?;
+    Ok(())
+}
+
+/// Create the row, monitored, and hand back its fresh id.
+async fn insert_row(
+    tx: &mut sqlx::SqliteConnection,
+    media_type: MediaType,
+    new: &NewLibraryItem,
+    now: i64,
+) -> Result<Uuid, AppError> {
+    let id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO library_items ( \
+            id, media_type, title, original_title, year, \
+            overview, poster_path, backdrop_path, status, runtime_minutes, \
+            next_air_date, digital_release_at, physical_release_at, \
+            monitored, added_at, metadata_refreshed_at \
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)",
+    )
+    .bind(id.to_string())
+    .bind(media_type.label())
+    .bind(&new.title)
+    .bind(new.original_title.as_deref())
+    .bind(new.year.map(i64::from))
+    .bind(new.overview.as_deref())
+    .bind(new.poster_path.as_deref())
+    .bind(new.backdrop_path.as_deref())
+    .bind(new.status.map(ProductionStatus::label))
     .bind(new.runtime_minutes.map(i64::from))
     .bind(new.next_air_date.map(OffsetDateTime::unix_timestamp))
     .bind(new.digital_release_at.map(OffsetDateTime::unix_timestamp))
     .bind(new.physical_release_at.map(OffsetDateTime::unix_timestamp))
     .bind(now)
     .bind(now)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
-    let stored = get_by_tmdb(pool, media_type, new.tmdb_id).await?;
-    write_identity(pool, &stored).await?;
-    Ok(stored)
+    Ok(id)
 }
 
-/// Mirror the three identity columns into `library_item_ids`.
+/// Record every id against the row.
 ///
-/// The double write exists for one phase only. Two sources of truth is
-/// where this repository's defects hide, so it comes with a date to
-/// close: the readers move next, the columns come out with the wipe that
-/// precedes the re-import, and this function goes with them.
-///
-/// Deliberately **not** transactional with the row above. A failure here
-/// would otherwise roll back a catalogue write over a table nothing reads
-/// yet; the reconciliation is a `SELECT` away for as long as both forms
-/// exist, and after that the new form is the only one.
-async fn write_identity(pool: &Pool, item: &LibraryItem) -> Result<(), AppError> {
-    let mut ids = Vec::with_capacity(3);
-    if let Ok(id) = ExternalId::new(MetadataSource::Tmdb, &item.tmdb_id.to_string()) {
-        ids.push(id);
-    }
-    if let Some(raw) = item.imdb_id.as_deref()
-        && let Ok(id) = ExternalId::new(MetadataSource::Imdb, raw)
-    {
-        ids.push(id);
-    }
-    if let Some(raw) = item.tvdb_id
-        && let Ok(id) = ExternalId::new(MetadataSource::Tvdb, &raw.to_string())
-    {
-        ids.push(id);
-    }
-    for id in &ids {
-        // Asserted, never vouched: these came off a column that records
-        // only the value, not who confirmed it. Claiming otherwise would
-        // stop a sweep from ever checking a pairing nobody checked.
-        item_ids::put(
-            pool,
-            item.id,
-            item.media_type,
-            id,
-            item_ids::Verification::Asserted,
+/// `ON CONFLICT(item_id, source)` handles the same source reporting a new
+/// value. The **other** unique index — `(source, media_type, external_id)`
+/// — is deliberately not handled: a violation there means another row
+/// already carries this id, which inside the caller's transaction rolls
+/// the insert back with it. That is what stops the loser of a race
+/// leaving behind a `library_items` row no id names, invisible to
+/// [`get_by_external`] and therefore recreated on every sweep.
+async fn record_ids(
+    tx: &mut sqlx::SqliteConnection,
+    id: Uuid,
+    media_type: MediaType,
+    ids: &[ExternalId],
+) -> Result<(), AppError> {
+    for external in ids {
+        // Asserted, never vouched: the caller read these off a payload,
+        // no provider was asked to confirm the pairing, and claiming
+        // otherwise would stop a cross-resolution from ever checking one
+        // nobody checked.
+        sqlx::query(
+            "INSERT INTO library_item_ids (item_id, source, external_id, media_type) \
+             VALUES (?, ?, ?, ?) \
+             ON CONFLICT(item_id, source) DO UPDATE SET \
+                external_id = excluded.external_id, \
+                media_type  = excluded.media_type",
         )
+        .bind(id.to_string())
+        .bind(external.source().label())
+        .bind(external.value())
+        .bind(media_type.label())
+        .execute(&mut *tx)
         .await?;
     }
     Ok(())
@@ -541,39 +697,12 @@ pub async fn get_by_id(pool: &Pool, id: Uuid) -> Result<LibraryItem, AppError> {
     }
 }
 
-/// Fetch one entry by its TMDB coordinates.
-///
-/// # Errors
-///
-/// Returns [`AppError::NotFound`] when absent, [`AppError::Database`]
-/// on SQL failure.
-pub async fn get_by_tmdb(
-    pool: &Pool,
-    media_type: MediaType,
-    tmdb_id: i64,
-) -> Result<LibraryItem, AppError> {
-    let row = sqlx::query(&format!(
-        "SELECT {ITEM_COLUMNS} FROM library_items WHERE media_type = ? AND tmdb_id = ?"
-    ))
-    .bind(media_type.label())
-    .bind(tmdb_id)
-    .fetch_optional(pool)
-    .await?;
-    match row {
-        Some(r) => row_to_item(&r),
-        None => Err(AppError::NotFound(format!(
-            "library_item {}/{tmdb_id}",
-            media_type.label()
-        ))),
-    }
-}
-
 /// The entry a given external id names, whichever source issued it.
 ///
-/// **This is what "already in the library?" becomes.** [`get_by_tmdb`]
-/// can only answer on one axis, so a series added through TMDB and then
-/// met again on the \*arr's TVDB axis reads as absent and is catalogued a
-/// second time. Asking by any known id makes the two one row.
+/// **This is what "already in the library?" is.** A lookup on one axis
+/// could not answer it: a series added through TMDB and met again on the
+/// \*arr's TVDB axis read as absent and was catalogued a second time.
+/// Asking by any known id makes the two one row.
 ///
 /// The join goes through `library_item_ids`, so a title carries as many
 /// answers as it has ids and every one of them finds it.
@@ -1927,7 +2056,7 @@ mod tests {
 
         let chased = monitored(&pool).await.unwrap();
         assert_eq!(chased.len(), 1);
-        assert_eq!(chased[0].tmdb_id, 2);
+        assert_eq!(chased[0].title, "B");
     }
 
     #[tokio::test]
@@ -2146,14 +2275,87 @@ mod tests {
         let err = upsert(
             &pool,
             &NewLibraryItem {
-                tmdb_id: 1,
-                title: "X".to_owned(),
-                ..NewLibraryItem::default()
+                media_type: None,
+                ..Seed::movie(1, "X").build()
             },
         )
         .await
         .unwrap_err();
         assert!(matches!(err, AppError::InvalidInput(_)));
+    }
+
+    /// **A row nothing can name is one nothing can find again.** Identity
+    /// used to be a NOT NULL column, so this state was unrepresentable;
+    /// as a set it is a `Vec` somebody can leave empty, and the row it
+    /// would create is invisible to `get_by_external` — so every sweep
+    /// would make another one.
+    #[tokio::test]
+    async fn an_item_with_no_identity_is_rejected() {
+        let pool = open_memory().await.unwrap();
+        let err = upsert(
+            &pool,
+            &NewLibraryItem {
+                ids: Vec::new(),
+                ..Seed::movie(1, "X").build()
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, AppError::InvalidInput(_)), "{err:?}");
+        assert_eq!(list(&pool).await.unwrap().len(), 0, "and nothing landed");
+    }
+
+    /// **Any id finds it.** A series added through TMDB and met again on
+    /// the \*arr's TVDB axis is one row, not two — the reason identity
+    /// became a set at all.
+    #[tokio::test]
+    async fn a_second_upsert_under_another_id_refreshes_the_same_row() {
+        let pool = open_memory().await.unwrap();
+        let first = upsert(
+            &pool,
+            &Seed::series(1_396, "Breaking Bad").tvdb(81_189).build(),
+        )
+        .await
+        .unwrap();
+
+        // Met again knowing only the TheTVDB id, under a new title.
+        let mut only_tvdb = Seed::series(1_396, "Breaking Bad (renomeado)").build();
+        only_tvdb
+            .ids
+            .retain(|id| id.source() == MetadataSource::Tvdb);
+        assert!(only_tvdb.ids.is_empty(), "the seed carries no TVDB id yet");
+        only_tvdb
+            .ids
+            .push(ExternalId::new(MetadataSource::Tvdb, "81189").unwrap());
+
+        let second = upsert(&pool, &only_tvdb).await.unwrap();
+        assert_eq!(second.id, first.id, "one row, found by the other axis");
+        assert_eq!(second.title, "Breaking Bad (renomeado)");
+        assert_eq!(list(&pool).await.unwrap().len(), 1);
+    }
+
+    /// The operator's columns survive a metadata refresh — the rule this
+    /// module has had since it existed, restated because the mechanism
+    /// under it changed from `ON CONFLICT` to a read-then-write.
+    #[tokio::test]
+    async fn an_upsert_leaves_what_the_operator_set() {
+        let pool = open_memory().await.unwrap();
+        let item = upsert(&pool, &Seed::movie(603, "The Matrix").build())
+            .await
+            .unwrap();
+        set_monitored(&pool, item.id, false).await.unwrap();
+        set_placement(&pool, item.id, None, Some("/midias/filmes"))
+            .await
+            .unwrap();
+
+        let refreshed = upsert(&pool, &Seed::movie(603, "Matrix").build())
+            .await
+            .unwrap();
+        assert_eq!(refreshed.id, item.id);
+        assert_eq!(refreshed.title, "Matrix", "the metadata did refresh");
+        assert!(!refreshed.monitored, "and the operator's flag did not");
+        assert_eq!(refreshed.root_folder.as_deref(), Some("/midias/filmes"));
+        assert_eq!(refreshed.added_at, item.added_at);
     }
 
     /// Build a two-season tree, the second season fresh from TMDB.

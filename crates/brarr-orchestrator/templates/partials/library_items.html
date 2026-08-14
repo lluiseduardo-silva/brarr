@@ -197,7 +197,7 @@
             {% endif %}
             <div class="min-w-0">
                 <a href="/library/{{ it.id }}" class="block text-sm font-medium text-fg-primary truncate hover:text-accent-solid">{{ it.title }} <span class="text-fg-muted font-normal">{{ it.year }}</span></a>
-                <div class="text-[11px] font-mono text-fg-muted">tmdb {{ it.tmdb_id }}{% if let Some(imdb) = it.imdb_id %} · {{ imdb }}{% endif %}</div>
+                <div class="text-[11px] font-mono text-fg-muted">{% for chip in it.ids %}{% if !loop.first %} · {% endif %}{{ chip.text }}{% endfor %}</div>
             </div>
         </div>
         <div class="px-4 w-20">

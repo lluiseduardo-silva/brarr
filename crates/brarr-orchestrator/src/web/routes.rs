@@ -1152,6 +1152,9 @@ async fn library_page(
     // — which the de-N+1 pass missed because it was counting the
     // *season* queries.
     let profile_names = profile_name_map(state.pool()).await?;
+    // One query for every id on the page, for the reason the four below
+    // exist: this screen renders 360 rows and has been N+1 twice.
+    let ids_by_item = item_ids::for_all(state.pool()).await?;
 
     // Four queries for the whole page, whatever its size. This used to
     // be two per series — `seasons` and `episodes` — which is 720 round
@@ -1214,8 +1217,15 @@ async fn library_page(
                 ),
                 monitored: item.monitored,
                 profile,
-                tmdb_id: item.tmdb_id,
-                imdb_id: item.imdb_id,
+                ids: ids_by_item
+                    .get(&item.id)
+                    .map(|stored| {
+                        stored
+                            .iter()
+                            .map(|s| crate::web::templates::IdChipView::of(&s.id))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
                 tree_summary,
                 added_at: short_date(item.added_at),
                 tone: status.tone().to_owned(),
@@ -1482,8 +1492,10 @@ async fn library_add(
     }
 
     // Which TMDB ids are already catalogued, so the list can show a pill
-    // instead of an add button.
-    let existing = library::list(state.pool()).await?;
+    // instead of an add button. Asked on the identity set: a title the
+    // catalogue holds only under another source is still in the library,
+    // and a comparison against one column would offer to add it twice.
+    let catalogued = catalogued_tmdb_ids(state.pool()).await?;
 
     let tmdb = crate::tmdb_sync::client(state.pool()).await?;
     let mut results = Vec::new();
@@ -1494,9 +1506,7 @@ async fn library_add(
             Ok(hits) => {
                 for h in hits {
                     let year = h.year().map_or_else(|| "—".to_owned(), |y| y.to_string());
-                    let in_library = existing.iter().any(|e| {
-                        e.tmdb_id == h.tmdb_id && e.media_type == library::MediaType::Movie
-                    });
+                    let in_library = catalogued.contains(&(library::MediaType::Movie, h.tmdb_id));
                     results.push(TmdbHitView {
                         tmdb_id: h.tmdb_id,
                         media_type: "movie".to_owned(),
@@ -1522,9 +1532,7 @@ async fn library_add(
             Ok(hits) => {
                 for h in hits {
                     let year = h.year().map_or_else(|| "—".to_owned(), |y| y.to_string());
-                    let in_library = existing
-                        .iter()
-                        .any(|e| e.tmdb_id == h.tmdb_id && e.media_type == library::MediaType::Tv);
+                    let in_library = catalogued.contains(&(library::MediaType::Tv, h.tmdb_id));
                     results.push(TmdbHitView {
                         tmdb_id: h.tmdb_id,
                         media_type: "tv".to_owned(),
@@ -1556,6 +1564,32 @@ async fn library_add(
     })
 }
 
+/// Every TMDB id the catalogue holds, paired with both media kinds.
+///
+/// One query rather than `library::list` plus a scan over three columns:
+/// the screen only needs to know whether a hit is already held, and the
+/// answer lives in `library_item_ids`. Both kinds are inserted because a
+/// film and a series may legitimately share a TMDB id, which is what the
+/// old composite unique index guarded — the caller asks with the kind it
+/// is rendering.
+async fn catalogued_tmdb_ids(
+    pool: &crate::db::Pool,
+) -> Result<std::collections::HashSet<(library::MediaType, i64)>, AppError> {
+    let mut out = std::collections::HashSet::new();
+    for ids in item_ids::for_all(pool).await?.values() {
+        for stored in ids {
+            if stored.id.source() != brarr_core::MetadataSource::Tmdb {
+                continue;
+            }
+            if let Ok(value) = stored.id.value().parse::<i64>() {
+                out.insert((library::MediaType::Movie, value));
+                out.insert((library::MediaType::Tv, value));
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// `GET /library/add/options` — the dialog that lets the operator choose
 /// destination, profile and monitoring *before* committing.
 async fn library_add_options(
@@ -1563,9 +1597,14 @@ async fn library_add_options(
     axum::extract::Query(q): axum::extract::Query<LibraryAddOptionsQuery>,
 ) -> Result<Response, AppError> {
     let media_type = crate::db::library::media_type_from_label(&q.media_type)?;
-    let existing = library::get_by_tmdb(state.pool(), media_type, q.tmdb_id)
-        .await
-        .ok();
+    let existing =
+        match brarr_core::ExternalId::new(brarr_core::MetadataSource::Tmdb, &q.tmdb_id.to_string())
+        {
+            Ok(id) => library::get_by_external(state.pool(), media_type, &id)
+                .await
+                .ok(),
+            Err(_) => None,
+        };
     html(
         &add_options_modal(
             &state,
@@ -1757,6 +1796,24 @@ struct LibraryProfileForm {
     root_folder: Option<String>,
 }
 
+/// A production status in the operator's language.
+///
+/// The hero used to render TMDB's own English — `Returning Series`,
+/// `Ended` — because the column held that provider's words verbatim.
+/// With brarr's own vocabulary behind it the screen can say what it
+/// means, which is the rule this repository applies everywhere else:
+/// English identifiers, Portuguese for what a person reads.
+const fn status_label(status: library::ProductionStatus) -> &'static str {
+    match status {
+        library::ProductionStatus::Returning => "em exibição",
+        library::ProductionStatus::Ended => "encerrada",
+        library::ProductionStatus::Cancelled => "cancelada",
+        library::ProductionStatus::InProduction => "em produção",
+        library::ProductionStatus::Released => "lançado",
+        library::ProductionStatus::Announced => "anunciado",
+    }
+}
+
 /// `GET /library/{id}` — one catalogue entry in full.
 async fn library_detail(
     State(state): State<AppState>,
@@ -1836,7 +1893,7 @@ async fn library_detail(
                 .collect(),
             monitored: item.monitored,
             profile_id: item.profile_id.map(|p| p.to_string()).unwrap_or_default(),
-            status: item.tmdb_status,
+            status: item.status.map(|s| status_label(s).to_owned()),
             runtime: item
                 .runtime_minutes
                 .map_or_else(String::new, |r| format!("{r} min")),

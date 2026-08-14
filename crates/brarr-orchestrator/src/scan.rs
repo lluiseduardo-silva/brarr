@@ -876,9 +876,6 @@ mod tests {
         LibraryItem {
             id: Uuid::new_v4(),
             media_type,
-            tmdb_id: 603,
-            imdb_id: Some("tt0133093".to_owned()),
-            tvdb_id: Some(70_726),
             title: "The Matrix".to_owned(),
             original_title: None,
             year: Some(1999),
@@ -887,7 +884,7 @@ mod tests {
             backdrop_source: None,
             poster_path: None,
             backdrop_path: None,
-            tmdb_status: None,
+            status: None,
             runtime_minutes: None,
             next_air_date: None,
             digital_release_at: None,

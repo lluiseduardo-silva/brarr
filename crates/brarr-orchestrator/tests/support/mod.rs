@@ -7,15 +7,15 @@
 //! self-dev-dependency, or `#[path]`-including the library's file into
 //! this crate — both cost more than one small file.
 //!
-//! Same reason for existing: `NewLibraryItem.tmdb_id` is a required
-//! `i64`, and when identity becomes a set rather than three named
-//! columns every literal is a compilation failure of the whole test
-//! binary. Routing them through one door means the change lands here and
-//! the call sites do not notice.
+//! Same reason for existing: `NewLibraryItem.tmdb_id` was a required
+//! `i64`, and when identity became a set rather than three named columns
+//! every literal would have been a compilation failure of the whole test
+//! binary. Routing them through one door meant the change landed here and
+//! the call sites did not notice.
 
 #![allow(dead_code, reason = "each integration test uses a subset")]
 
-use brarr_core::{MetadataSource, Ordering, SeriesTree, TreeEpisode, TreeSeason};
+use brarr_core::{ExternalId, MetadataSource, Ordering, SeriesTree, TreeEpisode, TreeSeason};
 use brarr_orchestrator::db::Pool;
 use brarr_orchestrator::db::library::{
     self, LibraryItem, MediaType, NewEpisode, NewLibraryItem, NewSeason,
@@ -32,22 +32,22 @@ pub struct Seed {
 impl Seed {
     /// A film.
     pub fn movie(tmdb_id: i64, title: &str) -> Self {
-        Self {
-            new: NewLibraryItem {
-                media_type: Some(MediaType::Movie),
-                tmdb_id,
-                title: title.to_owned(),
-                ..NewLibraryItem::default()
-            },
-        }
+        Self::of(MediaType::Movie, tmdb_id, title)
     }
 
     /// A series.
     pub fn series(tmdb_id: i64, title: &str) -> Self {
+        Self::of(MediaType::Tv, tmdb_id, title)
+    }
+
+    fn of(media_type: MediaType, tmdb_id: i64, title: &str) -> Self {
         Self {
             new: NewLibraryItem {
-                media_type: Some(MediaType::Tv),
-                tmdb_id,
+                media_type: Some(media_type),
+                ids: vec![
+                    ExternalId::new(MetadataSource::Tmdb, &tmdb_id.to_string())
+                        .expect("a positive TMDB id"),
+                ],
                 title: title.to_owned(),
                 ..NewLibraryItem::default()
             },
@@ -62,13 +62,18 @@ impl Seed {
 
     /// The IMDb id, in whichever convention the caller has.
     pub fn imdb(mut self, imdb: &str) -> Self {
-        self.new.imdb_id = Some(imdb.to_owned());
+        self.new
+            .ids
+            .push(ExternalId::new(MetadataSource::Imdb, imdb).expect("a well-formed IMDb id"));
         self
     }
 
     /// The TheTVDB id.
     pub fn tvdb(mut self, tvdb: i64) -> Self {
-        self.new.tvdb_id = Some(tvdb);
+        self.new.ids.push(
+            ExternalId::new(MetadataSource::Tvdb, &tvdb.to_string())
+                .expect("a positive TheTVDB id"),
+        );
         self
     }
 

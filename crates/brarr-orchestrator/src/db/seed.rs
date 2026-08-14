@@ -2,18 +2,20 @@
 //!
 //! ## Why this exists before it is needed
 //!
-//! `NewLibraryItem.tmdb_id` is a required `i64` and it is written out in
-//! full at sixty-odd places across fourteen files, plus every
-//! `NewEpisode.tmdb_episode_id: None`. When identity becomes a set rather
-//! than three named columns, every one of those is a **compilation**
-//! failure of the whole crate, not a failing assertion — and a suite that
-//! does not compile stops being an instrument for the rest of the work.
+//! `NewLibraryItem.tmdb_id` was a required `i64` written out in full at
+//! sixty-odd places across fourteen files, plus every
+//! `NewEpisode.tmdb_episode_id: None`. When identity became a set rather
+//! than three named columns, every one of those would have been a
+//! **compilation** failure of the whole crate, not a failing assertion —
+//! and a suite that does not compile stops being an instrument for the
+//! rest of the work.
 //!
-//! So the fixtures go through one door first. The door is shaped so that
-//! the change does not reach the call sites at all: a caller says
-//! `Seed::series(76_479, "The Boys")` and this module decides what a TMDB
-//! id *is*. Afterwards it builds an `ExternalId`; today it writes a
-//! column. Neither is the caller's business.
+//! So the fixtures went through one door first, and the door was shaped
+//! so that the change would not reach the call sites at all: a caller
+//! says `Seed::series(76_479, "The Boys")` and this module decides what a
+//! TMDB id *is*. It now builds an `ExternalId`; it used to write a
+//! column. Neither was ever the caller's business, and not one call site
+//! changed when it moved.
 //!
 //! ## The duplicate, and why it is one
 //!
@@ -29,6 +31,8 @@
     clippy::expect_used,
     reason = "test fixtures: a failure here is a broken test, not a runtime path"
 )]
+
+use brarr_core::{ExternalId, MetadataSource};
 
 use super::library::{MediaType, NewEpisode, NewLibraryItem};
 
@@ -50,22 +54,22 @@ pub(crate) struct Seed {
 impl Seed {
     /// A film.
     pub(crate) fn movie(tmdb_id: i64, title: &str) -> Self {
-        Self {
-            new: NewLibraryItem {
-                media_type: Some(MediaType::Movie),
-                tmdb_id,
-                title: title.to_owned(),
-                ..NewLibraryItem::default()
-            },
-        }
+        Self::of(MediaType::Movie, tmdb_id, title)
     }
 
     /// A series.
     pub(crate) fn series(tmdb_id: i64, title: &str) -> Self {
+        Self::of(MediaType::Tv, tmdb_id, title)
+    }
+
+    fn of(media_type: MediaType, tmdb_id: i64, title: &str) -> Self {
         Self {
             new: NewLibraryItem {
-                media_type: Some(MediaType::Tv),
-                tmdb_id,
+                media_type: Some(media_type),
+                ids: vec![
+                    ExternalId::new(MetadataSource::Tmdb, &tmdb_id.to_string())
+                        .expect("a positive TMDB id"),
+                ],
                 title: title.to_owned(),
                 ..NewLibraryItem::default()
             },
@@ -80,13 +84,18 @@ impl Seed {
 
     /// The IMDb id, in whichever convention the caller has.
     pub(crate) fn imdb(mut self, imdb: &str) -> Self {
-        self.new.imdb_id = Some(imdb.to_owned());
+        self.new
+            .ids
+            .push(ExternalId::new(MetadataSource::Imdb, imdb).expect("a well-formed IMDb id"));
         self
     }
 
     /// The TheTVDB id.
     pub(crate) fn tvdb(mut self, tvdb: i64) -> Self {
-        self.new.tvdb_id = Some(tvdb);
+        self.new.ids.push(
+            ExternalId::new(MetadataSource::Tvdb, &tvdb.to_string())
+                .expect("a positive TheTVDB id"),
+        );
         self
     }
 

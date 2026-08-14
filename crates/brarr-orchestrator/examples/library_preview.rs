@@ -57,6 +57,12 @@ fn as_tree(seasons: &[NewSeason]) -> SeriesTree {
     }
 }
 
+/// A TMDB identity, which is all this preview needs to name a title.
+fn tmdb_id(value: i64) -> brarr_core::ExternalId {
+    brarr_core::ExternalId::new(brarr_core::MetadataSource::Tmdb, &value.to_string())
+        .expect("a positive TMDB id")
+}
+
 fn ago(n: i64) -> OffsetDateTime {
     OffsetDateTime::now_utc() - Duration::days(n)
 }
@@ -69,7 +75,7 @@ async fn series(state: &AppState, tmdb: i64, title: &str, seasons: &[NewSeason])
         state.pool(),
         &NewLibraryItem {
             media_type: Some(MediaType::Tv),
-            tmdb_id: tmdb,
+            ids: vec![tmdb_id(tmdb)],
             title: title.to_owned(),
             year: Some(2019),
             ..NewLibraryItem::default()
@@ -180,7 +186,7 @@ async fn main() {
         state.pool(),
         &NewLibraryItem {
             media_type: Some(MediaType::Movie),
-            tmdb_id: 6,
+            ids: vec![tmdb_id(6)],
             title: "Filme sem arquivo".to_owned(),
             year: Some(2021),
             ..NewLibraryItem::default()

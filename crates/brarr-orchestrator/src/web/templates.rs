@@ -1343,10 +1343,13 @@ pub struct LibraryItemView {
     pub monitored: bool,
     /// Quality profile name, or `—`.
     pub profile: String,
-    /// TMDB id, rendered as a mono chip.
-    pub tmdb_id: i64,
-    /// Canonical `ttNNNNNNN`, when known.
-    pub imdb_id: Option<String>,
+    /// Whatever the title is known by, as mono chips.
+    ///
+    /// A list rather than two named fields, for the reason the hero's is:
+    /// the card renders what the catalogue holds, so a fourth source
+    /// costs no markup and a title only TheTVDB knows is not a card with
+    /// a blank where its id should be.
+    pub ids: Vec<IdChipView>,
     /// `3 temporadas · 24 episódios` for series; empty for movies.
     pub tree_summary: String,
     /// Localised `dd/mm/aaaa` of when it was added.
