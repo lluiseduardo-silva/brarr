@@ -508,6 +508,7 @@ dependencies = [
 name = "brarr-tmdb"
 version = "0.16.1"
 dependencies = [
+ "brarr-core",
  "reqwest",
  "serde",
  "serde_json",
@@ -556,6 +557,7 @@ dependencies = [
 name = "brarr-tvdb"
 version = "0.16.1"
 dependencies = [
+ "brarr-core",
  "reqwest",
  "serde",
  "serde_json",

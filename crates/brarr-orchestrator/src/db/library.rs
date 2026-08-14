@@ -16,39 +16,26 @@ use uuid::Uuid;
 use crate::{AppError, db::Pool};
 
 /// Movie or series. Persisted as the short label in `media_type`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MediaType {
-    /// A single film.
-    Movie,
-    /// A series, with seasons and episodes hanging off it.
-    Tv,
-}
+///
+/// **Declared in `brarr-core` and re-exported here**, so the metadata
+/// provider trait can dispatch on media kind without depending on this
+/// module — a leaf crate cannot import the orchestrator's data layer, and
+/// two enums with the same two variants would need converting at every
+/// boundary. Call sites keep saying `library::MediaType`.
+pub use brarr_core::MediaType;
 
-impl MediaType {
-    /// Short tag for the `media_type` column.
-    #[must_use]
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Movie => "movie",
-            Self::Tv => "tv",
-        }
-    }
-
-    /// Parse from the persisted label.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`AppError::InvalidInput`] for anything the CHECK
-    /// constraint would have rejected.
-    pub fn from_label(s: &str) -> Result<Self, AppError> {
-        match s {
-            "movie" => Ok(Self::Movie),
-            "tv" => Ok(Self::Tv),
-            other => Err(AppError::InvalidInput(format!(
-                "unknown library_items.media_type: {other}"
-            ))),
-        }
-    }
+/// Read the persisted label, wording the refusal for this crate.
+///
+/// The parse itself lives on the core type; only the error type is local,
+/// because `brarr-core` has no [`AppError`] and should not grow one.
+///
+/// # Errors
+///
+/// Returns [`AppError::InvalidInput`] for anything the CHECK constraint
+/// would have rejected.
+pub fn media_type_from_label(raw: &str) -> Result<MediaType, AppError> {
+    MediaType::parse(raw)
+        .ok_or_else(|| AppError::InvalidInput(format!("unknown library_items.media_type: {raw}")))
 }
 
 /// How much of a title the operator wants chased.
@@ -345,7 +332,7 @@ fn row_to_item(row: &SqliteRow) -> Result<LibraryItem, AppError> {
     let scope_raw: String = row.try_get("monitor_scope")?;
     Ok(LibraryItem {
         id: uuid_at(row, "id")?,
-        media_type: MediaType::from_label(&media_type_raw)?,
+        media_type: media_type_from_label(&media_type_raw)?,
         tmdb_id: row.try_get("tmdb_id")?,
         imdb_id: row.try_get("imdb_id")?,
         tvdb_id: row.try_get("tvdb_id")?,

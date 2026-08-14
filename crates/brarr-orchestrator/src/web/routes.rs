@@ -1558,7 +1558,7 @@ async fn library_add_options(
     State(state): State<AppState>,
     axum::extract::Query(q): axum::extract::Query<LibraryAddOptionsQuery>,
 ) -> Result<Response, AppError> {
-    let media_type = crate::db::library::MediaType::from_label(&q.media_type)?;
+    let media_type = crate::db::library::media_type_from_label(&q.media_type)?;
     let existing = library::get_by_tmdb(state.pool(), media_type, q.tmdb_id)
         .await
         .ok();
@@ -1650,7 +1650,7 @@ async fn library_add_submit(
     State(state): State<AppState>,
     Form(form): Form<LibraryAddForm>,
 ) -> Result<Response, AppError> {
-    let media_type = crate::db::library::MediaType::from_label(&form.media_type)?;
+    let media_type = crate::db::library::media_type_from_label(&form.media_type)?;
 
     // A path arriving from the page is not trusted just because the page
     // offered it — same rule the detail screen's picker follows.
@@ -6609,7 +6609,7 @@ async fn root_folders_create(
 ) -> Result<Response, AppError> {
     let media_type = match form.media_type.as_deref().map_or("", str::trim) {
         "" => None,
-        other => Some(crate::db::library::MediaType::from_label(other)?),
+        other => Some(crate::db::library::media_type_from_label(other)?),
     };
     root_folders::insert(state.pool(), &form.path, media_type).await?;
     render_root_folders_partial(&state).await

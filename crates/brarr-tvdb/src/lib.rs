@@ -47,6 +47,7 @@
 mod client;
 mod dto;
 mod error;
+mod metadata_impl;
 mod model;
 mod retry;
 

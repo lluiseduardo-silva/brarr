@@ -226,7 +226,7 @@ fn row_to_folder(row: &SqliteRow) -> Result<RootFolder, AppError> {
     let media_raw: Option<String> = row.try_get("media_type")?;
     let media_type = media_raw
         .as_deref()
-        .map(MediaType::from_label)
+        .map(super::library::media_type_from_label)
         .transpose()?;
     let created: i64 = row.try_get("created_at")?;
     Ok(RootFolder {
