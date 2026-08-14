@@ -13,7 +13,7 @@ use sqlx::{Row, sqlite::SqliteRow};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use brarr_core::{ExternalId, MetadataSource, Ordering, OrderingFamily};
+use brarr_core::{Description, ExternalId, MetadataSource, Ordering, OrderingFamily};
 
 use crate::{AppError, db::Pool};
 
@@ -173,6 +173,13 @@ pub struct LibraryItem {
     pub poster_source: Option<MetadataSource>,
     /// Who stored [`Self::backdrop_path`].
     pub backdrop_source: Option<MetadataSource>,
+    /// Who owns title, synopsis and artwork for this title.
+    ///
+    /// `None` reads as TMDB — the provider that describes both media
+    /// kinds, and what every row was before the operator could choose.
+    /// Unlike the structure owner this may be changed at any time and by
+    /// policy: rewriting a synopsis is cheap and reversible.
+    pub descriptive_source: Option<MetadataSource>,
     /// Where the work stands, in brarr's own words.
     pub status: Option<ProductionStatus>,
     /// Runtime in minutes (movies; episode average for series).
@@ -396,6 +403,7 @@ fn row_to_item(row: &SqliteRow) -> Result<LibraryItem, AppError> {
         backdrop_path: row.try_get("backdrop_path")?,
         poster_source: source_of(row, "poster_source")?,
         backdrop_source: source_of(row, "backdrop_source")?,
+        descriptive_source: source_of(row, "descriptive_source")?,
         // An unreadable value degrades to `None` rather than failing the
         // row: only a hand-edited database can produce one, and refusing
         // to render a catalogue over it would be the larger harm.
@@ -419,7 +427,7 @@ fn row_to_item(row: &SqliteRow) -> Result<LibraryItem, AppError> {
 }
 
 const ITEM_COLUMNS: &str = "id, media_type, title, original_title, \
-     year, overview, poster_path, backdrop_path, poster_source, backdrop_source, \
+     year, overview, poster_path, backdrop_path, poster_source, backdrop_source,      descriptive_source, \
      status, runtime_minutes, \
      next_air_date, digital_release_at, physical_release_at, monitored, \
      profile_id, root_folder, monitor_scope, added_at, metadata_refreshed_at";
@@ -624,6 +632,76 @@ async fn record_ids(
         .execute(&mut *tx)
         .await?;
     }
+    Ok(())
+}
+
+/// Apply a description from whoever owns the descriptive facet.
+///
+/// **Only the fields the owner actually has.** A provider that has no
+/// poster must not blank the one already stored: the plan's rule for
+/// artwork is "prefer the owner's, and in its absence accept any source
+/// that has one", so a TheTVDB-owned title with no image keeps TMDB's
+/// and keeps `poster_source` pointing at TMDB — which is what makes the
+/// URL still resolvable.
+///
+/// The identity columns are untouched, and so is everything the operator
+/// set. This is the facet writer, not an upsert.
+///
+/// # Errors
+///
+/// Returns [`AppError::Database`] on SQL failure.
+pub async fn apply_description(
+    pool: &Pool,
+    item_id: Uuid,
+    description: &Description,
+) -> Result<(), AppError> {
+    let now = OffsetDateTime::now_utc().unix_timestamp();
+    sqlx::query(
+        "UPDATE library_items SET             title = ?, original_title = ?, year = ?, overview = ?,             status = ?, runtime_minutes = ?, next_air_date = ?,             digital_release_at = ?, physical_release_at = ?,             poster_path   = COALESCE(?, poster_path),             poster_source = COALESCE(?, poster_source),             backdrop_path   = COALESCE(?, backdrop_path),             backdrop_source = COALESCE(?, backdrop_source),             descriptive_source = ?,             descriptive_refreshed_at = ?,             metadata_refreshed_at = ?          WHERE id = ?",
+    )
+    .bind(&description.title)
+    .bind(description.original_title.as_deref())
+    .bind(description.year.map(i64::from))
+    .bind(description.overview.as_deref())
+    .bind(description.status.map(ProductionStatus::label))
+    .bind(description.runtime_minutes.map(i64::from))
+    .bind(description.next_air_date.map(OffsetDateTime::unix_timestamp))
+    .bind(description.digital_release_at.map(OffsetDateTime::unix_timestamp))
+    .bind(
+        description
+            .physical_release_at
+            .map(OffsetDateTime::unix_timestamp),
+    )
+    .bind(description.poster.as_ref().map(|a| a.value.as_str()))
+    .bind(description.poster.as_ref().map(|a| a.source.label()))
+    .bind(description.backdrop.as_ref().map(|a| a.value.as_str()))
+    .bind(description.backdrop.as_ref().map(|a| a.source.label()))
+    .bind(description.source.label())
+    .bind(now)
+    .bind(now)
+    .bind(item_id.to_string())
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Record who describes a title, without fetching anything.
+///
+/// The operator's choice, which the next refresh reads.
+///
+/// # Errors
+///
+/// Returns [`AppError::Database`] on SQL failure.
+pub async fn set_descriptive_source(
+    pool: &Pool,
+    item_id: Uuid,
+    source: MetadataSource,
+) -> Result<(), AppError> {
+    sqlx::query("UPDATE library_items SET descriptive_source = ? WHERE id = ?")
+        .bind(source.label())
+        .bind(item_id.to_string())
+        .execute(pool)
+        .await?;
     Ok(())
 }
 

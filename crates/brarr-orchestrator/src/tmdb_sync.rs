@@ -384,53 +384,24 @@ pub async fn add_with_options(
 /// Propagates TMDB and database failures.
 pub async fn refresh(
     pool: &Pool,
-    tmdb: &TmdbClient,
     registry: &crate::metadata::registry::Registry,
     item_id: Uuid,
 ) -> Result<LibraryItem, AppError> {
     let item = library::get_by_id(pool, item_id).await?;
-    // Asked of the identity set, not of a column. A title brarr holds
-    // under no TMDB id is one this refresh cannot do — and saying so is
-    // better than the `unwrap_or(0)` that a required column invited.
-    let tmdb_id = tmdb_id_of(pool, item_id).await?;
-    match item.media_type {
-        MediaType::Movie => add_movie(pool, tmdb, tmdb_id).await,
-        // The two facets have two owners, and a refresh has to ask each
-        // of them its own question. Title, synopsis and artwork are
-        // TMDB's and stay TMDB's; the shape belongs to whoever the item
-        // records, which for a declared title is not TMDB — and handing
-        // it TMDB's tree anyway is a write the source gate refuses, so
-        // the title would simply stop refreshing.
-        MediaType::Tv => {
-            let details = tmdb.tv(tmdb_id).await?;
-            let refreshed = library::upsert(pool, &tv_to_item(&details)).await?;
-            let tree = crate::metadata::owned::tree(pool, registry, refreshed.id).await?;
-            structure::apply(pool, refreshed.id, &tree).await?;
-            Ok(refreshed)
-        }
-    }
-}
 
-/// The TMDB id an item is catalogued under.
-///
-/// # Errors
-///
-/// [`AppError::InvalidInput`] when the item carries none. That is a real
-/// state now that identity is a set — a title only TheTVDB knows has no
-/// TMDB metadata to refresh — and naming it beats the alternative a
-/// required column produced, where the absence became id `0` and the
-/// request went out anyway.
-async fn tmdb_id_of(pool: &Pool, item_id: Uuid) -> Result<i64, AppError> {
-    let ids = crate::db::item_ids::for_item(pool, item_id).await?;
-    ids.iter()
-        .find(|stored| stored.id.source() == MetadataSource::Tmdb)
-        .and_then(|stored| stored.id.value().parse::<i64>().ok())
-        .ok_or_else(|| {
-            AppError::InvalidInput(
-                "este título não guarda um id do TMDB, que é de onde vêm título, sinopse e arte"
-                    .to_owned(),
-            )
-        })
+    // **Two facets, two owners, two questions.** The description belongs
+    // to whoever the item records — TMDB unless the operator moved it —
+    // and the shape to whoever owns the tree. Asking one provider for
+    // both is what made a declared title stop refreshing, because the
+    // source gate refuses a tree from the wrong hand.
+    let described = crate::metadata::owned::description(pool, registry, item_id).await?;
+    library::apply_description(pool, item_id, &described).await?;
+
+    if item.media_type == MediaType::Tv {
+        let tree = crate::metadata::owned::tree(pool, registry, item_id).await?;
+        structure::apply(pool, item_id, &tree).await?;
+    }
+    library::get_by_id(pool, item_id).await
 }
 
 /// Items whose metadata is older than the configured TTL, oldest first.
@@ -687,9 +658,10 @@ mod tests {
             .await
             .unwrap();
         let boys = add_series(&pool, &tmdb, &registry, 76_479).await.unwrap();
-        assert_eq!(
-            tmdb_id_of(&pool, boys.id).await.unwrap(),
-            76_479,
+        let ids = crate::db::item_ids::for_item(&pool, boys.id).await.unwrap();
+        assert!(
+            ids.iter()
+                .any(|s| s.id.source() == MetadataSource::Tmdb && s.id.value() == "76479"),
             "catalogued under the id it was added by"
         );
         let seasons = library::seasons(&pool, boys.id).await.unwrap();

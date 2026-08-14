@@ -882,6 +882,7 @@ mod tests {
             overview: None,
             poster_source: None,
             backdrop_source: None,
+            descriptive_source: None,
             poster_path: None,
             backdrop_path: None,
             status: None,

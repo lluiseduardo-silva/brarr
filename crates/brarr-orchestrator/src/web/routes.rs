@@ -124,6 +124,7 @@ pub fn router(state: AppState, static_dir: &std::path::Path) -> Router {
         .route("/library/{id}/placement", get(library_placement))
         .route("/library/{id}/sources", get(library_sources))
         .route("/library/{id}/structure", post(library_structure))
+        .route("/library/{id}/descriptive", post(library_descriptive))
         .route("/pause-banner", get(pause_banner))
         .route("/library/{id}/refresh", post(library_refresh))
         .route("/library/{id}/scan", post(library_scan_now))
@@ -2730,9 +2731,8 @@ async fn library_refresh(
 ) -> Result<Response, AppError> {
     let uuid = Uuid::parse_str(&id)
         .map_err(|e| AppError::InvalidInput(format!("invalid library id: {e}")))?;
-    let tmdb = crate::tmdb_sync::client(state.pool()).await?;
     let registry = Registry::build(state.pool()).await?;
-    crate::tmdb_sync::refresh(state.pool(), &tmdb, &registry, uuid).await?;
+    crate::tmdb_sync::refresh(state.pool(), &registry, uuid).await?;
     Ok(Redirect::to(&format!("/library/{id}")).into_response())
 }
 
@@ -3051,7 +3051,93 @@ async fn sources_panel(
         seasons,
         preview,
         error,
+        descriptive_current: item
+            .descriptive_source
+            .unwrap_or(brarr_core::MetadataSource::Tmdb)
+            .display_name()
+            .to_owned(),
+        descriptive_options: descriptive_options(&registry, item, &ids),
     })
+}
+
+/// The providers that could describe this title.
+///
+/// Filtered on two things, and both matter: the provider has to declare
+/// it describes this media kind — TheTVDB has films and this client does
+/// not read them — and the item has to carry an id that provider answers
+/// to. An option that fails when clicked is worse than one that is not
+/// offered.
+fn descriptive_options(
+    registry: &Registry,
+    item: &library::LibraryItem,
+    ids: &[item_ids::StoredId],
+) -> Vec<crate::web::templates::DescriptiveOption> {
+    let current = item
+        .descriptive_source
+        .unwrap_or(brarr_core::MetadataSource::Tmdb);
+    brarr_core::MetadataSource::all()
+        .filter(|source| {
+            registry
+                .get(*source)
+                .is_some_and(|p| p.capabilities().descriptive.covers(item.media_type))
+                && ids.iter().any(|stored| stored.id.source() == *source)
+        })
+        .map(|source| crate::web::templates::DescriptiveOption {
+            value: source.label().to_owned(),
+            label: source.display_name().to_owned(),
+            current: source == current,
+        })
+        .collect()
+}
+
+/// `POST /library/{id}/descriptive` — move the descriptive facet.
+///
+/// **Applied immediately, unlike a structure choice.** There is no
+/// preview and no gate because there is nothing to lose: the write
+/// touches title, synopsis, artwork and status, all of which the next
+/// refresh would rewrite anyway. Moving the *tree* is the one that
+/// re-points acquisitions, and that one keeps its preview.
+///
+/// A provider with no poster does not blank the one already stored, so a
+/// title that moves to a source without artwork keeps the image it has —
+/// and keeps it readable, because the stored source travels with it.
+async fn library_descriptive(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Form(form): Form<DescriptiveForm>,
+) -> Result<Response, AppError> {
+    let uuid = Uuid::parse_str(&id)
+        .map_err(|e| AppError::InvalidInput(format!("invalid library id: {e}")))?;
+    let source = brarr_core::MetadataSource::parse(form.source.trim())
+        .ok_or_else(|| AppError::InvalidInput(format!("fonte desconhecida: {}", form.source)))?;
+
+    library::set_descriptive_source(state.pool(), uuid, source).await?;
+
+    let registry = Registry::build(state.pool()).await?;
+    let refreshed = match crate::metadata::owned::description(state.pool(), &registry, uuid).await {
+        Ok(described) => {
+            library::apply_description(state.pool(), uuid, &described).await?;
+            None
+        }
+        // The choice is recorded either way: a provider that is down
+        // must not cost the operator the decision, and the next refresh
+        // picks it up. Saying so beats a silent half-success.
+        Err(e) => Some(format!(
+            "fonte trocada, mas a atualização falhou: {e}. A próxima varredura tenta de novo."
+        )),
+    };
+
+    let item = library::get_by_id(state.pool(), uuid).await?;
+    if item.media_type != library::MediaType::Tv {
+        return Ok(hx_refresh());
+    }
+    sources_panel(&state, &item, None, refreshed).await
+}
+
+/// What the descriptive picker posts.
+#[derive(Debug, Deserialize)]
+struct DescriptiveForm {
+    source: String,
 }
 
 /// One offered ordering, marked active when it is the one in force.

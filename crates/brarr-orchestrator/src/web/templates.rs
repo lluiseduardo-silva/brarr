@@ -1766,6 +1766,27 @@ pub struct LibrarySourcesModalPartial {
     pub preview: Option<StructurePreview>,
     /// A form error, in the operator's language.
     pub error: Option<String>,
+    /// Who describes the title today, in words.
+    pub descriptive_current: String,
+    /// The providers that could describe it, and whether each is the
+    /// one in force.
+    pub descriptive_options: Vec<DescriptiveOption>,
+}
+
+/// One provider offered as the owner of title, synopsis and artwork.
+///
+/// A separate list from the structure options because the two facets are
+/// separate questions with separate risks: moving the description
+/// rewrites text, moving the structure re-points every acquisition. Only
+/// one of them needs a preview.
+#[derive(Debug)]
+pub struct DescriptiveOption {
+    /// `MetadataSource::label`, for the form.
+    pub value: String,
+    /// What the operator reads.
+    pub label: String,
+    /// Whether this is the one in force.
+    pub current: bool,
 }
 
 /// One canonical season, and the blocks the operator has cut it into.

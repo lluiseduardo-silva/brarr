@@ -37,7 +37,7 @@
 use std::sync::Arc;
 
 use brarr_core::{
-    MediaType, MetadataError, MetadataProvider, MetadataSource, Ordering, SeriesTree,
+    Description, MediaType, MetadataError, MetadataProvider, MetadataSource, Ordering, SeriesTree,
 };
 use uuid::Uuid;
 
@@ -87,6 +87,56 @@ pub async fn tree(pool: &Pool, registry: &Registry, item_id: Uuid) -> Result<Ser
         Some(source) => from(registry, source, &ids, &structure::ordering_of(&owner)).await,
         None => born(registry, &ids).await,
     }
+}
+
+/// One title as its recorded descriptive owner describes it.
+///
+/// **Unlike [`tree`], an unclaimed title reads as TMDB rather than being
+/// decided.** The asymmetry is the point: a description has one owner
+/// because two providers describing a title do not disagree the way two
+/// catalogues number a series, and rewriting a synopsis is cheap and
+/// reversible where rebuilding a tree re-points every acquisition. So
+/// there is no birth ceremony here — the default is the provider that
+/// describes both media kinds, and the operator may move it at any time.
+///
+/// # Errors
+///
+/// - [`AppError::NotFound`] for an unknown item.
+/// - [`AppError::InvalidInput`] when the item carries no id the owning
+///   source answers to.
+/// - [`AppError::Metadata`] when the provider is unconfigured, refuses,
+///   cannot be reached, or does not describe this media kind.
+/// - [`AppError::Database`] on SQL failure.
+pub async fn description(
+    pool: &Pool,
+    registry: &Registry,
+    item_id: Uuid,
+) -> Result<Description, AppError> {
+    let item = crate::db::library::get_by_id(pool, item_id).await?;
+    let source = item.descriptive_source.unwrap_or(MetadataSource::Tmdb);
+    let ids = item_ids::for_item(pool, item_id).await?;
+
+    let known = ids
+        .iter()
+        .find(|stored| stored.id.source() == source)
+        .ok_or_else(|| {
+            AppError::InvalidInput(format!(
+                "o título não guarda um id da {}, que é quem descreve ele",
+                source.display_name()
+            ))
+        })?;
+
+    let provider = registry.require(source)?;
+    // Asked before dispatch, so `Unsupported` stays a bug report.
+    if !provider.capabilities().descriptive.covers(item.media_type) {
+        return Err(AppError::Metadata(MetadataError::Unsupported {
+            origin: source,
+            capability: "describe",
+            media: item.media_type,
+        }));
+    }
+
+    Ok(provider.describe(&known.id, item.media_type).await?)
 }
 
 /// The tree from the source the item records, under the ordering it

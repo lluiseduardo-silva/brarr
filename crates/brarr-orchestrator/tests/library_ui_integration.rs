@@ -1633,6 +1633,8 @@ fn the_structure_panel_offers_every_source_and_marks_the_one_in_force() {
         seasons: Vec::new(),
         preview: None,
         error: None,
+        descriptive_current: "TMDB".to_owned(),
+        descriptive_options: Vec::new(),
     };
     let html = panel.render().unwrap();
 
@@ -1708,6 +1710,8 @@ fn a_plan_with_orphans_has_no_apply_button() {
         seasons: Vec::new(),
         preview: Some(p),
         error: None,
+        descriptive_current: "TMDB".to_owned(),
+        descriptive_options: Vec::new(),
     };
 
     let refused = panel(preview(
@@ -1762,6 +1766,8 @@ fn the_panel_offers_hand_declared_blocks() {
         }],
         preview: None,
         error: None,
+        descriptive_current: "TMDB".to_owned(),
+        descriptive_options: Vec::new(),
     };
     let html = panel.render().unwrap();
     assert!(html.contains("/structure"), "the form posts the blocks");
@@ -1828,6 +1834,25 @@ async fn the_structure_panel_answers_on_the_real_router() {
     assert!(
         panel.contains(&format!("/library/{item}/structure")),
         "the hand-declared cut posts to the one route that writes: {panel}"
+    );
+
+    // **The half the operator went looking for and could not find.**
+    // The panel governs two facets, and until now it named only one —
+    // so "where do I change where the description comes from?" had no
+    // answer on the screen even though the column existed.
+    assert!(
+        panel.contains("Descrição e capa"),
+        "the descriptive facet is named, not implied: {panel}"
+    );
+    assert!(
+        panel.contains("TMDB"),
+        "and it says who owns it today: {panel}"
+    );
+    // With no credential there is nothing to switch between, and the
+    // panel says that rather than rendering an empty picker.
+    assert!(
+        panel.contains("Só uma fonte configurada descreve este título"),
+        "{panel}"
     );
 }
 
