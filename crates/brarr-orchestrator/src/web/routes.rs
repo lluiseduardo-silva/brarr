@@ -1775,12 +1775,24 @@ async fn library_detail(
     let progress = crate::coverage::progress_of(&item, &series_progress, &coverage, now);
     let status = crate::coverage::ItemStatus::of(item.monitored, progress);
 
+    // The translation in force. Every coordinate the page shows is the
+    // one brarr searches for; the catalogue's own number rides beside it.
+    let numbering = episode_numbering::for_item(state.pool(), uuid).await?;
+    // Named on the page, not only inside a dialog: it is the one fact
+    // that explains why a row reads `S02E01` under "Temporada 1".
+    let numbering_label = if numbering.is_empty() {
+        None
+    } else {
+        episode_numbering::active_group(state.pool(), uuid)
+            .await?
+            .and_then(|(_, name)| name)
+    };
     // Seasons carry only their header here; episodes load on expand.
     let seasons = if is_series {
         library::seasons(state.pool(), uuid)
             .await?
             .iter()
-            .map(|s| season_view(s, &monitored, &coverage, now))
+            .map(|s| season_view(s, &monitored, &coverage, now, &numbering))
             .collect()
     } else {
         Vec::new()
@@ -1818,6 +1830,7 @@ async fn library_detail(
             tmdb_id: item.tmdb_id,
             imdb_id: item.imdb_id,
             tvdb_id: item.tvdb_id,
+            numbering: numbering_label.clone(),
             monitored: item.monitored,
             profile_id: item.profile_id.map(|p| p.to_string()).unwrap_or_default(),
             status: item.tmdb_status,
@@ -1903,7 +1916,25 @@ fn season_view(
     monitored: &[library::MonitoredEpisode],
     coverage: &[grabs::Coverage],
     now: OffsetDateTime,
+    numbering: &std::collections::HashMap<(i32, i32), episode_numbering::Numbering>,
 ) -> SeasonView {
+    // What the scene calls the episodes inside this canonical season.
+    // A flattened series is where this matters: TMDB's single season of
+    // 23 is `S01`–`S02` to everybody publishing it, and a header that
+    // says only "Temporada 1" leaves the operator no way to connect the
+    // rows to a release name.
+    let mut spans: Vec<i32> = numbering
+        .iter()
+        .filter(|((s, _), _)| *s == season.season_number)
+        .map(|(_, n)| n.season)
+        .collect();
+    spans.sort_unstable();
+    spans.dedup();
+    let numbering_hint = match (spans.first(), spans.last()) {
+        (Some(first), Some(last)) if first == last => format!("S{first:02}"),
+        (Some(first), Some(last)) => format!("S{first:02}–S{last:02}"),
+        _ => String::new(),
+    };
     let mine: Vec<library::MonitoredEpisode> = monitored
         .iter()
         .filter(|e| e.season_number == season.season_number)
@@ -1930,6 +1961,7 @@ fn season_view(
         monitored_count: progress.total,
         have: progress.have,
         percent: progress.percent(),
+        numbering_hint,
     }
 }
 
@@ -2115,10 +2147,18 @@ async fn validated_root_folder(state: &AppState, path: &str) -> Result<String, A
 /// included — [`crate::coverage::episode_mark`] needs them to tell
 /// "never had it" from "had it and the file is gone", which are
 /// different problems with different fixes.
+/// `numbering` is the translation in force, canonical → what releases
+/// call it. **The row leads with the coordinate brarr actually searches
+/// for**, because that is the number the operator has to reconcile
+/// against a release name, a file on disk and everything the scene
+/// publishes. The catalogue's own number stays visible beside it —
+/// dropping it would make the row impossible to line up against the
+/// season it lives in, which is still TMDB's.
 fn episode_views(
     episodes: &[library::Episode],
     grabs: &[grabs::Grab],
     progress: &crate::ttl_cache::TtlCache<Uuid, u8>,
+    numbering: &std::collections::HashMap<(i32, i32), episode_numbering::Numbering>,
 ) -> Vec<EpisodeView> {
     let now = OffsetDateTime::now_utc();
     let read_at = Instant::now();
@@ -2131,10 +2171,18 @@ fn episode_views(
             // expand is how a screen becomes slower the more it has to
             // report.
             let percent = mark.grab_id.and_then(|id| progress.get(&id, read_at));
+            let canonical = format!("S{:02}E{:02}", e.season_number, e.episode_number);
+            let translated = numbering
+                .get(&(e.season_number, e.episode_number))
+                .map(|n| format!("S{:02}E{:02}", n.season, n.episode));
             EpisodeView {
                 percent,
                 id: e.id.to_string(),
-                code: format!("S{:02}E{:02}", e.season_number, e.episode_number),
+                code: translated.clone().unwrap_or_else(|| canonical.clone()),
+                // `Some` only when the two differ, so a normal series
+                // renders exactly as it did and the second number never
+                // appears just to say the same thing twice.
+                canonical_code: translated.map(|_| canonical),
                 season_number: e.season_number,
                 episode_number: e.episode_number,
                 title: e.title.clone().unwrap_or_else(|| "—".to_owned()),
@@ -2166,6 +2214,7 @@ async fn library_season(
 ) -> Result<Response, AppError> {
     let item_uuid = Uuid::parse_str(&id)
         .map_err(|e| AppError::InvalidInput(format!("invalid library id: {e}")))?;
+    let numbering = episode_numbering::for_item(state.pool(), item_uuid).await?;
     let season_uuid = Uuid::parse_str(&season_id)
         .map_err(|e| AppError::InvalidInput(format!("invalid season id: {e}")))?;
 
@@ -2206,7 +2255,7 @@ async fn library_season(
         );
     }
 
-    let views = episode_views(&episodes, &history, state.progress());
+    let views = episode_views(&episodes, &history, state.progress(), &numbering);
     // Poll only while something is moving, and let the response decide —
     // same server-driven cadence as `/queue`. A season with nothing in
     // flight renders a plain wrapper and never asks again.
@@ -2234,6 +2283,7 @@ async fn library_season_monitor(
 ) -> Result<Response, AppError> {
     let item_uuid = Uuid::parse_str(&id)
         .map_err(|e| AppError::InvalidInput(format!("invalid library id: {e}")))?;
+    let numbering = episode_numbering::for_item(state.pool(), item_uuid).await?;
     let season_uuid = Uuid::parse_str(&season_id)
         .map_err(|e| AppError::InvalidInput(format!("invalid season id: {e}")))?;
     let current = library::seasons(state.pool(), item_uuid)
@@ -2268,7 +2318,7 @@ async fn library_season_monitor(
         monitored: now_monitored,
         ..current
     };
-    let view = season_view(&fresh, &monitored, &coverage, now);
+    let view = season_view(&fresh, &monitored, &coverage, now, &numbering);
 
     html(&LibrarySeasonPartial {
         item_id: id,
@@ -2276,7 +2326,7 @@ async fn library_season_monitor(
         // wrapper — and the poll with it, if something is in flight.
         season_id: Some(season_id.clone()),
         poll_secs: None,
-        episodes: episode_views(&episodes, &history, state.progress()),
+        episodes: episode_views(&episodes, &history, state.progress(), &numbering),
         oob: Some(SeasonMarkView {
             season_id,
             monitored: now_monitored,
@@ -2298,6 +2348,7 @@ async fn library_episode_monitor(
 ) -> Result<Response, AppError> {
     let item_uuid = Uuid::parse_str(&id)
         .map_err(|e| AppError::InvalidInput(format!("invalid library id: {e}")))?;
+    let numbering = episode_numbering::for_item(state.pool(), item_uuid).await?;
     let episode_uuid = Uuid::parse_str(&episode_id)
         .map_err(|e| AppError::InvalidInput(format!("invalid episode id: {e}")))?;
 
@@ -2320,7 +2371,7 @@ async fn library_episode_monitor(
         // One row, swapped straight into `#ep-{id}`: no wrapper.
         season_id: None,
         poll_secs: None,
-        episodes: episode_views(&[updated], &history, state.progress()),
+        episodes: episode_views(&[updated], &history, state.progress(), &numbering),
         oob: None,
         // One episode moves the denominator too.
         item_status: Some(item_status_view(&state, item_uuid).await?),

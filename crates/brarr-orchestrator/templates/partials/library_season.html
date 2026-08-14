@@ -86,7 +86,14 @@
         </svg>
     </button>
 
-    <span class="shrink-0 w-16 text-[11px] font-mono text-fg-secondary">{{ e.code }}</span>
+    {# O código que aparece é o que o brarr **busca**. Quando a série é
+       numerada por outra fonte, o número do catálogo continua ao lado,
+       apagado: sem ele não dá para ligar a linha à temporada em que ela
+       vive, que continua sendo a do TMDB. O caso que motivou isto é o
+       Kaiju No. 8, onde o episódio 13 do TMDB é o S02E01 de todo mundo. #}
+    <span class="shrink-0 {% if e.canonical_code.is_some() %}w-28{% else %}w-16{% endif %} text-[11px] font-mono text-fg-secondary">
+        {{ e.code }}{% match e.canonical_code %}{% when Some with (c) %}<span class="text-fg-muted" title="numeração do catálogo (TMDB)"> · {{ c }}</span>{% when None %}{% endmatch %}
+    </span>
 
     {# The state mark. `title` carries the mapped file name — the one
        thing that used to require reading the grab table row by row when

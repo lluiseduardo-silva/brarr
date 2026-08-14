@@ -1464,6 +1464,13 @@ pub struct LibraryDetailView {
     pub imdb_id: Option<String>,
     /// TVDB id — series only.
     pub tvdb_id: Option<i64>,
+    /// Which numbering the searches use, when it is not TMDB's.
+    ///
+    /// Prominent on purpose. It lived only as muted text inside a dialog
+    /// the operator had to open, which meant the single fact that
+    /// explains why a row says `S02E01` under "Temporada 1" was the one
+    /// fact the screen did not show.
+    pub numbering: Option<String>,
     /// Whether the scanner chases it.
     pub monitored: bool,
     /// Attached profile id, for preselecting the picker.
@@ -1531,6 +1538,10 @@ pub struct SeasonView {
     pub have: usize,
     /// `have / monitored_count`.
     pub percent: u8,
+    /// How releases number this season's episodes, when that differs —
+    /// `S01–S02` for a canonical season the scene cuts in two. Empty
+    /// otherwise, which is almost every season in a catalogue.
+    pub numbering_hint: String,
 }
 
 /// Episode rows returned by the on-demand season expand.
@@ -1598,8 +1609,13 @@ pub struct SeasonMarkView {
 pub struct EpisodeView {
     /// Stringified UUID.
     pub id: String,
-    /// `S04E07`.
+    /// `S04E07` — **the coordinate brarr searches for**, which is the
+    /// translated one when a numbering is in force.
     pub code: String,
+    /// The catalogue's own coordinate, and `None` when it is the same as
+    /// [`Self::code`]. Shown beside it so a row can still be lined up
+    /// against the season it lives in, which is TMDB's.
+    pub canonical_code: Option<String>,
     /// Season this episode belongs to. Carried separately from
     /// [`Self::code`] because the per-episode search button builds a
     /// query string, and parsing `S04E07` back into two numbers to
