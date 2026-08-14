@@ -12,7 +12,8 @@ use std::process::ExitCode;
 use anyhow::{Context, Result};
 use brarr_cli::{
     Cli, Command, Config, Engine, MaintenanceArgs, OutputFormat, RemoteArgs, RuleSet, SearchArgs,
-    run_remote_maintenance, run_remote_search, run_search,
+    StructureArgs, format_structure, format_structure_json, run_remote_maintenance,
+    run_remote_search, run_remote_structure, run_search,
 };
 use brarr_core::TmdbId;
 use clap::Parser;
@@ -60,6 +61,7 @@ fn run(cli: &Cli) -> Result<()> {
         }
         Command::Remote(args) => dispatch_remote(args),
         Command::Maintenance(args) => dispatch_maintenance(args),
+        Command::Structure(args) => dispatch_structure(args),
     }
 }
 
@@ -200,6 +202,53 @@ fn dispatch_maintenance(args: &MaintenanceArgs) -> Result<()> {
             out.retention_days,
             if args.vacuum { " + VACUUM" } else { "" }
         );
+    }
+    Ok(())
+}
+
+/// `brarr structure --dry-run`: ask the orchestrator what changing each
+/// title's structure owner would do, and print it.
+///
+/// The `--dry-run` flag is required and is currently the only mode. A
+/// required flag with one legal value looks like ceremony; here it is
+/// the opposite. This command will grow an apply mode, and the
+/// difference between "tell me" and "rewrite my library" is exactly the
+/// kind that belongs written on the command line rather than inherited
+/// from a default — so no invocation anyone has already typed changes
+/// meaning the day `--apply` exists.
+fn dispatch_structure(args: &StructureArgs) -> Result<()> {
+    if !args.dry_run {
+        anyhow::bail!(
+            "passe --dry-run: por enquanto este comando só relata, e a flag existe \
+             para que a versão que escreve nunca seja o default"
+        );
+    }
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("building tokio runtime")?;
+    let titles = runtime
+        .block_on(run_remote_structure(
+            &args.addr,
+            args.token.as_deref(),
+            args.item.as_deref(),
+        ))
+        .with_context(|| format!("remote structure dry run against {}", args.addr))?;
+
+    let rendered = match args.format {
+        OutputFormat::Text => format_structure(&titles),
+        OutputFormat::Json => {
+            format_structure_json(&titles).context("serialising the structure report")?
+        }
+    };
+
+    #[allow(
+        clippy::print_stdout,
+        reason = "CLI user-facing output goes to stdout by design"
+    )]
+    {
+        println!("{rendered}");
     }
     Ok(())
 }

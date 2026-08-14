@@ -1652,6 +1652,85 @@ mod tests {
         );
     }
 
+    /// Dragon Ball Super: TMDB flattens it into one season of 131 and
+    /// TheTVDB cuts it 14 / 13 / 19 / 30 / 55, so a pack recorded against
+    /// "season 1" stops meaning the whole series the instant the tree
+    /// switches.
+    ///
+    /// **That is the correction, not a regression** — the file really
+    /// does hold 14 episodes and always did. What makes it worth a
+    /// number in the report is that nothing else says so: the pack keeps
+    /// its row, the barrier keeps its key, and the 117 episodes it used
+    /// to cover simply become missing, on a screen that was green the
+    /// day before.
+    #[tokio::test]
+    async fn a_season_pack_impact_is_reported() {
+        const SHAPE: [i32; 5] = [14, 13, 19, 30, 55];
+
+        let pool = open_memory().await.unwrap();
+        let item = series_with(&pool, &[131], true).await;
+        let provider_id = provider(&pool).await;
+
+        // A season pack, which is what `season_number` with no episode
+        // means and the only thing that writes that column.
+        crate::db::grabs::reserve(
+            &pool,
+            &NewGrab {
+                item_id: item,
+                episode_id: None,
+                season_number: Some(1),
+                decision_id: None,
+                provider_id,
+                provider_name: "capybara",
+                release_id_remote: "dbs-s01-pack",
+                release_name: "Dragon Ball Super S01 1080p",
+                download_url: None,
+                protocol: Protocol::Torrent,
+            },
+        )
+        .await
+        .unwrap()
+        .expect("the barrier lets a first reservation through");
+
+        let mut flat = 0_i64;
+        let seasons: Vec<TreeSeason> = SHAPE
+            .iter()
+            .enumerate()
+            .map(|(index, count)| {
+                let episodes = (1..=*count)
+                    .map(|n| {
+                        flat += 1;
+                        TreeEpisode {
+                            air_date: Some(day(flat)),
+                            ..ep(n, &format!("tmdb-{flat}"))
+                        }
+                    })
+                    .collect();
+                incoming(i32::try_from(index).unwrap() + 1, episodes)
+            })
+            .collect();
+
+        let plan = plan(&pool, item, &tree(MetadataSource::Tmdb, seasons))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            plan.packs_affected,
+            vec![PackImpact {
+                season: 1,
+                was: 131,
+                now: 14,
+                grabs: 1,
+            }],
+            "the season the pack was recorded against narrows, and the report has to say so"
+        );
+
+        // The seasons the switch invents carry no pack, so they are not
+        // impacts — only a season that already had one can change what
+        // it means.
+        assert!(plan.packs_affected.iter().all(|p| p.grabs > 0));
+    }
+
     async fn orphan_count(pool: &DbPool) -> i64 {
         sqlx::query("SELECT count(*) AS n FROM grabs WHERE scope='episode' AND episode_id IS NULL")
             .fetch_one(pool)

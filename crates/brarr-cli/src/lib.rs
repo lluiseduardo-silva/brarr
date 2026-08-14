@@ -16,11 +16,16 @@ pub mod cli;
 pub mod config;
 pub mod remote;
 pub mod search;
+pub mod structure;
 
-pub use cli::{Cli, Command, MaintenanceArgs, OutputFormat, RemoteArgs, SearchArgs};
+pub use cli::{Cli, Command, MaintenanceArgs, OutputFormat, RemoteArgs, SearchArgs, StructureArgs};
 pub use config::{Config, ConfigError, TrackerConfig};
-pub use remote::{RemoteError, RemoteMaintenance, run_remote_maintenance, run_remote_search};
+pub use remote::{
+    RemoteError, RemoteMaintenance, RemoteStructureTitle, run_remote_maintenance,
+    run_remote_search, run_remote_structure,
+};
 pub use search::{ScoredRelease, SearchOutcome, format_outcome, format_outcome_json, run_search};
+pub use structure::{format_structure, format_structure_json};
 
 // Re-export do motor de decisão para que callers (tests, main.rs) não
 // precisem importar `brarr_decision_service` separadamente.

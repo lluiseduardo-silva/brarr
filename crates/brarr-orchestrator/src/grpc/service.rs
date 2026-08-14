@@ -13,12 +13,14 @@ use tracing::info;
 use super::proto::{
     ListProvidersReply, ListProvidersRequest, MaintenanceReply, MaintenanceRequest,
     ProviderSummary, RecentSearchesReply, RecentSearchesRequest, ReleaseOutcome, SearchReply,
-    SearchRequest, SearchSummary,
+    SearchRequest, SearchSummary, StructureDryRunReply, StructureDryRunRequest, StructurePack,
+    StructureTitle,
     brarr_server::{Brarr, BrarrServer},
 };
-use crate::db::{decisions, maintenance, providers, searches};
+use crate::db::{decisions, library, maintenance, providers, searches};
+use crate::metadata::registry::Registry;
 use crate::search::{SearchKeys, run_search};
-use crate::{AppError, AppState};
+use crate::{AppError, AppState, flip};
 
 /// Tonic service struct.
 #[derive(Clone)]
@@ -173,6 +175,116 @@ impl Brarr for BrarrService {
             searches_deleted: outcome.searches_deleted,
             retention_days,
         }))
+    }
+
+    async fn structure_dry_run(
+        &self,
+        request: Request<StructureDryRunRequest>,
+    ) -> Result<Response<StructureDryRunReply>, Status> {
+        let req = request.into_inner();
+        let pool = self.state.pool();
+
+        // Built once for the whole batch: it is a handful of HTTP
+        // clients with warm connection pools, and rebuilding them per
+        // title would pay for TLS a hundred and eighty times.
+        let registry = Registry::build(pool).await.map_err(Status::from)?;
+
+        let previews = if req.item_id.trim().is_empty() {
+            flip::preview_all(pool, &registry)
+                .await
+                .map_err(Status::from)?
+        } else {
+            let id = uuid::Uuid::parse_str(req.item_id.trim()).map_err(|_| {
+                Status::invalid_argument(format!("`{}` is not a uuid", req.item_id))
+            })?;
+            let item = library::get_by_id(pool, id).await.map_err(Status::from)?;
+            vec![
+                flip::preview(pool, &registry, &item)
+                    .await
+                    .map_err(Status::from)?,
+            ]
+        };
+
+        let ready = previews
+            .iter()
+            .filter(|p| matches!(p.outcome, flip::Outcome::Ready(_)))
+            .count();
+        let blocked = previews
+            .iter()
+            .filter(|p| matches!(p.outcome, flip::Outcome::Blocked { .. }))
+            .count();
+        info!(
+            target: "brarr_orchestrator::grpc",
+            titles = previews.len(),
+            ready,
+            blocked,
+            "ran a structure dry run via grpc"
+        );
+
+        Ok(Response::new(StructureDryRunReply {
+            titles: previews.iter().map(structure_title).collect(),
+        }))
+    }
+}
+
+/// One preview, on the wire.
+///
+/// Flat scalars with a string discriminant, matching the shape every
+/// other reply in this file uses. The zeroes on a title that is not
+/// `ready` are proto3 defaults and mean "not applicable", which is why
+/// `outcome` is read first and not the counts.
+fn structure_title(preview: &flip::Preview) -> StructureTitle {
+    let (outcome, reason, known, plan) = match &preview.outcome {
+        flip::Outcome::Untouched => ("untouched", String::new(), None, None),
+        flip::Outcome::Blocked {
+            destination,
+            reason,
+        } => ("blocked", reason.clone(), destination.as_deref(), None),
+        flip::Outcome::Ready(ready) => (
+            "ready",
+            String::new(),
+            Some(&ready.destination),
+            Some(&**ready),
+        ),
+    };
+
+    StructureTitle {
+        item_id: preview.item_id.to_string(),
+        title: preview.title.clone(),
+        outcome: outcome.to_owned(),
+        reason,
+        destination_source: known
+            .map(|d| d.source.label().to_owned())
+            .unwrap_or_default(),
+        destination_family: known
+            .map(|d| d.ordering.family().label().to_owned())
+            .unwrap_or_default(),
+        destination_handle: known
+            .and_then(|d| d.ordering.handle())
+            .unwrap_or_default()
+            .to_owned(),
+        pinned: known.is_some_and(|d| d.pinned),
+        paired: plan.map_or(0, |r| u32::try_from(r.plan.pairs.len()).unwrap_or(u32::MAX)),
+        orphans: plan.map_or(0, |r| {
+            u32::try_from(r.plan.orphans.len()).unwrap_or(u32::MAX)
+        }),
+        added: plan.map_or(0, |r| u32::try_from(r.plan.added).unwrap_or(u32::MAX)),
+        grabs_at_risk: plan.map_or(0, |r| r.plan.grabs_at_risk()),
+        stored_air_date_coverage: plan.map_or(0.0, |r| r.plan.air_date_coverage.0),
+        incoming_air_date_coverage: plan.map_or(0.0, |r| r.plan.air_date_coverage.1),
+        would_commit: plan.is_some_and(flip::Ready::would_commit),
+        packs: plan.map_or_else(Vec::new, |r| {
+            r.plan
+                .packs_affected
+                .iter()
+                .map(|p| StructurePack {
+                    season: p.season,
+                    was: u32::try_from(p.was).unwrap_or(u32::MAX),
+                    now: u32::try_from(p.now).unwrap_or(u32::MAX),
+                    grabs: p.grabs,
+                })
+                .collect()
+        }),
     }
 }
 
@@ -335,5 +447,54 @@ mod tests {
         assert_eq!(reply.retention_days, 7);
         assert_eq!(reply.decisions_deleted, 1);
         assert_eq!(reply.searches_deleted, 1);
+    }
+
+    /// The dry run reports every title, and a title nobody decided a
+    /// numbering for costs **no** provider call.
+    ///
+    /// That is what makes running the whole catalogue cheap: on this
+    /// operator's library roughly 165 of 180 series are in this state,
+    /// and a pass that fetched a tree for each would be 180 requests to
+    /// answer "nothing happens" 165 times. The pool here has no
+    /// credentials at all, so any call would surface as `blocked` —
+    /// which is exactly what the assertion catches.
+    #[tokio::test]
+    async fn a_dry_run_reports_every_title_and_calls_nobody_for_the_settled_ones() {
+        let pool = open_memory().await.unwrap();
+        for (tmdb, title) in [(1_396, "Breaking Bad"), (456, "Os Simpsons")] {
+            crate::db::library::upsert(&pool, &crate::db::seed::Seed::series(tmdb, title).build())
+                .await
+                .unwrap();
+        }
+
+        let svc = BrarrService::new(AppState::new(pool, Engine::baseline()));
+        let reply = svc
+            .structure_dry_run(Request::new(StructureDryRunRequest {
+                item_id: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(reply.titles.len(), 2);
+        assert!(
+            reply.titles.iter().all(|t| t.outcome == "untouched"),
+            "no numbering to move means no provider call: {:?}",
+            reply.titles.iter().map(|t| &t.outcome).collect::<Vec<_>>()
+        );
+    }
+
+    /// A malformed id is the caller's mistake, and says so.
+    #[tokio::test]
+    async fn a_dry_run_for_a_bad_uuid_is_an_invalid_argument() {
+        let pool = open_memory().await.unwrap();
+        let svc = BrarrService::new(AppState::new(pool, Engine::baseline()));
+        let status = svc
+            .structure_dry_run(Request::new(StructureDryRunRequest {
+                item_id: "nope".to_owned(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
     }
 }

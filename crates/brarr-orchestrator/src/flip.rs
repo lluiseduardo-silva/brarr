@@ -40,12 +40,13 @@
 
 use std::collections::BTreeMap;
 
-use brarr_core::{MetadataSource, Ordering, OrderingFamily};
+use brarr_core::{MediaType, MetadataSource, Ordering, OrderingFamily};
 use uuid::Uuid;
 
-use crate::db::{Pool, episode_numbering};
+use crate::db::{Pool, episode_numbering, item_ids, library};
 use crate::error::AppError;
-use crate::structure::{Recipe, RecipeSeason};
+use crate::metadata::registry::Registry;
+use crate::structure::{self, Recipe, RecipeSeason, StructurePlan};
 
 /// Where one title's numbering goes.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -181,6 +182,162 @@ fn destination_of(
             moved(MetadataSource::Tmdb, Ordering::Default, true, None)
         }
     }
+}
+
+/// What a dry run found about one title.
+#[derive(Debug, Clone)]
+pub struct Preview {
+    /// The title this is about.
+    pub item_id: Uuid,
+    /// Its name, so a report names something a human recognises.
+    pub title: String,
+    /// What was found.
+    pub outcome: Outcome,
+}
+
+/// One title's verdict, with the plan when there is one.
+#[derive(Debug, Clone)]
+pub enum Outcome {
+    /// Nobody decided a numbering here. No network call was made.
+    Untouched,
+    /// It has somewhere to go and cannot get there, and why.
+    ///
+    /// A blocked title is the whole reason to run this before writing
+    /// anything: it is a title whose searches go on missing, and the
+    /// fix — an id it does not carry, a credential that is not
+    /// configured — is one nobody discovers from a failed grab.
+    Blocked {
+        /// Where it was going, when that much is known.
+        destination: Option<Box<Destination>>,
+        /// What stopped it, in the operator's language.
+        reason: String,
+    },
+    /// It can move, and this is what moving would do.
+    Ready(Box<Ready>),
+}
+
+/// A title that can move.
+#[derive(Debug, Clone)]
+pub struct Ready {
+    /// Where it goes.
+    pub destination: Destination,
+    /// What the tree write would do, computed against the real tree.
+    pub plan: StructurePlan,
+}
+
+impl Ready {
+    /// Whether the write would be accepted as it stands.
+    ///
+    /// The same two questions `guard_plan` asks, asked here so the
+    /// report can rank a batch without attempting one. It is deliberately
+    /// **not** a copy of the gate — it calls nothing and writes nothing,
+    /// and the gate remains the thing that actually refuses.
+    #[must_use]
+    pub fn would_commit(&self) -> bool {
+        self.plan.orphans.is_empty()
+            && !(self.plan.moves_anything() && self.plan.air_dates_are_thin())
+    }
+}
+
+/// Work out what flipping one title would do, writing nothing.
+///
+/// Makes at most one provider call, and none at all for a title nobody
+/// decided a numbering for — which on this catalogue is roughly 165 of
+/// 180, and is what makes running the whole batch cheap.
+///
+/// # Errors
+///
+/// Returns [`AppError::Database`] on SQL failure. A provider that
+/// refuses or cannot be reached is reported as [`Outcome::Blocked`]
+/// rather than raised: one unreachable title must not end a batch of a
+/// hundred and eighty.
+pub async fn preview(
+    pool: &Pool,
+    registry: &Registry,
+    item: &library::LibraryItem,
+) -> Result<Preview, AppError> {
+    let done = |outcome| {
+        Ok(Preview {
+            item_id: item.id,
+            title: item.title.clone(),
+            outcome,
+        })
+    };
+
+    if item.media_type != MediaType::Tv {
+        return done(Outcome::Untouched);
+    }
+
+    let destination = match destination(pool, item.id).await? {
+        Verdict::Untouched => return done(Outcome::Untouched),
+        Verdict::Unreadable(reason) => {
+            return done(Outcome::Blocked {
+                destination: None,
+                reason,
+            });
+        }
+        Verdict::Move(d) => *d,
+    };
+
+    // The id the destination's own provider answers to. Never guessed:
+    // a series brarr holds only under TMDB has no TheTVDB id to search
+    // with either, and saying so is the report's job.
+    let ids = item_ids::for_item(pool, item.id).await?;
+    let Some(known) = ids
+        .iter()
+        .find(|stored| stored.id.source() == destination.source)
+    else {
+        let reason = format!(
+            "o título não guarda um id da {} — resolva o id antes de trocar a fonte",
+            destination.source.display_name()
+        );
+        return done(Outcome::Blocked {
+            destination: Some(Box::new(destination)),
+            reason,
+        });
+    };
+
+    let provider = match registry.require(destination.source) {
+        Ok(p) => p,
+        Err(e) => {
+            return done(Outcome::Blocked {
+                destination: Some(Box::new(destination)),
+                reason: e.to_string(),
+            });
+        }
+    };
+
+    let incoming = match provider.tree(&known.id, &destination.ordering).await {
+        Ok(tree) => tree,
+        Err(e) => {
+            return done(Outcome::Blocked {
+                destination: Some(Box::new(destination)),
+                reason: e.to_string(),
+            });
+        }
+    };
+
+    let plan = structure::plan(pool, item.id, &incoming).await?;
+    done(Outcome::Ready(Box::new(Ready { destination, plan })))
+}
+
+/// The same, over the whole catalogue.
+///
+/// Sequential on purpose. The point of this pass is a report an operator
+/// reads before deciding, not throughput, and firing a hundred and
+/// eighty concurrent requests at two metadata providers is the way to
+/// get rate-limited into a report full of `Blocked` rows that say
+/// nothing about the titles.
+///
+/// # Errors
+///
+/// Returns [`AppError::Database`] on SQL failure.
+pub async fn preview_all(pool: &Pool, registry: &Registry) -> Result<Vec<Preview>, AppError> {
+    let mut out = Vec::new();
+    for item in library::list(pool).await? {
+        out.push(preview(pool, registry, &item).await?);
+    }
+    Ok(out)
 }
 
 /// Rebuild the sizes an operator typed, from the rows they produced.
