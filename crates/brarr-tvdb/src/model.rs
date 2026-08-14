@@ -111,7 +111,7 @@ impl Episode {
 /// same convention `brarr-tmdb` uses, so the two sources produce
 /// comparable values and `coverage`'s "has it aired" question does not
 /// depend on which one filled the column.
-fn parse_date(raw: &str) -> Option<OffsetDateTime> {
+pub(crate) fn parse_date(raw: &str) -> Option<OffsetDateTime> {
     let format = format_description!("[year]-[month]-[day]");
     Date::parse(raw.trim(), &format)
         .ok()
@@ -194,4 +194,49 @@ mod tests {
             Some(datetime!(2016-01-17 0:00 UTC))
         );
     }
+}
+
+/// A series' descriptive record, in its original language.
+///
+/// The translated pair is layered on top by the caller — see
+/// [`SeriesTranslation`] — because the two come from different endpoints
+/// and a series may have artwork and no translation.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SeriesDescription {
+    /// Title in the original language.
+    pub name: Option<String>,
+    /// Synopsis in the original language.
+    pub overview: Option<String>,
+    /// Poster, as an **absolute URL**. TMDB stores a CDN-relative path
+    /// instead, which is why artwork carries its source.
+    pub image: Option<String>,
+    /// First-air year.
+    pub year: Option<i32>,
+    /// Average episode runtime, in minutes.
+    pub runtime_minutes: Option<i32>,
+    /// ISO 639-3 code of the language `name` and `overview` are in.
+    pub original_language: Option<String>,
+    /// `TheTVDB`'s own status word — `Continuing`, `Ended`, … Mapped into
+    /// brarr's vocabulary at the provider boundary, never stored raw.
+    pub status: Option<String>,
+    /// Air date of the next scheduled episode.
+    pub next_aired: Option<OffsetDateTime>,
+}
+
+/// A series' title and synopsis in one language.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SeriesTranslation {
+    /// Translated title, when a contributor has filled one in.
+    pub name: Option<String>,
+    /// Translated synopsis.
+    pub overview: Option<String>,
+}
+
+/// A value that is only whitespace is absent, not empty.
+///
+/// `TheTVDB` uses `""` where a field has no value — `nextAired` on a
+/// finished series, an `image` a contributor never uploaded — and an
+/// empty string rendered as a URL or a date is worse than nothing.
+pub(crate) fn non_blank(raw: Option<String>) -> Option<String> {
+    raw.map(|v| v.trim().to_owned()).filter(|v| !v.is_empty())
 }

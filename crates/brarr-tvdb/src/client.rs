@@ -10,7 +10,10 @@ use url::Url;
 
 use crate::dto;
 use crate::error::TvdbError;
-use crate::model::{Episode, SeasonType, SeriesEpisodes};
+use crate::model::{
+    Episode, SeasonType, SeriesDescription, SeriesEpisodes, SeriesTranslation, non_blank,
+    parse_date,
+};
 use crate::retry::{RetryConfig, run_with_retry};
 
 /// Default API root.
@@ -328,6 +331,69 @@ impl TvdbClient {
             }
         }
         Err(TvdbError::RunawayPagination(MAX_PAGES))
+    }
+
+    /// A series' descriptive record, in the original language.
+    ///
+    /// The translated title and synopsis come from
+    /// [`Self::series_translation`] and are layered on top by the caller
+    /// — this is the base, and the only call that carries artwork,
+    /// status and runtime.
+    ///
+    /// # Errors
+    ///
+    /// [`TvdbError::NotFound`] for an unknown series id, and the
+    /// transport and decoding errors of [`TvdbError`].
+    pub async fn series_extended(&self, series_id: i64) -> Result<SeriesDescription, TvdbError> {
+        let url = self.base.join(&format!("series/{series_id}/extended"))?;
+        let envelope: dto::Envelope<dto::SeriesExtendedDto> =
+            self.get(url, &format!("series {series_id}")).await?;
+        let data = envelope
+            .data
+            .ok_or_else(|| TvdbError::NotFound(format!("series {series_id}")))?;
+        Ok(SeriesDescription {
+            name: non_blank(data.name),
+            overview: non_blank(data.overview),
+            image: non_blank(data.image),
+            year: non_blank(data.year).and_then(|y| y.parse::<i32>().ok()),
+            runtime_minutes: data.average_runtime.and_then(|v| i32::try_from(v).ok()),
+            original_language: non_blank(data.original_language),
+            status: data.status.and_then(|s| non_blank(s.name)),
+            next_aired: non_blank(data.next_aired).as_deref().and_then(parse_date),
+        })
+    }
+
+    /// A series' title and synopsis in one language.
+    ///
+    /// `Ok(None)` when the series has no translation into it. **The API
+    /// answers that with a 404**, not with null fields — the opposite of
+    /// the episode endpoint — so absence is caught here rather than
+    /// surfacing as an error the caller would have to re-classify.
+    ///
+    /// # Errors
+    ///
+    /// The transport and decoding errors of [`TvdbError`]. A 404 is not
+    /// one of them.
+    pub async fn series_translation(
+        &self,
+        series_id: i64,
+        language: &str,
+    ) -> Result<Option<SeriesTranslation>, TvdbError> {
+        let url = self
+            .base
+            .join(&format!("series/{series_id}/translations/{language}"))?;
+        let envelope: dto::Envelope<dto::TranslationDto> = match self
+            .get(url, &format!("series {series_id} in {language}"))
+            .await
+        {
+            Ok(envelope) => envelope,
+            Err(TvdbError::NotFound(_)) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        Ok(envelope.data.map(|d| SeriesTranslation {
+            name: non_blank(d.name),
+            overview: non_blank(d.overview),
+        }))
     }
 
     /// The `TheTVDB` series behind an external id — an `IMDb` `ttNNNNNNN`,

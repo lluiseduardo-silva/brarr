@@ -713,3 +713,74 @@ async fn a_fully_translated_series_asks_once() {
         .unwrap();
     assert_eq!(found.episodes.len(), 2);
 }
+
+/// **A missing series translation is a 404, not a null field** — the
+/// opposite of the episode endpoint, which answers `"name": null`.
+/// Measured live: Frieren's `/translations/por` returns
+/// `NotFoundException`, while Doctor Who's returns a Portuguese title
+/// and synopsis. Absorbing it here is what stops a series with no
+/// Portuguese from being an error.
+#[tokio::test]
+async fn a_series_without_a_translation_is_absence_not_failure() {
+    let server = MockServer::start().await;
+    mock_login(&server).await;
+    Mock::given(method("GET"))
+        .and(path("/v4/series/424536/translations/por"))
+        .respond_with(ResponseTemplate::new(404).set_body_json(json!({
+            "status": "failure",
+            "message": "NotFoundException: error fetching translation",
+            "data": null
+        })))
+        .mount(&server)
+        .await;
+
+    let found = client(&server)
+        .series_translation(424_536, "por")
+        .await
+        .expect("a 404 is not an error here");
+    assert!(found.is_none());
+}
+
+/// The base record is the only call carrying artwork, status, runtime
+/// and year — and its `image` is an **absolute URL**, which is why
+/// artwork is stored with the source that issued it.
+#[tokio::test]
+async fn the_extended_record_carries_what_no_translation_does() {
+    let server = MockServer::start().await;
+    mock_login(&server).await;
+    Mock::given(method("GET"))
+        .and(path("/v4/series/424536/extended"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "status": "success",
+            "data": {
+                "id": 424_536,
+                "name": "葬送のフリーレン",
+                "overview": "魔王を倒して…",
+                "image": "https://artworks.thetvdb.com/banners/v4/series/424536/posters/x.jpg",
+                "year": "2023",
+                "averageRuntime": 25,
+                "originalLanguage": "jpn",
+                "status": { "id": 1, "name": "Continuing" },
+                "nextAired": ""
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    let found = client(&server).series_extended(424_536).await.unwrap();
+    assert_eq!(found.name.as_deref(), Some("葬送のフリーレン"));
+    assert_eq!(found.year, Some(2023));
+    assert_eq!(found.runtime_minutes, Some(25));
+    assert_eq!(found.status.as_deref(), Some("Continuing"));
+    assert!(
+        found
+            .image
+            .as_deref()
+            .is_some_and(|u| u.starts_with("https://")),
+        "absolute, unlike TMDB's CDN-relative path"
+    );
+    assert!(
+        found.next_aired.is_none(),
+        "an empty string is absence, not a date"
+    );
+}

@@ -37,9 +37,10 @@ pub use enrichment::ReleaseEnrichment;
 pub use ids::{ImdbId, ImdbIdError, MalId, MalIdError, TmdbId, TmdbIdError, TvdbId, TvdbIdError};
 pub use language::Language;
 pub use metadata::{
-    Block, BlockError, Capabilities, CredentialField, ExternalId, ExternalIdError, MediaSupport,
-    MediaType, MetaFuture, MetadataError, MetadataProvider, MetadataSource, Ordering,
-    OrderingFamily, SeriesTree, SourceKind, StructureVariant, TreeEpisode, TreeSeason,
+    Artwork, Block, BlockError, Capabilities, CredentialField, Description, ExternalId,
+    ExternalIdError, MediaSupport, MediaType, MetaFuture, MetadataError, MetadataProvider,
+    MetadataSource, Ordering, OrderingFamily, ProductionStatus, SeriesTree, SourceKind,
+    StructureVariant, TreeEpisode, TreeSeason,
 };
 pub use provider::{ProviderError, ProviderFuture, TrackerProvider};
 pub use release::{

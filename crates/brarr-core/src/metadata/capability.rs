@@ -52,6 +52,13 @@ pub struct Capabilities {
     /// [`MediaSupport::Series`] is a declaration nothing can honour —
     /// [`Self::is_coherent`] refuses it and a guard walks every impl.
     pub structure: MediaSupport,
+    /// Media kinds this provider can describe — title, synopsis,
+    /// artwork, status.
+    ///
+    /// Declared narrow rather than aspirational: TheTVDB has films and
+    /// this client does not read them, so claiming `Both` would be a
+    /// promise the registry acts on and the code cannot meet.
+    pub descriptive: MediaSupport,
 }
 
 impl Capabilities {
@@ -111,6 +118,7 @@ mod tests {
             !Capabilities {
                 identity: MediaSupport::Both,
                 structure: MediaSupport::Both,
+                descriptive: MediaSupport::Both,
             }
             .is_coherent()
         );
@@ -118,6 +126,7 @@ mod tests {
             !Capabilities {
                 identity: MediaSupport::Both,
                 structure: MediaSupport::Movies,
+                descriptive: MediaSupport::Both,
             }
             .is_coherent()
         );
@@ -125,6 +134,7 @@ mod tests {
             Capabilities {
                 identity: MediaSupport::Both,
                 structure: MediaSupport::Series,
+                descriptive: MediaSupport::Both,
             }
             .is_coherent()
         );
@@ -132,6 +142,7 @@ mod tests {
             Capabilities {
                 identity: MediaSupport::Movies,
                 structure: MediaSupport::None,
+                descriptive: MediaSupport::Movies,
             }
             .is_coherent()
         );

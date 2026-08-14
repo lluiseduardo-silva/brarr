@@ -138,62 +138,11 @@ impl MonitorScope {
 
 /// Where a work stands, in brarr's own words.
 ///
-/// `tmdb_status` was free text carrying **one** provider's vocabulary —
-/// `Returning Series`, `Ended`, `Released`. TheTVDB says `Continuing`
-/// for the same state, so with no closed set both dialects entered the
-/// same column and every comparison started depending on who wrote the
-/// row. The neutral column and its CHECK arrived with the identity
-/// migration and, until now, nothing read it: a value backfilled and
-/// never consulted is the worst of the three states, so this is the read
-/// side arriving.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProductionStatus {
-    /// Still airing, or between seasons.
-    Returning,
-    /// Finished as planned.
-    Ended,
-    /// Stopped before it was finished. Kept apart from [`Self::Ended`]
-    /// because "will there be more?" has different answers.
-    Cancelled,
-    /// Announced and being made.
-    InProduction,
-    /// Out.
-    Released,
-    /// Announced, nothing shot.
-    Announced,
-}
-
-impl ProductionStatus {
-    /// Every variant, for the guards and the parser.
-    const ALL: [Self; 6] = [
-        Self::Returning,
-        Self::Ended,
-        Self::Cancelled,
-        Self::InProduction,
-        Self::Released,
-        Self::Announced,
-    ];
-
-    /// The `library_items.status` value.
-    #[must_use]
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Returning => "returning",
-            Self::Ended => "ended",
-            Self::Cancelled => "cancelled",
-            Self::InProduction => "in-production",
-            Self::Released => "released",
-            Self::Announced => "announced",
-        }
-    }
-
-    /// Inverse of [`Self::label`]. `None` for anything the CHECK would
-    /// have refused, which a hand-edited row is the only way to produce.
-    #[must_use]
-    pub fn parse(raw: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|s| s.label() == raw)
-    }
-}
+/// Re-exported from `brarr-core` rather than declared here: the trait
+/// returns it, so a copy in the data layer would be two closed sets that
+/// have to agree — and a value valid in one and unknown in the other is
+/// precisely the shape of defect this whole block has been closing.
+pub use brarr_core::ProductionStatus;
 
 /// One catalogue entry.
 #[derive(Debug, Clone)]

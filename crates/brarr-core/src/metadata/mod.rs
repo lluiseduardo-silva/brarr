@@ -21,15 +21,20 @@
 //! instead: [`MetadataProvider::tree`] returns the coordinates that will
 //! be stored, and nothing translates them afterwards.
 //!
-//! # What is deliberately not here
+//! # Description arrived the day it had two implementations
 //!
-//! There is no `describe` and no `artwork`. TheTVDB's episode endpoint
-//! carries a series id and a name and nothing else — no overview, no
-//! status, no runtime, no poster — so those would be traits with one
-//! implementation, which this workspace forbids and whose escape hatches
-//! (`unimplemented!`, or `Err` on every call) are respectively banned and
-//! dishonest. Description and artwork stay concrete until a second
-//! implementation exists; on that day the trait is born with two.
+//! [`MetadataProvider::describe`] was deliberately absent while
+//! TheTVDB's *episode* endpoint was all this crate read of it — a series
+//! id and a name, no overview, no status, no runtime, no poster. A trait
+//! with one implementation is what this workspace forbids, and its
+//! escape hatches (`unimplemented!`, or `Err` on every call) are
+//! respectively banned and dishonest.
+//!
+//! `/series/{id}/extended` and `/series/{id}/translations/{lang}` are the
+//! second implementation, so the method is here. It is also why
+//! [`Artwork`] carries its source: TMDB stores a path relative to its
+//! CDN and TheTVDB returns an absolute URL, so the same string means two
+//! things and cannot become a URL without knowing who wrote it.
 //!
 //! # Capabilities are consulted before dispatch, not after
 //!
@@ -46,10 +51,12 @@ use std::future::Future;
 use std::pin::Pin;
 
 mod capability;
+mod description;
 mod ids;
 mod tree;
 
 pub use capability::{Capabilities, CredentialField, MediaSupport};
+pub use description::{Artwork, Description, ProductionStatus};
 pub use ids::{ExternalId, ExternalIdError, MediaType, MetadataSource, SourceKind};
 pub use tree::{
     Block, BlockError, Ordering, OrderingFamily, SeriesTree, StructureVariant, TreeEpisode,
@@ -119,6 +126,32 @@ pub trait MetadataProvider: Send + Sync {
         &self,
         series: &ExternalId,
     ) -> MetaFuture<'_, Result<Vec<StructureVariant>, MetadataError>>;
+
+    /// One title as this provider describes it.
+    ///
+    /// **A single owner per item**, unlike identity, which is a set:
+    /// `title`, `year`, `original_title` and `overview` all describe one
+    /// cut of one work, so taking the title from one provider and the
+    /// year from another produces a record that describes nothing.
+    ///
+    /// Unlike [`Self::tree`], a policy change may overwrite a recorded
+    /// descriptive owner without asking. Rewriting a synopsis is cheap
+    /// and reversible; rebuilding a tree re-points every acquisition
+    /// hanging off the item, which is why that one is a choice and this
+    /// one is not.
+    ///
+    /// # Errors
+    ///
+    /// [`MetadataError::NotFound`] when the provider holds no record
+    /// under this id, and the credential and transport variants. A
+    /// provider that has the title but no translation of it answers with
+    /// the fields it has and leaves the rest absent — saying nothing is
+    /// better than saying it in a language nobody asked for.
+    fn describe(
+        &self,
+        id: &ExternalId,
+        media: MediaType,
+    ) -> MetaFuture<'_, Result<Description, MetadataError>>;
 
     /// The tree, under `ordering`.
     ///

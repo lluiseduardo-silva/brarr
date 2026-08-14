@@ -9,23 +9,23 @@
 //! `brarr-core`, the implementation lives beside the client that answers
 //! it, and the orchestrator depends on neither directly.
 //!
-//! **This is what turns TheTVDB from a numbering source into a structure
+//! **This is what turns `TheTVDB` from a numbering source into a structure
 //! owner.** The crate docs above still describe the older arrangement,
 //! where the data landed in a translation table beside a TMDB-built tree;
 //! what this impl offers instead is the tree itself, in the coordinates
 //! that get stored.
 
 use brarr_core::{
-    Capabilities, CredentialField, ExternalId, MediaSupport, MediaType, MetaFuture, MetadataError,
-    MetadataProvider, MetadataSource, Ordering, OrderingFamily, SeriesTree, StructureVariant,
-    TreeEpisode, TreeSeason,
+    Artwork, Capabilities, CredentialField, Description, ExternalId, MediaSupport, MediaType,
+    MetaFuture, MetadataError, MetadataProvider, MetadataSource, Ordering, OrderingFamily,
+    ProductionStatus, SeriesTree, StructureVariant, TreeEpisode, TreeSeason,
 };
 
 use crate::client::TvdbClient;
 use crate::error::TvdbError;
 use crate::model::{Episode, SeasonType};
 
-/// What `/settings` renders for TheTVDB.
+/// What `/settings` renders for `TheTVDB`.
 ///
 /// The PIN is **not** required, and that is load-bearing: it exists only
 /// for a user-supported key and the API documentation says to remove it
@@ -52,7 +52,7 @@ impl MetadataProvider for TvdbClient {
 
     /// Series only, on both axes.
     ///
-    /// TheTVDB has films, and this client does not read them: the
+    /// `TheTVDB` has films, and this client does not read them: the
     /// endpoints it speaks are the series ones, and a `Both` here would
     /// be a claim the registry acts on and the code cannot meet. Declared
     /// narrow rather than aspirational — that is what keeps
@@ -61,6 +61,10 @@ impl MetadataProvider for TvdbClient {
         Capabilities {
             identity: MediaSupport::Series,
             structure: MediaSupport::Series,
+            // TheTVDB has films; this client speaks the series
+            // endpoints and nothing else, so claiming `Both` would be a
+            // promise the registry acts on and the code cannot meet.
+            descriptive: MediaSupport::Series,
         }
     }
 
@@ -123,6 +127,85 @@ impl MetadataProvider for TvdbClient {
                     "Ordenação alternativa",
                 ),
             ])
+        })
+    }
+
+    /// A series as `TheTVDB` describes it, in the first language of the
+    /// configured chain that has a translation.
+    ///
+    /// **The base record is always fetched**, unlike the episode walk:
+    /// it is the only call carrying artwork, status, runtime and year,
+    /// and a translation without it would be a title and a synopsis over
+    /// nothing. The translated pair is layered on top, per field — a
+    /// contributor may have filled the title and not the synopsis.
+    ///
+    /// A missing translation is a **404** here, not a null field, which
+    /// [`TvdbClient::series_translation`] absorbs into `Ok(None)` so a
+    /// series with no Portuguese is not an error.
+    ///
+    /// # Errors
+    ///
+    /// [`MetadataError::Unsupported`] for a film — the registry consults
+    /// [`Self::capabilities`] first, so reaching it is a bug and it says
+    /// so. Otherwise the credential and transport variants.
+    fn describe(
+        &self,
+        id: &ExternalId,
+        media: MediaType,
+    ) -> MetaFuture<'_, Result<Description, MetadataError>> {
+        let id = id.clone();
+        Box::pin(async move {
+            if media != MediaType::Tv {
+                return Err(MetadataError::Unsupported {
+                    origin: MetadataSource::Tvdb,
+                    capability: "describe",
+                    media,
+                });
+            }
+            let numeric = i64::from(id.as_u32().map_err(MetadataError::BadId)?);
+            let base = self.series_extended(numeric).await.map_err(translate)?;
+
+            let mut title = None;
+            let mut overview = None;
+            for language in self.languages() {
+                if title.is_some() && overview.is_some() {
+                    break;
+                }
+                let Some(found) = self
+                    .series_translation(numeric, language)
+                    .await
+                    .map_err(translate)?
+                else {
+                    continue;
+                };
+                title = title.or(found.name);
+                overview = overview.or(found.overview);
+            }
+
+            // The original is the last resort on both fields
+            // independently, which is the same rule the episode names
+            // follow — and the reason a series can read with a
+            // Portuguese title over an English synopsis.
+            let title = title.or(base.name).ok_or_else(|| MetadataError::NotFound {
+                origin: MetadataSource::Tvdb,
+                media,
+                id: id.value().to_owned(),
+            })?;
+
+            Ok(Description {
+                overview: overview.or(base.overview),
+                year: base.year,
+                status: status_of(base.status.as_deref()),
+                runtime_minutes: base.runtime_minutes,
+                // Absolute, unlike TMDB's CDN-relative path. Tagging it
+                // is what stops the CDN prefix being glued onto a URL.
+                poster: base.image.map(|value| Artwork {
+                    source: MetadataSource::Tvdb,
+                    value,
+                }),
+                next_air_date: base.next_aired,
+                ..Description::new(MetadataSource::Tvdb, title)
+            })
         })
     }
 
@@ -253,6 +336,22 @@ fn seasons_of(episodes: &[Episode]) -> Vec<TreeSeason> {
 /// The two failures worth naming keep their identity: a refused
 /// credential is the operator's to fix, and an unknown id is not a
 /// failure at all in most call paths.
+/// `TheTVDB`'s status words, in brarr's vocabulary.
+///
+/// **`Continuing` is what TMDB calls `Returning Series`** — the same
+/// state under two dialects, which is exactly why the stored column is a
+/// closed set rather than whatever the provider said. An unrecognised
+/// word reads as unknown rather than being carried through raw.
+fn status_of(raw: Option<&str>) -> Option<ProductionStatus> {
+    match raw?.trim() {
+        "Continuing" => Some(ProductionStatus::Returning),
+        "Ended" => Some(ProductionStatus::Ended),
+        "Cancelled" | "Canceled" => Some(ProductionStatus::Cancelled),
+        "Upcoming" => Some(ProductionStatus::Announced),
+        _ => None,
+    }
+}
+
 fn translate(e: TvdbError) -> MetadataError {
     let origin = MetadataSource::Tvdb;
     match e {
@@ -295,7 +394,7 @@ mod tests {
         }
     }
 
-    /// **The grouping that makes TheTVDB a structure owner.** A flat
+    /// **The grouping that makes `TheTVDB` a structure owner.** A flat
     /// episode list becomes the five-season shape the disk uses.
     #[test]
     fn a_flat_list_becomes_the_broadcast_shape() {

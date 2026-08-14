@@ -9,9 +9,9 @@
 use std::collections::HashMap;
 
 use brarr_core::{
-    Capabilities, CredentialField, ExternalId, MediaSupport, MediaType, MetaFuture, MetadataError,
-    MetadataProvider, MetadataSource, Ordering, OrderingFamily, SeriesTree, StructureVariant,
-    TreeEpisode, TreeSeason,
+    Artwork, Capabilities, CredentialField, Description, ExternalId, MediaSupport, MediaType,
+    MetaFuture, MetadataError, MetadataProvider, MetadataSource, Ordering, OrderingFamily,
+    ProductionStatus, SeriesTree, StructureVariant, TreeEpisode, TreeSeason,
 };
 use time::{Date, OffsetDateTime, Time, UtcOffset};
 
@@ -42,6 +42,7 @@ impl MetadataProvider for TmdbClient {
         Capabilities {
             identity: MediaSupport::Both,
             structure: MediaSupport::Series,
+            descriptive: MediaSupport::Both,
         }
     }
 
@@ -131,6 +132,52 @@ impl MetadataProvider for TmdbClient {
                         .map(|covered| (covered, covered)),
                 })
                 .collect())
+        })
+    }
+
+    /// TMDB describes both kinds, and its client already walks the
+    /// pt-BR → pt-PT → en-US fallback in `model.rs` — TMDB has no
+    /// automatic language fallback, so `language=pt-BR` returns an
+    /// *empty* overview rather than an English one.
+    fn describe(
+        &self,
+        id: &ExternalId,
+        media: MediaType,
+    ) -> MetaFuture<'_, Result<Description, MetadataError>> {
+        let id = id.clone();
+        Box::pin(async move {
+            let numeric = i64::from(id.as_u32().map_err(MetadataError::BadId)?);
+            match media {
+                MediaType::Movie => {
+                    let d = self.movie(numeric).await.map_err(translate)?;
+                    Ok(Description {
+                        original_title: d.original_title.clone(),
+                        overview: d.overview.clone(),
+                        year: d.release_date.map(Date::year),
+                        status: status_of(d.status.as_deref()),
+                        runtime_minutes: d.runtime_minutes,
+                        poster: art(d.poster_path.clone()),
+                        backdrop: art(d.backdrop_path.clone()),
+                        digital_release_at: d.digital_release.map(at_midnight),
+                        physical_release_at: d.physical_release.map(at_midnight),
+                        ..Description::new(MetadataSource::Tmdb, d.title)
+                    })
+                }
+                MediaType::Tv => {
+                    let d = self.tv(numeric).await.map_err(translate)?;
+                    Ok(Description {
+                        original_title: d.original_name.clone(),
+                        overview: d.overview.clone(),
+                        year: d.first_air_date.map(Date::year),
+                        status: status_of(d.status.as_deref()),
+                        runtime_minutes: d.episode_runtime,
+                        poster: art(d.poster_path.clone()),
+                        backdrop: art(d.backdrop_path.clone()),
+                        next_air_date: d.next_air_date.map(at_midnight),
+                        ..Description::new(MetadataSource::Tmdb, d.name)
+                    })
+                }
+            }
         })
     }
 
@@ -332,6 +379,41 @@ fn midnight_utc(date: Date) -> OffsetDateTime {
 }
 
 /// Peel this crate's error into the neutral one.
+/// A CDN-relative path, tagged so the caller knows not to treat it as a
+/// URL. `TheTVDB` returns absolute ones; prefixing the TMDB CDN onto those
+/// 404s in silence.
+fn art(path: Option<String>) -> Option<Artwork> {
+    path.filter(|p| !p.trim().is_empty()).map(|value| Artwork {
+        source: MetadataSource::Tmdb,
+        value,
+    })
+}
+
+/// TMDB's status words, in brarr's vocabulary.
+///
+/// **One provider's dialect, mapped at that provider's boundary.**
+/// `TheTVDB` says `Continuing` for what TMDB calls `Returning Series`, and
+/// a field that accepts both is a field whose comparisons depend on who
+/// wrote it. An unrecognised word reads as unknown rather than being
+/// carried through raw.
+fn status_of(raw: Option<&str>) -> Option<ProductionStatus> {
+    match raw?.trim() {
+        "Returning Series" => Some(ProductionStatus::Returning),
+        "Ended" => Some(ProductionStatus::Ended),
+        "Canceled" | "Cancelled" => Some(ProductionStatus::Cancelled),
+        "In Production" | "Post Production" | "Planned" => Some(ProductionStatus::InProduction),
+        "Released" => Some(ProductionStatus::Released),
+        "Rumored" => Some(ProductionStatus::Announced),
+        _ => None,
+    }
+}
+
+/// A date at midnight UTC — the convention `brarr-tmdb`, `brarr-tvdb`
+/// and the \*arr bridge share, so the three produce comparable values.
+fn at_midnight(date: Date) -> OffsetDateTime {
+    OffsetDateTime::new_in_offset(date, Time::MIDNIGHT, UtcOffset::UTC)
+}
+
 fn translate(e: TmdbError) -> MetadataError {
     let origin = MetadataSource::Tmdb;
     match e {

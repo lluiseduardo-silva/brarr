@@ -84,6 +84,57 @@ pub(crate) struct EpisodeDto {
     pub aired: Option<String>,
 }
 
+/// `GET /series/{id}/extended` — the descriptive record.
+///
+/// `name` and `overview` are in the series' **original** language; the
+/// translated pair comes from [`TranslationDto`] and is layered on top.
+/// `image` is an **absolute URL**, unlike TMDB's CDN-relative path.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SeriesExtendedDto {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub overview: Option<String>,
+    #[serde(default)]
+    pub image: Option<String>,
+    #[serde(default)]
+    pub year: Option<String>,
+    #[serde(default)]
+    pub average_runtime: Option<i64>,
+    #[serde(default)]
+    pub original_language: Option<String>,
+    /// An **object**, not a string: `{"id":1,"name":"Continuing",…}`.
+    #[serde(default)]
+    pub status: Option<StatusDto>,
+    /// `YYYY-MM-DD` of the next scheduled episode; empty string when
+    /// there is none, which is why this is not a date type here.
+    #[serde(default)]
+    pub next_aired: Option<String>,
+}
+
+/// The `status` object of a series record.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct StatusDto {
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+/// `GET /series/{id}/translations/{lang}`.
+///
+/// **A missing translation is a 404**, not a null field — unlike the
+/// episode endpoint, which answers `"name": null`. The two shapes are
+/// handled differently for that reason.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TranslationDto {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub overview: Option<String>,
+}
+
 /// `GET /search/remoteid/{id}` payload entry.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]

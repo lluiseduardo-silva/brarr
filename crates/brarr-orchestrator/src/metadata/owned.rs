@@ -252,6 +252,7 @@ mod tests {
             Capabilities {
                 identity: MediaSupport::Series,
                 structure: MediaSupport::Series,
+                descriptive: MediaSupport::Series,
             }
         }
 
@@ -269,6 +270,15 @@ mod tests {
             _media: MediaType,
         ) -> MetaFuture<'_, Result<Option<ExternalId>, MetadataError>> {
             Box::pin(async { Ok(None) })
+        }
+
+        fn describe(
+            &self,
+            _id: &ExternalId,
+            _media: MediaType,
+        ) -> MetaFuture<'_, Result<brarr_core::Description, MetadataError>> {
+            let source = self.source;
+            Box::pin(async move { Ok(brarr_core::Description::new(source, "a title")) })
         }
 
         fn variants(
