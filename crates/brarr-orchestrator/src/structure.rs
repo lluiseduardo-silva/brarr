@@ -53,7 +53,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use brarr_core::{MetadataSource, SeriesTree, TreeEpisode};
+use brarr_core::{Block, MetadataSource, Ordering, OrderingFamily, SeriesTree, TreeEpisode};
 use time::Date;
 use uuid::Uuid;
 
@@ -228,6 +228,74 @@ impl StructurePlan {
 /// encoding the translation table has always used — there is no
 /// enabled/disabled flag, only rows or no rows.
 pub type Translation = HashMap<(i32, i32), (i32, i32)>;
+
+/// The cut an operator declared, in the form they declared it.
+///
+/// Stored as JSON in `library_items.structure_recipe`, and stored at all
+/// because [`Ordering::Manual`] applied once and then forgotten is a
+/// choice with a half-life of one refresh: `SeriesTree::recut` needs the
+/// sizes again every time the provider's tree is fetched, and a tree that
+/// grew an episode has to fail loudly rather than quietly revert.
+///
+/// Sizes per season, not a flat block list, because that is the shape the
+/// form edits — one field per season — and a value that has to be
+/// regrouped before it can be shown back is a value that will be
+/// regrouped wrongly one day. The persistence shape lives here rather
+/// than on [`brarr_core::Block`] so the vocabulary crate stays free of a
+/// storage format.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Recipe {
+    /// One entry per provider season the operator cut, in order.
+    pub seasons: Vec<RecipeSeason>,
+}
+
+/// One season's declared cut.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RecipeSeason {
+    /// The provider season being cut.
+    pub season: i32,
+    /// How many episodes fall in each block, in order.
+    pub sizes: Vec<u32>,
+}
+
+impl Recipe {
+    /// The blocks this recipe declares.
+    #[must_use]
+    pub fn blocks(&self) -> Vec<Block> {
+        self.seasons
+            .iter()
+            .flat_map(|s| {
+                s.sizes.iter().map(|size| Block {
+                    season: s.season,
+                    size: *size,
+                })
+            })
+            .collect()
+    }
+
+    /// Read a recipe back, or nothing at all.
+    ///
+    /// A recipe that does not parse reads as absent rather than as an
+    /// error: the column is only ever written by this module, so a value
+    /// that fails is a value from a future brarr, and the item falling
+    /// back to the provider's own ordering is a visible wrong shape the
+    /// operator can re-declare — better than a title that refuses to
+    /// refresh at all.
+    #[must_use]
+    pub fn parse(raw: &str) -> Option<Self> {
+        serde_json::from_str(raw).ok()
+    }
+
+    /// Render for storage.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::Json`] if the recipe cannot be serialised,
+    /// which is unreachable for a tree of integers.
+    pub fn render(&self) -> Result<String, AppError> {
+        Ok(serde_json::to_string(self)?)
+    }
+}
 
 /// The outcome of pairing one stored tree against one incoming tree.
 #[derive(Debug, Clone, Default)]
@@ -520,6 +588,72 @@ pub async fn owner(pool: &Pool, item_id: Uuid) -> Result<StructureOwner, AppErro
     library::structure_owner(pool, item_id).await
 }
 
+/// The ordering an item is under, rebuilt from the three columns that
+/// record it.
+///
+/// This is what a refresh has to ask the provider for. Asking for
+/// [`Ordering::Default`] instead — which is what every caller did before
+/// there was anything else to ask for — fetches the provider's own shape
+/// and hands it to [`apply`], where the pin refuses it: a title under a
+/// declared ordering could never pick up a new episode, and the failure
+/// would read as the provider being wrong.
+///
+/// Every unreadable combination degrades to [`Ordering::Default`] rather
+/// than to an error, and each one is a shape only a future brarr or a
+/// hand-edited row can produce: a `Named` family with no handle names an
+/// ordering nobody can fetch, and a `Manual` family with no parseable
+/// recipe has no sizes to cut with. The tree that comes back is visibly
+/// the provider's own, which the operator can see and re-declare.
+#[must_use]
+pub fn ordering_of(owner: &StructureOwner) -> Ordering {
+    match owner.family {
+        None | Some(OrderingFamily::Default) => Ordering::Default,
+        Some(OrderingFamily::Manual) => owner
+            .recipe
+            .as_deref()
+            .and_then(Recipe::parse)
+            .map_or(Ordering::Default, |r| Ordering::Manual {
+                blocks: r.blocks(),
+            }),
+        Some(family) => {
+            owner
+                .handle
+                .as_deref()
+                .map_or(Ordering::Default, |handle| Ordering::Named {
+                    family,
+                    handle: handle.into(),
+                })
+        }
+    }
+}
+
+/// What authorises a tree write.
+///
+/// The gates in this module divide cleanly in two, and the division is
+/// who they protect against. [`Intent::Refresh`] is a sweep, and the
+/// recorded owner and the pin are exactly what stop it from moving a
+/// title behind the operator's back. [`Intent::Choice`] is the operator
+/// at the screen: the owner and the pin are the thing being changed, so
+/// they cannot also be what refuses the change.
+///
+/// **Nothing else is waived.** The empty tree, the orphans, the air-date
+/// coverage and the orphan-count net inside the transaction all still
+/// run, because those protect *files*, and choosing an ordering is not
+/// authority to unlink one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Intent {
+    /// A sweep refreshing the ordering already in force.
+    Refresh,
+    /// The operator declaring this ordering for this title.
+    Choice {
+        /// Whether to freeze it against future sweeps.
+        pinned: bool,
+        /// The sizes behind an [`Ordering::Manual`], to store so the next
+        /// refresh can cut again.
+        recipe: Option<Recipe>,
+    },
+}
+
 /// Work out what a tree write would do, writing nothing.
 ///
 /// # Errors
@@ -648,15 +782,33 @@ fn pack_impacts(
 ///
 /// # Errors
 ///
-/// - [`AppError::InvalidInput`] when the item is a movie, when the tree
-///   is empty, when its source is not the one the item records, when the
-///   item is pinned to a different ordering, when stored episodes would
-///   be orphaned, or when a move has too few air dates behind it.
+/// - [`AppError::InvalidInput`] when the tree is empty, when its source
+///   is not the one the item records, when the item is pinned to a
+///   different ordering, when stored episodes would be orphaned, or when
+///   a move has too few air dates behind it.
 /// - [`AppError::NotFound`] for an unknown item.
 /// - [`AppError::Database`] on SQL failure.
 pub async fn apply(pool: &Pool, item_id: Uuid, incoming: &SeriesTree) -> Result<Applied, AppError> {
+    apply_with(pool, item_id, incoming, &Intent::Refresh).await
+}
+
+/// [`apply`], told who is asking.
+///
+/// # Errors
+///
+/// The same as [`apply`], except that under [`Intent::Choice`] the source
+/// and the pin do not refuse — see [`Intent`] for why, and for the list
+/// of what still does.
+pub async fn apply_with(
+    pool: &Pool,
+    item_id: Uuid,
+    incoming: &SeriesTree,
+    intent: &Intent,
+) -> Result<Applied, AppError> {
     let owner = library::structure_owner(pool, item_id).await?;
-    guard_source(&owner, incoming, item_id)?;
+    if matches!(intent, Intent::Refresh) {
+        guard_source(&owner, incoming, item_id)?;
+    }
 
     // An empty tree is never a legal write over a live one: it prunes
     // every episode and orphans every acquisition on the item. This is
@@ -736,7 +888,27 @@ pub async fn apply(pool: &Pool, item_id: Uuid, incoming: &SeriesTree) -> Result<
         .collect::<Vec<_>>();
 
     library::write_tree(pool, item_id, &decided).await?;
-    library::record_structure(pool, item_id, incoming.source, &incoming.ordering).await?;
+
+    // Recorded after the write, and never inside it: the tree is the
+    // thing that must be all-or-nothing, and a stamp that outran a
+    // rolled-back write would claim an ordering the rows do not have.
+    match intent {
+        Intent::Refresh => {
+            library::record_structure(pool, item_id, incoming.source, &incoming.ordering).await?;
+        }
+        Intent::Choice { pinned, recipe } => {
+            let rendered = recipe.as_ref().map(Recipe::render).transpose()?;
+            library::set_structure_choice(
+                pool,
+                item_id,
+                incoming.source,
+                &incoming.ordering,
+                rendered.as_deref(),
+                *pinned,
+            )
+            .await?;
+        }
+    }
 
     Ok(Applied {
         reused: plan.pairs.len(),
@@ -1364,6 +1536,119 @@ mod tests {
                 .unwrap()
                 .len(),
             20
+        );
+    }
+
+    /// A series of 20 in one season, cut 12 / 8 by the operator.
+    ///
+    /// Returns the item and the tree that cut produces, which is the
+    /// tree a later refresh has to fetch again for the choice to hold.
+    async fn cut_in_two(pool: &DbPool) -> (Uuid, SeriesTree, Recipe) {
+        let item = series_with(pool, &[20], true).await;
+
+        let flat = tree(
+            MetadataSource::Tmdb,
+            vec![incoming(
+                1,
+                (1..=20)
+                    .map(|n| TreeEpisode {
+                        air_date: Some(day(i64::from(n))),
+                        ..ep(n, &format!("tmdb-{n}"))
+                    })
+                    .collect(),
+            )],
+        );
+        let recipe = Recipe {
+            seasons: vec![RecipeSeason {
+                season: 1,
+                sizes: vec![12, 8],
+            }],
+        };
+        let declared = flat.recut(&recipe.blocks()).unwrap();
+
+        apply_with(
+            pool,
+            item,
+            &declared,
+            &Intent::Choice {
+                pinned: true,
+                recipe: Some(recipe.clone()),
+            },
+        )
+        .await
+        .unwrap();
+
+        (item, declared, recipe)
+    }
+
+    /// The operator declared an ordering; the sweep that runs every half
+    /// hour must not take it back.
+    ///
+    /// The second half is the one that makes the pin usable rather than
+    /// merely safe: a pin freezes the *choice*, not the data, so a
+    /// refresh **under the ordering in force** still commits. Without
+    /// it, a pinned title could never pick up a new episode.
+    #[tokio::test]
+    async fn a_pinned_item_is_untouched_by_a_sweep() {
+        let pool = open_memory().await.unwrap();
+        let (item, declared, _) = cut_in_two(&pool).await;
+
+        let owner = library::structure_owner(&pool, item).await.unwrap();
+        assert!(owner.pinned);
+        assert_eq!(owner.family, Some(OrderingFamily::Manual));
+
+        // A sweep offering the provider's own shape is refused.
+        let flat = tree(
+            MetadataSource::Tmdb,
+            vec![incoming(
+                1,
+                (1..=20)
+                    .map(|n| TreeEpisode {
+                        air_date: Some(day(i64::from(n))),
+                        ..ep(n, &format!("tmdb-{n}"))
+                    })
+                    .collect(),
+            )],
+        );
+        let refused = apply(&pool, item, &flat).await.unwrap_err();
+        assert!(
+            matches!(&refused, AppError::InvalidInput(m) if m.contains("fixada")),
+            "expected the pin to refuse, got {refused:?}"
+        );
+
+        // The shape on disk is still the operator's.
+        let seasons = library::seasons(&pool, item).await.unwrap();
+        assert_eq!(seasons.len(), 2);
+
+        // And the same ordering refreshes normally.
+        apply(&pool, item, &declared).await.unwrap();
+        assert_eq!(library::seasons(&pool, item).await.unwrap().len(), 2);
+    }
+
+    /// The cut has to be re-applicable, not merely applied.
+    ///
+    /// `Ordering::Manual` carries the blocks, but a refresh starts from
+    /// the provider's own tree and has to cut it again — so without the
+    /// recipe stored, the sizes are gone the moment the operator closes
+    /// the panel, and the next refresh silently reverts the title to
+    /// TMDB's shape. `ordering_of` reading them back out of the column is
+    /// what a refresh will ask for.
+    #[tokio::test]
+    async fn a_manual_ordering_survives_a_refresh() {
+        let pool = open_memory().await.unwrap();
+        let (item, _, recipe) = cut_in_two(&pool).await;
+
+        let owner = library::structure_owner(&pool, item).await.unwrap();
+        assert_eq!(
+            owner.recipe.as_deref().and_then(Recipe::parse),
+            Some(recipe.clone())
+        );
+        assert_eq!(
+            ordering_of(&owner),
+            Ordering::Manual {
+                blocks: recipe.blocks()
+            },
+            "a refresh has to be able to ask for the cut, not just for TMDB's shape"
         );
     }
 

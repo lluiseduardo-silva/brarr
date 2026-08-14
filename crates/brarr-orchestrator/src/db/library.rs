@@ -1445,6 +1445,14 @@ pub struct StructureOwner {
     pub family: Option<OrderingFamily>,
     /// The owning source's opaque handle for it.
     pub handle: Option<String>,
+    /// The cut the operator declared, as the *recipe* and not only as
+    /// its result.
+    ///
+    /// A hand-declared 12/13 is applied once and then erased by the next
+    /// refresh unless there is somewhere to re-apply it from — the one
+    /// thing the translation table got right by leaving its rows in
+    /// place. `None` for every ordering but [`OrderingFamily::Manual`].
+    pub recipe: Option<String>,
     /// Whether the operator froze the choice.
     pub pinned: bool,
 }
@@ -1457,7 +1465,8 @@ pub struct StructureOwner {
 /// [`AppError::Database`] on SQL failure.
 pub async fn structure_owner(pool: &Pool, item_id: Uuid) -> Result<StructureOwner, AppError> {
     let row = sqlx::query(
-        "SELECT structure_source, structure_family, structure_handle, structure_pinned \
+        "SELECT structure_source, structure_family, structure_handle, structure_recipe, \
+                structure_pinned \
          FROM library_items WHERE id = ?",
     )
     .bind(item_id.to_string())
@@ -1471,8 +1480,50 @@ pub async fn structure_owner(pool: &Pool, item_id: Uuid) -> Result<StructureOwne
         source: source_of(&row, "structure_source")?,
         family: family.as_deref().and_then(OrderingFamily::parse),
         handle: row.try_get("structure_handle")?,
+        recipe: row.try_get("structure_recipe")?,
         pinned: pinned != 0,
     })
+}
+
+/// Record the ordering an **operator** chose, pin included.
+///
+/// Separate from [`record_structure`], which is what a sweep writes after
+/// a refresh, and the difference is which columns each may touch. A sweep
+/// reports where the tree came from; it must never move the pin or erase
+/// a recipe, or the next cycle would walk back a decision. This writes
+/// all five, because all five *are* the decision.
+///
+/// # Errors
+///
+/// Returns [`AppError::Database`] on SQL failure.
+pub async fn set_structure_choice(
+    pool: &Pool,
+    item_id: Uuid,
+    source: MetadataSource,
+    ordering: &Ordering,
+    recipe: Option<&str>,
+    pinned: bool,
+) -> Result<(), AppError> {
+    sqlx::query(
+        "UPDATE library_items SET \
+            structure_source = ?, \
+            structure_family = ?, \
+            structure_handle = ?, \
+            structure_recipe = ?, \
+            structure_pinned = ?, \
+            structure_refreshed_at = ? \
+         WHERE id = ?",
+    )
+    .bind(source.label())
+    .bind(ordering.family().label())
+    .bind(ordering.handle())
+    .bind(recipe)
+    .bind(i64::from(pinned))
+    .bind(OffsetDateTime::now_utc().unix_timestamp())
+    .bind(item_id.to_string())
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 /// Record who owns the shape, after a tree write was accepted.
