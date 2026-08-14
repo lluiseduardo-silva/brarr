@@ -1,0 +1,28 @@
+-- # A snapshot for a restore that will never run
+--
+-- `library_restore_hints` was created by `20260814120000` to survive a
+-- wipe: one row per title with `monitored`, `profile_id`, `root_folder`,
+-- `monitor_scope` and `added_at`, so the operator's choices could be
+-- reapplied after the catalogue was rebuilt. It was the right shape for
+-- the plan it belonged to.
+--
+-- The wipe happened on 2026-08-14, and it did not use this. The order
+-- was library-first, deploy-second — the catalogue was emptied while the
+-- old schema was still in place, and `20260814120000` then ran its
+-- `INSERT ... SELECT FROM library_items` over zero rows. Verified in
+-- production before this migration was written: the table exists and
+-- holds nothing.
+--
+-- Nor would it be right to keep for a future wipe. The re-import puts
+-- monitoring back from the \*arr on purpose — `arr_import::sync_one` uses
+-- `MonitorChoice::Paused`, because those \*arr still have indexers aimed
+-- at the same download clients brarr uses, so a synced title arriving
+-- monitored is the double agency this whole direction exists to end.
+-- Reapplying a snapshot would undo that deliberately.
+--
+-- No Rust reads it. Dropping a table nothing references and nothing
+-- populates costs no index, no constraint and no FK — `library_items`
+-- does not point at it, it pointed at nothing, and the one place that
+-- wrote it wrote zero rows.
+
+DROP TABLE library_restore_hints;

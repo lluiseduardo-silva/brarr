@@ -40,7 +40,8 @@
 -- staleness sweep reads, and the only clock anything writes for the
 -- descriptive facet. (`20260814120000` added `descriptive_refreshed_at`
 -- and `structure_refreshed_at` as columns rather than the
--- `library_item_facets` table the plan drew; only the structure one is
+-- `library_item_facets` table the plan drew and no migration ever
+-- created; only the structure one is
 -- written today.) Retiring it is a question about those three, not about
 -- identity, and folding it in here would answer it by accident.
 --
