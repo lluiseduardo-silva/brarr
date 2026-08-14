@@ -391,6 +391,7 @@ fn row_to_client(row: &SqliteRow) -> Result<DownloadClientRow, AppError> {
 mod tests {
     use super::*;
     use crate::db::open_memory;
+    use crate::db::seed::Seed;
 
     fn qb<'a>(name: &'a str, base: &'a Url) -> NewDownloadClient<'a> {
         NewDownloadClient {
@@ -662,22 +663,14 @@ mod tests {
     #[tokio::test]
     async fn deleting_a_client_blanks_its_grabs_without_erasing_them() {
         use crate::db::grabs::{self, NewGrab};
-        use crate::db::library::{self, MediaType, NewLibraryItem};
+        use crate::db::library::{self};
 
         let pool = open_memory().await.unwrap();
         let base = url("http://x.example/");
         let client = insert(&pool, qb("qb", &base)).await.unwrap();
-        let item = library::upsert(
-            &pool,
-            &NewLibraryItem {
-                media_type: Some(MediaType::Movie),
-                tmdb_id: 603,
-                title: "The Matrix".to_owned(),
-                ..NewLibraryItem::default()
-            },
-        )
-        .await
-        .unwrap();
+        let item = library::upsert(&pool, &Seed::movie(603, "The Matrix").build())
+            .await
+            .unwrap();
         let provider = crate::db::providers::insert(
             &pool,
             crate::db::providers::NewProvider {

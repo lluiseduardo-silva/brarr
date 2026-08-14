@@ -919,6 +919,7 @@ fn copy_new(source: &Path, destination: &Path) -> Result<(), String> {
 )]
 mod tests {
     use super::*;
+    use crate::db::seed::Seed;
 
     /// A directory that lives for one test.
     struct TempDir(PathBuf);
@@ -1259,20 +1260,10 @@ mod tests {
     /// A completed grab with an item behind it, ready to be imported.
     async fn pending_grab(pool: &crate::db::Pool) -> Grab {
         use crate::db::grabs::{NewGrab, Protocol};
-        use crate::db::library::{MediaType, NewLibraryItem};
 
-        let item = library::upsert(
-            pool,
-            &NewLibraryItem {
-                media_type: Some(MediaType::Movie),
-                tmdb_id: 603,
-                title: "The Matrix".to_owned(),
-                year: Some(1999),
-                ..NewLibraryItem::default()
-            },
-        )
-        .await
-        .unwrap();
+        let item = library::upsert(pool, &Seed::movie(603, "The Matrix").year(1999).build())
+            .await
+            .unwrap();
         let provider = crate::db::providers::insert(
             pool,
             crate::db::providers::NewProvider {

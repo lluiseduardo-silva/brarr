@@ -158,21 +158,14 @@ pub(crate) fn is_gone(path: &Path) -> bool {
 mod tests {
     use super::*;
     use crate::db::grabs::{GrabStatus, NewGrab, Protocol};
-    use crate::db::library::{self, MediaType, NewLibraryItem};
+    use crate::db::library::{self};
     use crate::db::open_memory;
+    use crate::db::seed::Seed;
 
     async fn imported_grab(pool: &crate::db::Pool, path: &str) -> Uuid {
-        let item = library::upsert(
-            pool,
-            &NewLibraryItem {
-                media_type: Some(MediaType::Movie),
-                tmdb_id: 603,
-                title: "The Matrix".to_owned(),
-                ..NewLibraryItem::default()
-            },
-        )
-        .await
-        .unwrap();
+        let item = library::upsert(pool, &Seed::movie(603, "The Matrix").build())
+            .await
+            .unwrap();
         let provider = crate::db::providers::insert(
             pool,
             crate::db::providers::NewProvider {

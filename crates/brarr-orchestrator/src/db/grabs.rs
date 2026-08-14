@@ -1395,23 +1395,16 @@ pub async fn recent(pool: &Pool, limit: u32) -> Result<Vec<Grab>, AppError> {
 )]
 mod tests {
     use super::*;
+    use crate::db::seed::{self, Seed};
     use crate::db::{
-        library::{self, MediaType, NewEpisode, NewLibraryItem, NewSeason},
+        library::{self, NewSeason},
         open_memory,
     };
 
     async fn fixture(pool: &Pool) -> (Uuid, Uuid) {
-        let item = library::upsert(
-            pool,
-            &NewLibraryItem {
-                media_type: Some(MediaType::Movie),
-                tmdb_id: 603,
-                title: "The Matrix".to_owned(),
-                ..NewLibraryItem::default()
-            },
-        )
-        .await
-        .unwrap();
+        let item = library::upsert(pool, &Seed::movie(603, "The Matrix").build())
+            .await
+            .unwrap();
         // The provider FK is real, so insert through the same path the
         // app uses rather than hand-rolling the INSERT.
         let base_url = url::Url::parse("https://capybarabr.com/").unwrap();
@@ -1436,14 +1429,7 @@ mod tests {
             season_number,
             episode_count: 2,
             air_date: None,
-            episodes: (1..=2)
-                .map(|episode_number| NewEpisode {
-                    tmdb_episode_id: None,
-                    episode_number,
-                    title: None,
-                    air_date: None,
-                })
-                .collect(),
+            episodes: (1..=2).map(seed::episode).collect(),
         }
     }
 
@@ -1556,17 +1542,9 @@ mod tests {
     async fn per_episode_grabs_of_the_same_release_are_independent() {
         let pool = open_memory().await.unwrap();
         let (_, provider_id) = fixture(&pool).await;
-        let series = library::upsert(
-            &pool,
-            &NewLibraryItem {
-                media_type: Some(MediaType::Tv),
-                tmdb_id: 76479,
-                title: "The Boys".to_owned(),
-                ..NewLibraryItem::default()
-            },
-        )
-        .await
-        .unwrap();
+        let series = library::upsert(&pool, &Seed::series(76479, "The Boys").build())
+            .await
+            .unwrap();
         library::sync_seasons(&pool, series.id, &[two_episode_season(4)])
             .await
             .unwrap();
@@ -1598,35 +1576,14 @@ mod tests {
         // stopped too.
         let pool = open_memory().await.unwrap();
         let (_, provider_id) = fixture(&pool).await;
-        let series = library::upsert(
-            &pool,
-            &NewLibraryItem {
-                media_type: Some(MediaType::Tv),
-                tmdb_id: 76479,
-                title: "The Boys".to_owned(),
-                ..NewLibraryItem::default()
-            },
-        )
-        .await
-        .unwrap();
+        let series = library::upsert(&pool, &Seed::series(76479, "The Boys").build())
+            .await
+            .unwrap();
         let tree = [NewSeason {
             season_number: 4,
             episode_count: 2,
             air_date: None,
-            episodes: vec![
-                NewEpisode {
-                    tmdb_episode_id: None,
-                    episode_number: 1,
-                    title: None,
-                    air_date: None,
-                },
-                NewEpisode {
-                    tmdb_episode_id: None,
-                    episode_number: 2,
-                    title: None,
-                    air_date: None,
-                },
-            ],
+            episodes: vec![seed::episode(1), seed::episode(2)],
         }];
         library::sync_seasons(&pool, series.id, &tree)
             .await
@@ -1664,17 +1621,9 @@ mod tests {
         // pointing at an arbitrary file.
         let pool = open_memory().await.unwrap();
         let (_, provider_id) = fixture(&pool).await;
-        let series = library::upsert(
-            &pool,
-            &NewLibraryItem {
-                media_type: Some(MediaType::Tv),
-                tmdb_id: 62715,
-                title: "Dragon Ball Super".to_owned(),
-                ..NewLibraryItem::default()
-            },
-        )
-        .await
-        .unwrap();
+        let series = library::upsert(&pool, &Seed::series(62715, "Dragon Ball Super").build())
+            .await
+            .unwrap();
         library::sync_seasons(
             &pool,
             series.id,
@@ -1682,20 +1631,7 @@ mod tests {
                 season_number: 1,
                 episode_count: 2,
                 air_date: None,
-                episodes: vec![
-                    NewEpisode {
-                        tmdb_episode_id: None,
-                        episode_number: 1,
-                        title: None,
-                        air_date: None,
-                    },
-                    NewEpisode {
-                        tmdb_episode_id: None,
-                        episode_number: 2,
-                        title: None,
-                        air_date: None,
-                    },
-                ],
+                episodes: vec![seed::episode(1), seed::episode(2)],
             }],
         )
         .await
@@ -1877,17 +1813,9 @@ mod tests {
     async fn an_item_level_grab_covers_an_episode_query_too() {
         let pool = open_memory().await.unwrap();
         let (_, provider_id) = fixture(&pool).await;
-        let series = library::upsert(
-            &pool,
-            &NewLibraryItem {
-                media_type: Some(MediaType::Tv),
-                tmdb_id: 76479,
-                title: "The Boys".to_owned(),
-                ..NewLibraryItem::default()
-            },
-        )
-        .await
-        .unwrap();
+        let series = library::upsert(&pool, &Seed::series(76479, "The Boys").build())
+            .await
+            .unwrap();
         library::sync_seasons(&pool, series.id, &[two_episode_season(4)])
             .await
             .unwrap();
@@ -1909,17 +1837,9 @@ mod tests {
         // …while an episode-level grab is specific to its episode.
         let pool2 = open_memory().await.unwrap();
         let (_, provider2) = fixture(&pool2).await;
-        let series2 = library::upsert(
-            &pool2,
-            &NewLibraryItem {
-                media_type: Some(MediaType::Tv),
-                tmdb_id: 76479,
-                title: "The Boys".to_owned(),
-                ..NewLibraryItem::default()
-            },
-        )
-        .await
-        .unwrap();
+        let series2 = library::upsert(&pool2, &Seed::series(76479, "The Boys").build())
+            .await
+            .unwrap();
         library::sync_seasons(&pool2, series2.id, &[two_episode_season(4)])
             .await
             .unwrap();
@@ -2028,17 +1948,9 @@ mod tests {
     async fn a_season_pack_covers_its_own_season_and_no_other() {
         let pool = open_memory().await.unwrap();
         let (_, provider_id) = fixture(&pool).await;
-        let series = library::upsert(
-            &pool,
-            &NewLibraryItem {
-                media_type: Some(MediaType::Tv),
-                tmdb_id: 76479,
-                title: "The Boys".to_owned(),
-                ..NewLibraryItem::default()
-            },
-        )
-        .await
-        .unwrap();
+        let series = library::upsert(&pool, &Seed::series(76479, "The Boys").build())
+            .await
+            .unwrap();
         library::sync_seasons(
             &pool,
             series.id,
@@ -2047,23 +1959,13 @@ mod tests {
                     season_number: 4,
                     episode_count: 1,
                     air_date: None,
-                    episodes: vec![NewEpisode {
-                        tmdb_episode_id: None,
-                        episode_number: 1,
-                        title: None,
-                        air_date: None,
-                    }],
+                    episodes: vec![seed::episode(1)],
                 },
                 NewSeason {
                     season_number: 5,
                     episode_count: 1,
                     air_date: None,
-                    episodes: vec![NewEpisode {
-                        tmdb_episode_id: None,
-                        episode_number: 1,
-                        title: None,
-                        air_date: None,
-                    }],
+                    episodes: vec![seed::episode(1)],
                 },
             ],
         )
@@ -2207,17 +2109,9 @@ mod tests {
     #[tokio::test]
     async fn the_local_key_carries_the_episode() {
         let pool = open_memory().await.unwrap();
-        let series = library::upsert(
-            &pool,
-            &NewLibraryItem {
-                media_type: Some(MediaType::Tv),
-                tmdb_id: 76479,
-                title: "The Boys".to_owned(),
-                ..NewLibraryItem::default()
-            },
-        )
-        .await
-        .unwrap();
+        let series = library::upsert(&pool, &Seed::series(76479, "The Boys").build())
+            .await
+            .unwrap();
         library::sync_seasons(&pool, series.id, &[two_episode_season(4)])
             .await
             .unwrap();
@@ -2276,17 +2170,9 @@ mod tests {
     async fn covers_agrees_with_blocking_for() {
         let pool = open_memory().await.unwrap();
         let (_, provider_id) = fixture(&pool).await;
-        let series = library::upsert(
-            &pool,
-            &NewLibraryItem {
-                media_type: Some(MediaType::Tv),
-                tmdb_id: 76479,
-                title: "The Boys".to_owned(),
-                ..NewLibraryItem::default()
-            },
-        )
-        .await
-        .unwrap();
+        let series = library::upsert(&pool, &Seed::series(76479, "The Boys").build())
+            .await
+            .unwrap();
         library::sync_seasons(
             &pool,
             series.id,
@@ -2295,23 +2181,13 @@ mod tests {
                     season_number: 4,
                     episode_count: 1,
                     air_date: None,
-                    episodes: vec![NewEpisode {
-                        tmdb_episode_id: None,
-                        episode_number: 1,
-                        title: None,
-                        air_date: None,
-                    }],
+                    episodes: vec![seed::episode(1)],
                 },
                 NewSeason {
                     season_number: 5,
                     episode_count: 1,
                     air_date: None,
-                    episodes: vec![NewEpisode {
-                        tmdb_episode_id: None,
-                        episode_number: 1,
-                        title: None,
-                        air_date: None,
-                    }],
+                    episodes: vec![seed::episode(1)],
                 },
             ],
         )

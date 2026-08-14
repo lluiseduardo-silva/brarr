@@ -15,12 +15,14 @@
     clippy::doc_markdown
 )]
 
+mod support;
+
 use std::net::SocketAddr;
 use std::time::Duration;
 
 use brarr_decision_service::Engine;
 use brarr_orchestrator::db::grabs::{self, LocalGrab};
-use brarr_orchestrator::db::library::{self, MediaType, NewEpisode, NewLibraryItem, NewSeason};
+use brarr_orchestrator::db::library::{self, MediaType, NewEpisode, NewSeason};
 use brarr_orchestrator::{AppState, db, web};
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -55,17 +57,13 @@ fn days_ahead(n: i64) -> OffsetDateTime {
 async fn seed_series(state: &AppState) -> Uuid {
     let item = library::upsert(
         state.pool(),
-        &NewLibraryItem {
-            media_type: Some(MediaType::Tv),
-            tmdb_id: 76_479,
-            // The episode search axis is TVDB, so a series without one
-            // can never be swept — the fixture carries it or the sweep
-            // tests would all exercise the "no axis" path instead.
-            tvdb_id: Some(355_567),
-            title: "The Boys".to_owned(),
-            year: Some(2019),
-            ..NewLibraryItem::default()
-        },
+        // The episode search axis is TVDB, so a series without one can
+        // never be swept — the fixture carries it or the sweep tests
+        // would all exercise the "no axis" path instead.
+        &support::Seed::series(76_479, "The Boys")
+            .year(2019)
+            .tvdb(355_567)
+            .build(),
     )
     .await
     .unwrap();
@@ -79,22 +77,19 @@ async fn seed_series(state: &AppState) -> Uuid {
                 air_date: Some(days_ago(400)),
                 episodes: vec![
                     NewEpisode {
-                        tmdb_episode_id: None,
-                        episode_number: 1,
                         title: Some("A".to_owned()),
                         air_date: Some(days_ago(400)),
+                        ..support::episode(1)
                     },
                     NewEpisode {
-                        tmdb_episode_id: None,
-                        episode_number: 2,
                         title: Some("B".to_owned()),
                         air_date: Some(days_ago(393)),
+                        ..support::episode(2)
                     },
                     NewEpisode {
-                        tmdb_episode_id: None,
-                        episode_number: 3,
                         title: Some("C".to_owned()),
                         air_date: Some(days_ago(386)),
+                        ..support::episode(3)
                     },
                 ],
             },
@@ -104,16 +99,14 @@ async fn seed_series(state: &AppState) -> Uuid {
                 air_date: Some(days_ago(30)),
                 episodes: vec![
                     NewEpisode {
-                        tmdb_episode_id: None,
-                        episode_number: 1,
                         title: Some("D".to_owned()),
                         air_date: Some(days_ago(30)),
+                        ..support::episode(1)
                     },
                     NewEpisode {
-                        tmdb_episode_id: None,
-                        episode_number: 2,
                         title: Some("E".to_owned()),
                         air_date: Some(days_ahead(30)),
+                        ..support::episode(2)
                     },
                 ],
             },
@@ -129,24 +122,18 @@ async fn seed_series(state: &AppState) -> Uuid {
 async fn seed_series_with_special(state: &AppState) -> Uuid {
     let item = library::upsert(
         state.pool(),
-        &NewLibraryItem {
-            media_type: Some(MediaType::Tv),
-            tmdb_id: 35_753,
-            // Needed by the sweep tests: without it `build_targets`
-            // bails on "no search axis" before it looks at a season.
-            tvdb_id: Some(79_183),
-            title: "The Familiar of Zero".to_owned(),
-            year: Some(2006),
-            ..NewLibraryItem::default()
-        },
+        // Needed by the sweep tests: without it `build_targets` bails on
+        // "no search axis" before it looks at a season.
+        &support::Seed::series(35_753, "The Familiar of Zero")
+            .year(2006)
+            .tvdb(79_183)
+            .build(),
     )
     .await
     .unwrap();
     let ep = |n: i32| NewEpisode {
-        tmdb_episode_id: None,
-        episode_number: n,
-        title: None,
         air_date: Some(days_ago(3000)),
+        ..support::episode(n)
     };
     library::sync_seasons(
         state.pool(),
@@ -892,13 +879,11 @@ async fn searching_the_original_title_finds_the_localised_one() {
     let (addr, state) = spawn().await;
     library::upsert(
         state.pool(),
-        &NewLibraryItem {
-            media_type: Some(MediaType::Tv),
-            tmdb_id: 65_942,
-            title: "That Time I Got Reincarnated as a Slime".to_owned(),
-            original_title: Some("Tensei Shitara Slime Datta Ken".to_owned()),
-            ..NewLibraryItem::default()
-        },
+        &support::Seed::series(65_942, "That Time I Got Reincarnated as a Slime")
+            .with(|item| {
+                item.original_title = Some("Tensei Shitara Slime Datta Ken".to_owned());
+            })
+            .build(),
     )
     .await
     .unwrap();
@@ -928,12 +913,7 @@ async fn searching_ignores_accents_and_punctuation() {
     let (addr, state) = spawn().await;
     library::upsert(
         state.pool(),
-        &NewLibraryItem {
-            media_type: Some(MediaType::Tv),
-            tmdb_id: 94_997,
-            title: "A Casa do Dragão".to_owned(),
-            ..NewLibraryItem::default()
-        },
+        &support::Seed::series(94_997, "A Casa do Dragão").build(),
     )
     .await
     .unwrap();
@@ -1026,17 +1006,9 @@ async fn the_catalogue_can_be_ordered_by_name_and_by_date() {
     let (addr, state) = spawn().await;
     // Added oldest-first so "recently added" and "A → Z" disagree.
     for (tmdb, title) in [(1, "Zulu"), (2, "Ávatar"), (3, "melancolia")] {
-        library::upsert(
-            state.pool(),
-            &NewLibraryItem {
-                media_type: Some(MediaType::Movie),
-                tmdb_id: tmdb,
-                title: title.to_owned(),
-                ..NewLibraryItem::default()
-            },
-        )
-        .await
-        .unwrap();
+        library::upsert(state.pool(), &support::Seed::movie(tmdb, title).build())
+            .await
+            .unwrap();
     }
 
     let order = |body: &str| -> Vec<String> {
@@ -1154,12 +1126,7 @@ async fn a_root_that_does_not_serve_the_type_is_skipped_and_reported() {
     let series = seed_series(&state).await;
     let movie = library::upsert(
         state.pool(),
-        &NewLibraryItem {
-            media_type: Some(MediaType::Movie),
-            tmdb_id: 603,
-            title: "The Matrix".to_owned(),
-            ..NewLibraryItem::default()
-        },
+        &support::Seed::movie(603, "The Matrix").build(),
     )
     .await
     .unwrap();
@@ -1368,12 +1335,7 @@ async fn a_narrowed_sweep_of_a_movie_finds_no_targets() {
     let (addr, state) = spawn().await;
     let item = library::upsert(
         state.pool(),
-        &library::NewLibraryItem {
-            media_type: Some(MediaType::Movie),
-            tmdb_id: 603,
-            title: "The Matrix".to_owned(),
-            ..library::NewLibraryItem::default()
-        },
+        &support::Seed::movie(603, "The Matrix").build(),
     )
     .await
     .unwrap();
@@ -1614,13 +1576,9 @@ async fn a_movie_not_out_yet_is_upcoming_rather_than_missing() {
     let (addr, state) = spawn().await;
     library::upsert(
         state.pool(),
-        &NewLibraryItem {
-            media_type: Some(MediaType::Movie),
-            tmdb_id: 693_134,
-            title: "Duna: Parte Três".to_owned(),
-            digital_release_at: Some(days_ahead(60)),
-            ..NewLibraryItem::default()
-        },
+        &support::Seed::movie(693_134, "Duna: Parte Três")
+            .with(|item| item.digital_release_at = Some(days_ahead(60)))
+            .build(),
     )
     .await
     .unwrap();

@@ -16,12 +16,14 @@
     clippy::doc_markdown
 )]
 
+mod support;
+
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use brarr_decision_service::Engine;
-use brarr_orchestrator::db::library::{MediaType, NewEpisode, NewLibraryItem, NewSeason};
+use brarr_orchestrator::db::library::{MediaType, NewEpisode, NewSeason};
 use brarr_orchestrator::db::{grabs, library, root_folders};
 use brarr_orchestrator::{AppState, db, web};
 
@@ -68,13 +70,7 @@ async fn spawn(tag: &str) -> Harness {
 async fn add_series(state: &AppState) -> uuid::Uuid {
     let item = library::upsert(
         state.pool(),
-        &NewLibraryItem {
-            media_type: Some(MediaType::Tv),
-            tmdb_id: 76_479,
-            title: "The Boys".to_owned(),
-            year: Some(2019),
-            ..NewLibraryItem::default()
-        },
+        &support::Seed::series(76_479, "The Boys").year(2019).build(),
     )
     .await
     .unwrap();
@@ -87,10 +83,8 @@ async fn add_series(state: &AppState) -> uuid::Uuid {
             air_date: None,
             episodes: (1..=8)
                 .map(|n| NewEpisode {
-                    tmdb_episode_id: None,
-                    episode_number: n,
                     title: Some(format!("Episódio {n}")),
-                    air_date: None,
+                    ..support::episode(n)
                 })
                 .collect(),
         }],

@@ -739,8 +739,9 @@ pub async fn reverse_for_item(
 )]
 mod tests {
     use super::*;
-    use crate::db::library::{self, MediaType, NewLibraryItem};
+    use crate::db::library::{self};
     use crate::db::open_memory;
+    use crate::db::seed::{self, Seed};
     use brarr_tmdb::{EpisodeGroupKind, EpisodeGroupPart, GroupEpisode};
 
     /// **The arbitration.** Four writers, one column, and the rule has to
@@ -794,17 +795,9 @@ mod tests {
     #[tokio::test]
     async fn every_source_can_be_persisted() {
         let pool = open_memory().await.unwrap();
-        let item = library::upsert(
-            &pool,
-            &NewLibraryItem {
-                media_type: Some(MediaType::Tv),
-                tmdb_id: 62_715,
-                title: "Dragon Ball Super".to_owned(),
-                ..NewLibraryItem::default()
-            },
-        )
-        .await
-        .unwrap();
+        let item = library::upsert(&pool, &Seed::series(62_715, "Dragon Ball Super").build())
+            .await
+            .unwrap();
 
         for source in [
             Source::Arr,
@@ -838,17 +831,9 @@ mod tests {
     #[tokio::test]
     async fn a_settled_title_can_be_handed_back_to_the_sweeps() {
         let pool = open_memory().await.unwrap();
-        let item = library::upsert(
-            &pool,
-            &NewLibraryItem {
-                media_type: Some(MediaType::Tv),
-                tmdb_id: 62_715,
-                title: "Dragon Ball Super".to_owned(),
-                ..NewLibraryItem::default()
-            },
-        )
-        .await
-        .unwrap();
+        let item = library::upsert(&pool, &Seed::series(62_715, "Dragon Ball Super").build())
+            .await
+            .unwrap();
 
         // Nobody has decided: a sweep may write.
         assert!(Source::Tvdb.may_replace(super::source(&pool, item.id).await.unwrap()));
@@ -1084,21 +1069,13 @@ mod tests {
 
     #[tokio::test]
     async fn applying_and_clearing_round_trips() {
-        use crate::db::library::{MediaType, NewLibraryItem, upsert};
+        use crate::db::library::upsert;
         use crate::db::open_memory;
 
         let pool = open_memory().await.unwrap();
-        let item = upsert(
-            &pool,
-            &NewLibraryItem {
-                media_type: Some(MediaType::Tv),
-                tmdb_id: 95479,
-                title: "Jujutsu Kaisen".to_owned(),
-                ..NewLibraryItem::default()
-            },
-        )
-        .await
-        .unwrap();
+        let item = upsert(&pool, &Seed::series(95479, "Jujutsu Kaisen").build())
+            .await
+            .unwrap();
 
         assert!(for_item(&pool, item.id).await.unwrap().is_empty());
 
@@ -1139,19 +1116,11 @@ mod tests {
     /// One series shaped the way TMDB actually reports Jujutsu Kaisen:
     /// a single season of 59.
     async fn flat_series(pool: &Pool) -> crate::db::library::LibraryItem {
-        use crate::db::library::{MediaType, NewEpisode, NewLibraryItem, NewSeason, upsert};
+        use crate::db::library::{NewSeason, upsert};
 
-        let item = upsert(
-            pool,
-            &NewLibraryItem {
-                media_type: Some(MediaType::Tv),
-                tmdb_id: 95479,
-                title: "Jujutsu Kaisen".to_owned(),
-                ..NewLibraryItem::default()
-            },
-        )
-        .await
-        .unwrap();
+        let item = upsert(pool, &Seed::series(95479, "Jujutsu Kaisen").build())
+            .await
+            .unwrap();
         crate::db::library::sync_seasons(
             pool,
             item.id,
@@ -1159,14 +1128,7 @@ mod tests {
                 season_number: 1,
                 episode_count: 59,
                 air_date: None,
-                episodes: (1..=59)
-                    .map(|n| NewEpisode {
-                        tmdb_episode_id: None,
-                        episode_number: n,
-                        title: None,
-                        air_date: None,
-                    })
-                    .collect(),
+                episodes: (1..=59).map(seed::episode).collect(),
             }],
         )
         .await
@@ -1258,21 +1220,11 @@ mod tests {
 
     #[tokio::test]
     async fn a_duplicate_canonical_episode_does_not_abort_the_apply() {
-        use crate::db::library::{MediaType, NewLibraryItem, upsert};
+        use crate::db::library::upsert;
         use crate::db::open_memory;
 
         let pool = open_memory().await.unwrap();
-        let item = upsert(
-            &pool,
-            &NewLibraryItem {
-                media_type: Some(MediaType::Tv),
-                tmdb_id: 1,
-                title: "T".to_owned(),
-                ..NewLibraryItem::default()
-            },
-        )
-        .await
-        .unwrap();
+        let item = upsert(&pool, &Seed::series(1, "T").build()).await.unwrap();
 
         // Contributor data can place the same episode in two blocks.
         let mut rows = rows_from_group(&jujutsu());
@@ -1298,21 +1250,13 @@ mod tests {
     /// `every_source_can_be_persisted` walks the enum.
     #[tokio::test]
     async fn a_paused_brarr_writes_no_numbering() {
-        use crate::db::library::{MediaType, NewLibraryItem, upsert};
+        use crate::db::library::upsert;
         use crate::db::{open_memory, settings};
 
         let pool = open_memory().await.unwrap();
-        let item = upsert(
-            &pool,
-            &NewLibraryItem {
-                media_type: Some(MediaType::Tv),
-                tmdb_id: 95_479,
-                title: "Jujutsu Kaisen".to_owned(),
-                ..NewLibraryItem::default()
-            },
-        )
-        .await
-        .unwrap();
+        let item = upsert(&pool, &Seed::series(95_479, "Jujutsu Kaisen").build())
+            .await
+            .unwrap();
 
         // Something to walk back, so a refusal is distinguishable from a
         // no-op over an empty table.

@@ -144,23 +144,14 @@ pub async fn run(pool: &Pool) -> Result<RelinkReport, AppError> {
 mod tests {
     use super::*;
     use crate::db::grabs::{GrabStatus, NewGrab, mark_imported, reserve, set_status};
-    use crate::db::library::{
-        MediaType, NewEpisode, NewLibraryItem, NewSeason, sync_seasons, upsert,
-    };
+    use crate::db::library::{NewSeason, sync_seasons, upsert};
     use crate::db::open_memory;
+    use crate::db::seed::{self, Seed};
 
     async fn series(pool: &Pool) -> (Uuid, Uuid) {
-        let item = upsert(
-            pool,
-            &NewLibraryItem {
-                media_type: Some(MediaType::Tv),
-                tmdb_id: 62715,
-                title: "Dragon Ball Super".to_owned(),
-                ..NewLibraryItem::default()
-            },
-        )
-        .await
-        .unwrap();
+        let item = upsert(pool, &Seed::series(62715, "Dragon Ball Super").build())
+            .await
+            .unwrap();
         sync_seasons(
             pool,
             item.id,
@@ -168,20 +159,7 @@ mod tests {
                 season_number: 1,
                 episode_count: 2,
                 air_date: None,
-                episodes: vec![
-                    NewEpisode {
-                        tmdb_episode_id: None,
-                        episode_number: 1,
-                        title: None,
-                        air_date: None,
-                    },
-                    NewEpisode {
-                        tmdb_episode_id: None,
-                        episode_number: 2,
-                        title: None,
-                        air_date: None,
-                    },
-                ],
+                episodes: vec![seed::episode(1), seed::episode(2)],
             }],
         )
         .await
@@ -338,31 +316,13 @@ mod tests {
                     season_number: 0,
                     episode_count: 1,
                     air_date: None,
-                    episodes: vec![NewEpisode {
-                        tmdb_episode_id: None,
-                        episode_number: 1,
-                        title: None,
-                        air_date: None,
-                    }],
+                    episodes: vec![seed::episode(1)],
                 },
                 NewSeason {
                     season_number: 1,
                     episode_count: 2,
                     air_date: None,
-                    episodes: vec![
-                        NewEpisode {
-                            tmdb_episode_id: None,
-                            episode_number: 1,
-                            title: None,
-                            air_date: None,
-                        },
-                        NewEpisode {
-                            tmdb_episode_id: None,
-                            episode_number: 2,
-                            title: None,
-                            air_date: None,
-                        },
-                    ],
+                    episodes: vec![seed::episode(1), seed::episode(2)],
                 },
             ],
         )
@@ -436,17 +396,9 @@ mod tests {
         // query had to infer it from the item's media type.
         let pool = open_memory().await.unwrap();
         let (_, provider_id) = series(&pool).await;
-        let movie = upsert(
-            &pool,
-            &NewLibraryItem {
-                media_type: Some(MediaType::Movie),
-                tmdb_id: 603,
-                title: "The Matrix".to_owned(),
-                ..NewLibraryItem::default()
-            },
-        )
-        .await
-        .unwrap();
+        let movie = upsert(&pool, &Seed::movie(603, "The Matrix").build())
+            .await
+            .unwrap();
         let grab = reserve(
             &pool,
             &NewGrab {

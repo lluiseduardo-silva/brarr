@@ -1472,8 +1472,9 @@ pub async fn sync_all(state: &AppState) -> Result<ImportReport, AppError> {
 )]
 mod tests {
     use super::*;
-    use crate::db::library::{NewEpisode, NewLibraryItem, NewSeason};
+    use crate::db::library::NewSeason;
     use crate::db::open_memory;
+    use crate::db::seed::{self, Seed};
 
     fn file(id: u64, path: &str) -> ArrFile {
         ArrFile {
@@ -1607,17 +1608,9 @@ mod tests {
     }
 
     async fn seed_series(pool: &Pool) -> LibraryItem {
-        let item = library::upsert(
-            pool,
-            &NewLibraryItem {
-                media_type: Some(MediaType::Tv),
-                tmdb_id: 76_479,
-                title: "The Boys".to_owned(),
-                ..NewLibraryItem::default()
-            },
-        )
-        .await
-        .unwrap();
+        let item = library::upsert(pool, &Seed::series(76_479, "The Boys").build())
+            .await
+            .unwrap();
         library::sync_seasons(
             pool,
             item.id,
@@ -1625,20 +1618,7 @@ mod tests {
                 season_number: 1,
                 episode_count: 2,
                 air_date: None,
-                episodes: vec![
-                    NewEpisode {
-                        tmdb_episode_id: None,
-                        episode_number: 1,
-                        title: None,
-                        air_date: None,
-                    },
-                    NewEpisode {
-                        tmdb_episode_id: None,
-                        episode_number: 2,
-                        title: None,
-                        air_date: None,
-                    },
-                ],
+                episodes: vec![seed::episode(1), seed::episode(2)],
             }],
         )
         .await
@@ -2015,17 +1995,9 @@ mod tests {
     /// Dragon Ball Super's real shape, and Jujutsu Kaisen's, and that of
     /// thirteen more titles in this operator's catalogue.
     async fn seed_flat_series(pool: &Pool, count: i32) -> LibraryItem {
-        let item = library::upsert(
-            pool,
-            &NewLibraryItem {
-                media_type: Some(MediaType::Tv),
-                tmdb_id: 62_715,
-                title: "Dragon Ball Super".to_owned(),
-                ..NewLibraryItem::default()
-            },
-        )
-        .await
-        .unwrap();
+        let item = library::upsert(pool, &Seed::series(62_715, "Dragon Ball Super").build())
+            .await
+            .unwrap();
         library::sync_seasons(
             pool,
             item.id,
@@ -2033,14 +2005,7 @@ mod tests {
                 season_number: 1,
                 episode_count: count,
                 air_date: None,
-                episodes: (1..=count)
-                    .map(|episode_number| NewEpisode {
-                        tmdb_episode_id: None,
-                        episode_number,
-                        title: None,
-                        air_date: None,
-                    })
-                    .collect(),
+                episodes: (1..=count).map(seed::episode).collect(),
             }],
         )
         .await

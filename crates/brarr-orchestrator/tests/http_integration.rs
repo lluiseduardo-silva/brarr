@@ -12,6 +12,8 @@
     clippy::doc_markdown
 )]
 
+mod support;
+
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -151,17 +153,12 @@ fn first_row_id(body: &str, prefix: &str) -> String {
 
 #[tokio::test]
 async fn interactive_search_reports_when_nothing_is_found() {
-    use brarr_orchestrator::db::library::{self, MediaType, NewLibraryItem};
+    use brarr_orchestrator::db::library::{self};
 
     let (addr, state) = spawn().await;
     let item = library::upsert(
         state.pool(),
-        &NewLibraryItem {
-            media_type: Some(MediaType::Movie),
-            tmdb_id: 603,
-            title: "The Matrix".to_owned(),
-            ..NewLibraryItem::default()
-        },
+        &support::Seed::movie(603, "The Matrix").build(),
     )
     .await
     .unwrap();
@@ -182,18 +179,13 @@ async fn interactive_search_reports_when_nothing_is_found() {
 #[tokio::test]
 async fn grabbing_a_release_that_lost_its_provider_says_so() {
     use brarr_orchestrator::db::decisions::{self, DecisionInsert};
-    use brarr_orchestrator::db::library::{self, MediaType, NewLibraryItem};
+    use brarr_orchestrator::db::library::{self};
     use brarr_orchestrator::db::searches::{self, SearchRequestJson};
 
     let (addr, state) = spawn().await;
     let item = library::upsert(
         state.pool(),
-        &NewLibraryItem {
-            media_type: Some(MediaType::Movie),
-            tmdb_id: 603,
-            title: "The Matrix".to_owned(),
-            ..NewLibraryItem::default()
-        },
+        &support::Seed::movie(603, "The Matrix").build(),
     )
     .await
     .unwrap();
@@ -267,18 +259,13 @@ async fn queue_renders_empty_state() {
 #[tokio::test]
 async fn queue_lists_an_in_flight_grab_without_reaching_a_client() {
     use brarr_orchestrator::db::grabs::{self, NewGrab, Protocol};
-    use brarr_orchestrator::db::library::{self, MediaType, NewLibraryItem};
+    use brarr_orchestrator::db::library::{self};
     use brarr_orchestrator::db::providers::{self, NewProvider};
 
     let (addr, state) = spawn().await;
     let item = library::upsert(
         state.pool(),
-        &NewLibraryItem {
-            media_type: Some(MediaType::Movie),
-            tmdb_id: 603,
-            title: "The Matrix".to_owned(),
-            ..NewLibraryItem::default()
-        },
+        &support::Seed::movie(603, "The Matrix").build(),
     )
     .await
     .unwrap();
@@ -381,18 +368,13 @@ async fn an_empty_queue_asks_again_slowly() {
 #[tokio::test]
 async fn a_grab_still_moving_makes_the_page_ask_again_soon() {
     use brarr_orchestrator::db::grabs::{self, NewGrab, Protocol};
-    use brarr_orchestrator::db::library::{self, MediaType, NewLibraryItem};
+    use brarr_orchestrator::db::library::{self};
     use brarr_orchestrator::db::providers::{self, NewProvider};
 
     let (addr, state) = spawn().await;
     let item = library::upsert(
         state.pool(),
-        &NewLibraryItem {
-            media_type: Some(MediaType::Movie),
-            tmdb_id: 603,
-            title: "The Matrix".to_owned(),
-            ..NewLibraryItem::default()
-        },
+        &support::Seed::movie(603, "The Matrix").build(),
     )
     .await
     .unwrap();
@@ -527,19 +509,14 @@ async fn a_scan_nobody_started_answers_empty_rather_than_a_verdict() {
 
 #[tokio::test]
 async fn the_scan_button_leaves_its_verdict_in_the_mailbox() {
-    use brarr_orchestrator::db::library::{self, MediaType, NewLibraryItem};
+    use brarr_orchestrator::db::library::{self};
     use brarr_orchestrator::scan::ScanProgress;
     use std::time::Instant;
 
     let (addr, state) = spawn().await;
     let item = library::upsert(
         state.pool(),
-        &NewLibraryItem {
-            media_type: Some(MediaType::Movie),
-            tmdb_id: 603,
-            title: "The Matrix".to_owned(),
-            ..NewLibraryItem::default()
-        },
+        &support::Seed::movie(603, "The Matrix").build(),
     )
     .await
     .unwrap();
@@ -563,17 +540,12 @@ async fn the_scan_button_leaves_its_verdict_in_the_mailbox() {
 
 #[tokio::test]
 async fn scan_now_reports_that_nothing_was_found() {
-    use brarr_orchestrator::db::library::{self, MediaType, NewLibraryItem};
+    use brarr_orchestrator::db::library::{self};
 
     let (addr, state) = spawn().await;
     let item = library::upsert(
         state.pool(),
-        &NewLibraryItem {
-            media_type: Some(MediaType::Movie),
-            tmdb_id: 603,
-            title: "The Matrix".to_owned(),
-            ..NewLibraryItem::default()
-        },
+        &support::Seed::movie(603, "The Matrix").build(),
     )
     .await
     .unwrap();
@@ -603,18 +575,13 @@ async fn scan_now_reports_that_nothing_was_found() {
 #[tokio::test]
 async fn scan_now_says_so_when_a_grab_already_covers_the_item() {
     use brarr_orchestrator::db::grabs::{self, NewGrab, Protocol};
-    use brarr_orchestrator::db::library::{self, MediaType, NewLibraryItem};
+    use brarr_orchestrator::db::library::{self};
     use brarr_orchestrator::db::providers::{self, NewProvider};
 
     let (addr, state) = spawn().await;
     let item = library::upsert(
         state.pool(),
-        &NewLibraryItem {
-            media_type: Some(MediaType::Movie),
-            tmdb_id: 603,
-            title: "The Matrix".to_owned(),
-            ..NewLibraryItem::default()
-        },
+        &support::Seed::movie(603, "The Matrix").build(),
     )
     .await
     .unwrap();

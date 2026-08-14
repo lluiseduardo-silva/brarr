@@ -1152,6 +1152,7 @@ fn file_name_of(path: &str) -> String {
 )]
 mod tests {
     use super::*;
+    use crate::db::seed::{self, Seed};
 
     fn ctx(root: Option<&Path>, library: &[&Path]) -> AdoptContext {
         AdoptContext {
@@ -1352,13 +1353,7 @@ mod tests {
         let state = state_with_root(&root, MediaType::Tv).await;
         let item = library::upsert(
             state.pool(),
-            &library::NewLibraryItem {
-                media_type: Some(MediaType::Tv),
-                tmdb_id: 76479,
-                title: "The Boys".to_owned(),
-                year: Some(2019),
-                ..library::NewLibraryItem::default()
-            },
+            &Seed::series(76479, "The Boys").year(2019).build(),
         )
         .await
         .unwrap();
@@ -1369,14 +1364,7 @@ mod tests {
                 season_number: 4,
                 episode_count: 7,
                 air_date: None,
-                episodes: (1..=7)
-                    .map(|n| library::NewEpisode {
-                        tmdb_episode_id: None,
-                        episode_number: n,
-                        title: None,
-                        air_date: None,
-                    })
-                    .collect(),
+                episodes: (1..=7).map(seed::episode).collect(),
             }],
         )
         .await
@@ -1443,18 +1431,9 @@ mod tests {
         std::fs::write(&file, b"video").unwrap();
 
         let state = state_with_root(&root, MediaType::Movie).await;
-        let item = library::upsert(
-            state.pool(),
-            &library::NewLibraryItem {
-                media_type: Some(MediaType::Movie),
-                tmdb_id: 603,
-                title: "Matrix".to_owned(),
-                year: Some(1999),
-                ..library::NewLibraryItem::default()
-            },
-        )
-        .await
-        .unwrap();
+        let item = library::upsert(state.pool(), &Seed::movie(603, "Matrix").year(1999).build())
+            .await
+            .unwrap();
 
         let plan = plan(&state, &downloads, None).await.unwrap();
         assert_eq!(plan.files.len(), 1);
@@ -1495,18 +1474,9 @@ mod tests {
         std::fs::write(&file, b"video").unwrap();
 
         let state = state_with_root(&root, MediaType::Movie).await;
-        let item = library::upsert(
-            state.pool(),
-            &library::NewLibraryItem {
-                media_type: Some(MediaType::Movie),
-                tmdb_id: 603,
-                title: "Matrix".to_owned(),
-                year: Some(1999),
-                ..library::NewLibraryItem::default()
-            },
-        )
-        .await
-        .unwrap();
+        let item = library::upsert(state.pool(), &Seed::movie(603, "Matrix").year(1999).build())
+            .await
+            .unwrap();
 
         let preview = plan(&state, &root, None).await.unwrap();
         let pick = Pick::decode(preview.files[0].token.as_ref().unwrap()).unwrap();
@@ -1581,18 +1551,9 @@ mod tests {
         std::fs::write(&file, b"video").unwrap();
 
         let state = state_with_root(&root, MediaType::Movie).await;
-        let item = library::upsert(
-            state.pool(),
-            &library::NewLibraryItem {
-                media_type: Some(MediaType::Movie),
-                tmdb_id: 603,
-                title: "Matrix".to_owned(),
-                year: Some(1999),
-                ..library::NewLibraryItem::default()
-            },
-        )
-        .await
-        .unwrap();
+        let item = library::upsert(state.pool(), &Seed::movie(603, "Matrix").year(1999).build())
+            .await
+            .unwrap();
 
         let preview = plan(&state, &root, None).await.unwrap();
         let pick = Pick::decode(preview.files[0].token.as_ref().unwrap()).unwrap();

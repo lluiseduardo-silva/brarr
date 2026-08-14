@@ -23,6 +23,8 @@ pub mod push_history;
 pub mod quality_profiles;
 pub mod root_folders;
 pub mod searches;
+#[cfg(test)]
+pub(crate) mod seed;
 pub mod settings;
 pub mod webhook_events;
 

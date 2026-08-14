@@ -1317,15 +1317,10 @@ pub async fn set_episode_monitored(
 mod tests {
     use super::*;
     use crate::db::open_memory;
+    use crate::db::seed::{self, Seed};
 
     fn movie(tmdb_id: i64, title: &str) -> NewLibraryItem {
-        NewLibraryItem {
-            media_type: Some(MediaType::Movie),
-            tmdb_id,
-            title: title.to_owned(),
-            imdb_id: Some("tt0133093".to_owned()),
-            ..NewLibraryItem::default()
-        }
+        Seed::movie(tmdb_id, title).imdb("tt0133093").build()
     }
 
     #[tokio::test]
@@ -1370,12 +1365,7 @@ mod tests {
     async fn same_tmdb_id_across_kinds_is_allowed() {
         let pool = open_memory().await.unwrap();
         upsert(&pool, &movie(1399, "A Movie")).await.unwrap();
-        let series = NewLibraryItem {
-            media_type: Some(MediaType::Tv),
-            tmdb_id: 1399,
-            title: "A Series".to_owned(),
-            ..NewLibraryItem::default()
-        };
+        let series = Seed::series(1399, "A Series").build();
         upsert(&pool, &series).await.unwrap();
         assert_eq!(list(&pool).await.unwrap().len(), 2);
     }
@@ -1397,17 +1387,7 @@ mod tests {
         let pool = open_memory().await.unwrap();
         upsert(&pool, &movie(1, "A")).await.unwrap();
         let b = upsert(&pool, &movie(2, "B")).await.unwrap();
-        upsert(
-            &pool,
-            &NewLibraryItem {
-                media_type: Some(MediaType::Tv),
-                tmdb_id: 3,
-                title: "S".to_owned(),
-                ..NewLibraryItem::default()
-            },
-        )
-        .await
-        .unwrap();
+        upsert(&pool, &Seed::series(3, "S").build()).await.unwrap();
         set_monitored(&pool, b.id, false).await.unwrap();
 
         assert_eq!(
@@ -1427,10 +1407,8 @@ mod tests {
             air_date: None,
             episodes: (1..=episodes)
                 .map(|n| NewEpisode {
-                    tmdb_episode_id: None,
-                    episode_number: n,
                     title: Some(format!("E{n}")),
-                    air_date: None,
+                    ..seed::episode(n)
                 })
                 .collect(),
         }
@@ -1439,17 +1417,9 @@ mod tests {
     #[tokio::test]
     async fn sync_seasons_builds_the_tree() {
         let pool = open_memory().await.unwrap();
-        let item = upsert(
-            &pool,
-            &NewLibraryItem {
-                media_type: Some(MediaType::Tv),
-                tmdb_id: 76479,
-                title: "The Boys".to_owned(),
-                ..NewLibraryItem::default()
-            },
-        )
-        .await
-        .unwrap();
+        let item = upsert(&pool, &Seed::series(76479, "The Boys").build())
+            .await
+            .unwrap();
 
         sync_seasons(&pool, item.id, &[season(1, 8), season(2, 8)])
             .await
@@ -1462,17 +1432,9 @@ mod tests {
     #[tokio::test]
     async fn sync_seasons_preserves_monitoring_across_refreshes() {
         let pool = open_memory().await.unwrap();
-        let item = upsert(
-            &pool,
-            &NewLibraryItem {
-                media_type: Some(MediaType::Tv),
-                tmdb_id: 76479,
-                title: "The Boys".to_owned(),
-                ..NewLibraryItem::default()
-            },
-        )
-        .await
-        .unwrap();
+        let item = upsert(&pool, &Seed::series(76479, "The Boys").build())
+            .await
+            .unwrap();
         sync_seasons(&pool, item.id, &[season(1, 8)]).await.unwrap();
 
         let s1 = seasons(&pool, item.id).await.unwrap()[0].clone();
@@ -1507,17 +1469,9 @@ mod tests {
         // and reads as *complete*, not as missing, because an unlinked
         // grab is `(NULL, NULL)`, the encoding of "covers the item".
         let pool = open_memory().await.unwrap();
-        let item = upsert(
-            &pool,
-            &NewLibraryItem {
-                media_type: Some(MediaType::Tv),
-                tmdb_id: 76479,
-                title: "The Boys".to_owned(),
-                ..NewLibraryItem::default()
-            },
-        )
-        .await
-        .unwrap();
+        let item = upsert(&pool, &Seed::series(76479, "The Boys").build())
+            .await
+            .unwrap();
         sync_seasons(&pool, item.id, &[season(1, 8)]).await.unwrap();
 
         let before: HashMap<(i32, i32), Uuid> = episodes(&pool, item.id)
@@ -1561,17 +1515,9 @@ mod tests {
     #[tokio::test]
     async fn renumbering_a_series_keeps_every_row_and_every_link() {
         let pool = open_memory().await.unwrap();
-        let item = upsert(
-            &pool,
-            &NewLibraryItem {
-                media_type: Some(MediaType::Tv),
-                tmdb_id: 62715,
-                title: "Dragon Ball Super".to_owned(),
-                ..NewLibraryItem::default()
-            },
-        )
-        .await
-        .unwrap();
+        let item = upsert(&pool, &Seed::series(62715, "Dragon Ball Super").build())
+            .await
+            .unwrap();
 
         // Canonical: one season of 20, each episode carrying its id.
         let flat = vec![NewSeason {
@@ -1662,17 +1608,9 @@ mod tests {
         // vanishes upstream, and an episode count that shrinks, both
         // still have to leave the tree.
         let pool = open_memory().await.unwrap();
-        let item = upsert(
-            &pool,
-            &NewLibraryItem {
-                media_type: Some(MediaType::Tv),
-                tmdb_id: 76479,
-                title: "The Boys".to_owned(),
-                ..NewLibraryItem::default()
-            },
-        )
-        .await
-        .unwrap();
+        let item = upsert(&pool, &Seed::series(76479, "The Boys").build())
+            .await
+            .unwrap();
         sync_seasons(&pool, item.id, &[season(1, 8), season(2, 6)])
             .await
             .unwrap();
@@ -1688,17 +1626,9 @@ mod tests {
     #[tokio::test]
     async fn deleting_an_item_cascades_the_tree() {
         let pool = open_memory().await.unwrap();
-        let item = upsert(
-            &pool,
-            &NewLibraryItem {
-                media_type: Some(MediaType::Tv),
-                tmdb_id: 76479,
-                title: "The Boys".to_owned(),
-                ..NewLibraryItem::default()
-            },
-        )
-        .await
-        .unwrap();
+        let item = upsert(&pool, &Seed::series(76479, "The Boys").build())
+            .await
+            .unwrap();
         sync_seasons(&pool, item.id, &[season(1, 8)]).await.unwrap();
 
         delete(&pool, item.id).await.unwrap();
@@ -1730,47 +1660,21 @@ mod tests {
                 season_number: 1,
                 episode_count: 2,
                 air_date: None,
-                episodes: vec![
-                    NewEpisode {
-                        tmdb_episode_id: None,
-                        episode_number: 1,
-                        title: None,
-                        air_date: None,
-                    },
-                    NewEpisode {
-                        tmdb_episode_id: None,
-                        episode_number: 2,
-                        title: None,
-                        air_date: None,
-                    },
-                ],
+                episodes: vec![seed::episode(1), seed::episode(2)],
             },
             NewSeason {
                 season_number: 2,
                 episode_count: 1,
                 air_date: None,
-                episodes: vec![NewEpisode {
-                    tmdb_episode_id: None,
-                    episode_number: 1,
-                    title: None,
-                    air_date: None,
-                }],
+                episodes: vec![seed::episode(1)],
             },
         ]
     }
 
     async fn series(pool: &Pool) -> LibraryItem {
-        upsert(
-            pool,
-            &NewLibraryItem {
-                media_type: Some(MediaType::Tv),
-                tmdb_id: 76_479,
-                title: "The Boys".to_owned(),
-                ..NewLibraryItem::default()
-            },
-        )
-        .await
-        .unwrap()
+        upsert(pool, &Seed::series(76_479, "The Boys").build())
+            .await
+            .unwrap()
     }
 
     #[tokio::test]
