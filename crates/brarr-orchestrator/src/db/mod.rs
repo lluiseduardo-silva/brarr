@@ -11,7 +11,6 @@ pub mod arr_instances;
 pub mod arr_root_mappings;
 pub mod decisions;
 pub mod download_clients;
-pub mod episode_numbering;
 pub mod grabs;
 pub mod ignored_paths;
 pub mod item_ids;

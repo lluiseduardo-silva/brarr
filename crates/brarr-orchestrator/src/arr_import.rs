@@ -64,7 +64,7 @@ use brarr_core::{ExternalId, MetadataSource};
 use crate::db::arr_instances::{self, ArrInstanceRow};
 use crate::db::arr_root_mappings::{self, ArrRootMapping};
 use crate::db::library::{self, LibraryItem, MediaType, MonitorScope};
-use crate::db::{Pool, episode_numbering, grabs};
+use crate::db::{Pool, grabs, item_ids};
 use crate::episode_match::EpisodeMatcher;
 use crate::remote_path::{self, PrefixRule};
 use crate::structure;
@@ -887,6 +887,7 @@ async fn import_title(
         library::set_monitor_scope(pool, item.id, ctx.monitoring.scope()).await?;
         place(pool, &item, title, ctx).await?;
     }
+    record_tvdb_id(pool, &item, title).await?;
 
     let detail = match title.media_type {
         MediaType::Movie => SeriesDetail::default(),
@@ -909,6 +910,40 @@ async fn import_title(
         created,
         files: adopt_files(pool, &item, files, ctx.rules).await?,
     })
+}
+
+/// Keep the id the \*arr reports, not only the one TMDB does.
+///
+/// **This is what decides the numbering of a series imported from
+/// Sonarr.** `upsert_metadata` writes whatever TMDB's `external_ids`
+/// carries, and TMDB does not always carry a TheTVDB id — while Sonarr
+/// is keyed on one and reports it for every title. Without this the
+/// series is catalogued with no id TheTVDB answers to, so
+/// [`crate::metadata::owned`] skips it and the title is born under
+/// TMDB's flattened tree: exactly the shape whose files Sonarr then
+/// pairs on coordinates the catalogue does not have.
+///
+/// Recorded as *asserted*, never vouched: the \*arr stated it, no
+/// provider confirmed it, and claiming otherwise would stop a
+/// cross-resolution from ever checking a pairing nobody checked.
+///
+/// Runs for known titles too, not only created ones — a catalogue row
+/// that predates this is exactly the one missing the id.
+async fn record_tvdb_id(pool: &Pool, item: &LibraryItem, title: &ArrTitle) -> Result<(), AppError> {
+    if title.tvdb_id <= 0 {
+        return Ok(());
+    }
+    let Ok(id) = ExternalId::new(MetadataSource::Tvdb, &title.tvdb_id.to_string()) else {
+        return Ok(());
+    };
+    item_ids::put(
+        pool,
+        item.id,
+        item.media_type,
+        &id,
+        item_ids::Verification::Asserted,
+    )
+    .await
 }
 
 /// Whether the catalogue already holds this title under **any** id the
@@ -1091,9 +1126,7 @@ async fn adopt_files(
         return Ok(FileCounts::default());
     }
     let matcher = if item.media_type == MediaType::Tv {
-        let episodes = library::episodes(pool, item.id).await?;
-        let reverse = episode_numbering::reverse_for_item(pool, item.id).await?;
-        EpisodeMatcher::new(&episodes, reverse)
+        EpisodeMatcher::new(&library::episodes(pool, item.id).await?)
     } else {
         EpisodeMatcher::default()
     };
@@ -1118,13 +1151,12 @@ async fn adopt_files(
         }
         let mut episode_id = None;
         if let Some((season, episode)) = file.episode {
-            // TMDB does not always number a series the way Sonarr does —
-            // they disagree on 29 of this operator's 176 series, and on
-            // anime almost always. `EpisodeMatcher` tries the canonical
-            // coordinate, then the absolute axis, then whatever ordering
-            // the operator applied. A file none of them place is still
-            // dropped: recording it against the item instead would make
-            // one file look like the whole series to
+            // A series born under TheTVDB is numbered the way Sonarr
+            // numbers it, so the canonical tier answers. The absolute
+            // fallback is for a title catalogued before the credential
+            // was configured, whose tree is flattened. A file neither
+            // places is dropped rather than recorded against the item,
+            // which would make one file look like the whole series to
             // `grabs::blocking_for`.
             let Some(found) = matcher.resolve(season, episode, file.absolute) else {
                 counts.missing += 1;

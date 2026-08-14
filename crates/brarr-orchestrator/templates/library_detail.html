@@ -32,16 +32,6 @@
 
             <div class="flex items-center gap-1.5 flex-wrap mt-2.5">
                 <span class="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium {% if item.is_series %}bg-secondary-soft text-secondary-soft-fg{% else %}bg-accent-soft text-accent-soft-fg{% endif %}">{{ item.kind_label }}</span>
-                {# Estava só como texto apagado dentro de um diálogo que
-                   o operador tinha de abrir — ou seja, o único fato que
-                   explica por que uma linha diz `S02E01` embaixo de
-                   "Temporada 1" era o fato que a tela não mostrava. #}
-                {% if let Some(n) = item.numbering %}
-                <span class="badge bg-info-soft text-info-soft-fg"
-                      title="As buscas usam esta numeração. A biblioteca e os arquivos seguem a do TMDB.">
-                    busca: {{ n }}
-                </span>
-                {% endif %}
                 {# Status and progress, over the monitored content only —
                    specials included when they are monitored, see
                    `crate::coverage`.
@@ -283,16 +273,6 @@
             </button>
             <span class="text-sm font-medium text-fg-primary">{{ s.label }}</span>
             <span class="text-xs text-fg-muted">{{ s.episode_count }} episódios</span>
-            {# Como a cena numera o que está dentro desta temporada. Uma
-               série achatada pelo TMDB é uma temporada só aqui e duas ou
-               mais lá fora; sem isto, o cabeçalho não liga as linhas a
-               nenhum nome de release. #}
-            {% if !s.numbering_hint.is_empty() %}
-            <span class="badge bg-info-soft text-info-soft-fg" title="numeração usada nas buscas e nas releases">
-                busca: {{ s.numbering_hint }}
-            </span>
-            {% endif %}
-
             {# Lupa da temporada — busca o pack inteiro. Sem `episode`, que
                é o que `library_interactive` já entende como pack.
 

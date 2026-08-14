@@ -59,7 +59,7 @@ use tracing::{debug, info, warn};
 use crate::db::grabs::{self, Grab, GrabStatus};
 use crate::db::library::{self, LibraryItem};
 use crate::db::root_folders::{self, RootFolder};
-use crate::db::{download_clients, episode_numbering, path_mappings, settings};
+use crate::db::{download_clients, path_mappings, settings};
 use crate::{AppError, AppState};
 
 /// How often the importer looks for finished downloads.
@@ -302,21 +302,19 @@ async fn plan_and_place(state: &AppState, grab: &Grab) -> Result<ImportOutcome, 
             .find(|e| e.id == id),
         None => None,
     };
-    // **The name on disk follows the numbering the release used**, which
-    // under an applied ordering is not the catalogue's. Dragon Ball Super
-    // is one season of 131 to TMDB and five arcs to everybody else; the
-    // 130 files already there are `Season 2/… S02E01`, and writing
-    // `Season 01/… S01E15` beside them gives Plex a second show. The
-    // catalogue keeps its own numbers — `grabs.episode_id` is what says
-    // which episode this is, and it is untouched.
-    let numbering = episode_numbering::for_item(state.pool(), item.id).await?;
+    // **The name on disk is the catalogue's coordinate**, and that is
+    // only safe because the catalogue's coordinate is now the one
+    // releases use. It used to be translated here for the same reason
+    // the search was: Dragon Ball Super is one season of 131 to TMDB and
+    // five arcs to everybody else, so writing `Season 01/… S01E15` beside
+    // 130 files named `Season 2/… S02E01` gave Plex a second show. A tree
+    // built by whoever numbers it that way writes the neighbours' name
+    // without being told.
     let marker = episode.as_ref().and_then(|e| {
-        let (season, number) = numbering
-            .get(&(e.season_number, e.episode_number))
-            .map_or((e.season_number, e.episode_number), |n| {
-                (n.season, n.episode)
-            });
-        Some((u16::try_from(season).ok()?, u16::try_from(number).ok()?))
+        Some((
+            u16::try_from(e.season_number).ok()?,
+            u16::try_from(e.episode_number).ok()?,
+        ))
     });
 
     let plan = Placement {

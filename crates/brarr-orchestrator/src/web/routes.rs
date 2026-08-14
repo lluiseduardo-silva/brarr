@@ -43,8 +43,8 @@ use crate::auth::{BypassConfig, TrustedPeers};
 use crate::db::quality_profiles;
 use crate::db::settings;
 use crate::db::{
-    arr_instances, decisions, download_clients, episode_numbering, grabs, item_ids, library,
-    path_mappings, providers, push_history, root_folders, searches,
+    arr_instances, decisions, download_clients, grabs, item_ids, library, path_mappings, providers,
+    push_history, root_folders, searches,
 };
 use crate::metadata::art;
 use crate::metadata::registry::Registry;
@@ -1786,24 +1786,12 @@ async fn library_detail(
     // hero renders one item — the index reads them in bulk.
     let stored_ids = crate::db::item_ids::for_item(state.pool(), uuid).await?;
 
-    // The translation in force. Every coordinate the page shows is the
-    // one brarr searches for; the catalogue's own number rides beside it.
-    let numbering = episode_numbering::for_item(state.pool(), uuid).await?;
-    // Named on the page, not only inside a dialog: it is the one fact
-    // that explains why a row reads `S02E01` under "Temporada 1".
-    let numbering_label = if numbering.is_empty() {
-        None
-    } else {
-        episode_numbering::active_group(state.pool(), uuid)
-            .await?
-            .and_then(|(_, name)| name)
-    };
     // Seasons carry only their header here; episodes load on expand.
     let seasons = if is_series {
         library::seasons(state.pool(), uuid)
             .await?
             .iter()
-            .map(|s| season_view(s, &monitored, &coverage, now, &numbering))
+            .map(|s| season_view(s, &monitored, &coverage, now))
             .collect()
     } else {
         Vec::new()
@@ -1846,7 +1834,6 @@ async fn library_detail(
                 .iter()
                 .map(|stored| crate::web::templates::IdChipView::of(&stored.id))
                 .collect(),
-            numbering: numbering_label.clone(),
             monitored: item.monitored,
             profile_id: item.profile_id.map(|p| p.to_string()).unwrap_or_default(),
             status: item.tmdb_status,
@@ -1932,25 +1919,7 @@ fn season_view(
     monitored: &[library::MonitoredEpisode],
     coverage: &[grabs::Coverage],
     now: OffsetDateTime,
-    numbering: &std::collections::HashMap<(i32, i32), episode_numbering::Numbering>,
 ) -> SeasonView {
-    // What the scene calls the episodes inside this canonical season.
-    // A flattened series is where this matters: TMDB's single season of
-    // 23 is `S01`–`S02` to everybody publishing it, and a header that
-    // says only "Temporada 1" leaves the operator no way to connect the
-    // rows to a release name.
-    let mut spans: Vec<i32> = numbering
-        .iter()
-        .filter(|((s, _), _)| *s == season.season_number)
-        .map(|(_, n)| n.season)
-        .collect();
-    spans.sort_unstable();
-    spans.dedup();
-    let numbering_hint = match (spans.first(), spans.last()) {
-        (Some(first), Some(last)) if first == last => format!("S{first:02}"),
-        (Some(first), Some(last)) => format!("S{first:02}–S{last:02}"),
-        _ => String::new(),
-    };
     let mine: Vec<library::MonitoredEpisode> = monitored
         .iter()
         .filter(|e| e.season_number == season.season_number)
@@ -1977,7 +1946,6 @@ fn season_view(
         monitored_count: progress.total,
         have: progress.have,
         percent: progress.percent(),
-        numbering_hint,
     }
 }
 
@@ -2174,7 +2142,6 @@ fn episode_views(
     episodes: &[library::Episode],
     grabs: &[grabs::Grab],
     progress: &crate::ttl_cache::TtlCache<Uuid, u8>,
-    numbering: &std::collections::HashMap<(i32, i32), episode_numbering::Numbering>,
 ) -> Vec<EpisodeView> {
     let now = OffsetDateTime::now_utc();
     let read_at = Instant::now();
@@ -2187,18 +2154,10 @@ fn episode_views(
             // expand is how a screen becomes slower the more it has to
             // report.
             let percent = mark.grab_id.and_then(|id| progress.get(&id, read_at));
-            let canonical = format!("S{:02}E{:02}", e.season_number, e.episode_number);
-            let translated = numbering
-                .get(&(e.season_number, e.episode_number))
-                .map(|n| format!("S{:02}E{:02}", n.season, n.episode));
             EpisodeView {
                 percent,
                 id: e.id.to_string(),
-                code: translated.clone().unwrap_or_else(|| canonical.clone()),
-                // `Some` only when the two differ, so a normal series
-                // renders exactly as it did and the second number never
-                // appears just to say the same thing twice.
-                canonical_code: translated.map(|_| canonical),
+                code: format!("S{:02}E{:02}", e.season_number, e.episode_number),
                 season_number: e.season_number,
                 episode_number: e.episode_number,
                 title: e.title.clone().unwrap_or_else(|| "—".to_owned()),
@@ -2230,7 +2189,6 @@ async fn library_season(
 ) -> Result<Response, AppError> {
     let item_uuid = Uuid::parse_str(&id)
         .map_err(|e| AppError::InvalidInput(format!("invalid library id: {e}")))?;
-    let numbering = episode_numbering::for_item(state.pool(), item_uuid).await?;
     let season_uuid = Uuid::parse_str(&season_id)
         .map_err(|e| AppError::InvalidInput(format!("invalid season id: {e}")))?;
 
@@ -2271,7 +2229,7 @@ async fn library_season(
         );
     }
 
-    let views = episode_views(&episodes, &history, state.progress(), &numbering);
+    let views = episode_views(&episodes, &history, state.progress());
     // Poll only while something is moving, and let the response decide —
     // same server-driven cadence as `/queue`. A season with nothing in
     // flight renders a plain wrapper and never asks again.
@@ -2299,7 +2257,6 @@ async fn library_season_monitor(
 ) -> Result<Response, AppError> {
     let item_uuid = Uuid::parse_str(&id)
         .map_err(|e| AppError::InvalidInput(format!("invalid library id: {e}")))?;
-    let numbering = episode_numbering::for_item(state.pool(), item_uuid).await?;
     let season_uuid = Uuid::parse_str(&season_id)
         .map_err(|e| AppError::InvalidInput(format!("invalid season id: {e}")))?;
     let current = library::seasons(state.pool(), item_uuid)
@@ -2334,7 +2291,7 @@ async fn library_season_monitor(
         monitored: now_monitored,
         ..current
     };
-    let view = season_view(&fresh, &monitored, &coverage, now, &numbering);
+    let view = season_view(&fresh, &monitored, &coverage, now);
 
     html(&LibrarySeasonPartial {
         item_id: id,
@@ -2342,7 +2299,7 @@ async fn library_season_monitor(
         // wrapper — and the poll with it, if something is in flight.
         season_id: Some(season_id.clone()),
         poll_secs: None,
-        episodes: episode_views(&episodes, &history, state.progress(), &numbering),
+        episodes: episode_views(&episodes, &history, state.progress()),
         oob: Some(SeasonMarkView {
             season_id,
             monitored: now_monitored,
@@ -2364,7 +2321,6 @@ async fn library_episode_monitor(
 ) -> Result<Response, AppError> {
     let item_uuid = Uuid::parse_str(&id)
         .map_err(|e| AppError::InvalidInput(format!("invalid library id: {e}")))?;
-    let numbering = episode_numbering::for_item(state.pool(), item_uuid).await?;
     let episode_uuid = Uuid::parse_str(&episode_id)
         .map_err(|e| AppError::InvalidInput(format!("invalid episode id: {e}")))?;
 
@@ -2387,7 +2343,7 @@ async fn library_episode_monitor(
         // One row, swapped straight into `#ep-{id}`: no wrapper.
         season_id: None,
         poll_secs: None,
-        episodes: episode_views(&[updated], &history, state.progress(), &numbering),
+        episodes: episode_views(&[updated], &history, state.progress()),
         oob: None,
         // One episode moves the denominator too.
         item_status: Some(item_status_view(&state, item_uuid).await?),
@@ -2515,17 +2471,12 @@ async fn library_interactive(
     let item = library::get_by_id(state.pool(), uuid).await?;
     let (season, episode) = q.parsed();
 
-    // The picker offers the **catalogue's** numbers, and the catalogue is
-    // not always numbered the way releases are. The sweep has translated
-    // since v0.14.0 and this screen did not, so the magnifier asked for
-    // `S01E47` while every release for it was named `S02E23`. Only the
-    // query is translated: the values echoed back into the form stay
-    // canonical, because `library_grab` resolves the episode row from
-    // them and every grab is keyed on the catalogue's numbering.
-    let numbering = episode_numbering::for_item(state.pool(), uuid).await?;
-    let (asked_season, asked_episode) = search_coordinates(&numbering, season, episode);
-
-    let keys = interactive_keys(&item, asked_season, asked_episode);
+    // The picker offers the catalogue's numbers and asks the indexer for
+    // exactly those, which is only correct because the catalogue is now
+    // numbered the way releases are. This screen used to be the one that
+    // did *not* translate while the sweep did, so the magnifier asked for
+    // `S01E47` while every release for it was named `S02E23`.
+    let keys = interactive_keys(&item, season, episode);
     if !keys.has_any() {
         return html(&InteractiveResultsPartial {
             item_id: id,
@@ -2585,15 +2536,7 @@ async fn library_interactive(
     // Best first — the operator scans down from the top.
     results.sort_by_key(|r| std::cmp::Reverse(r.score));
 
-    // Say what was actually asked when it differs from what was clicked.
-    // The operator picked episode 47 and the indexer was asked for
-    // S02E23; a screen that shows only one of those makes the result
-    // list look like it belongs to something else.
     let axis = match (season, episode) {
-        (Some(s), Some(e)) if (asked_season, asked_episode) != (season, episode) => {
-            let (gs, ge) = (asked_season.unwrap_or(s), asked_episode.unwrap_or(e));
-            format!("S{s:02}E{e:02} · buscado como S{gs:02}E{ge:02}")
-        }
         (Some(s), Some(e)) => format!("S{s:02}E{e:02}"),
         (Some(s), None) => format!("temporada {s} (pack)"),
         _ => String::new(),
@@ -2611,31 +2554,6 @@ async fn library_interactive(
         results,
         message,
     })
-}
-
-/// The coordinates to ask an indexer for, given the catalogue's.
-///
-/// **Only a complete pair translates.** A season on its own is the pack
-/// request, and under an ordering that regroups episodes across seasons
-/// it has no single answer — Dragon Ball Super's canonical season 1 is
-/// all five arcs at once. Guessing one would search the wrong arc and
-/// return a confidently wrong list, so the season passes through and the
-/// operator sees what their number really means.
-fn search_coordinates(
-    numbering: &std::collections::HashMap<(i32, i32), episode_numbering::Numbering>,
-    season: Option<u16>,
-    episode: Option<u16>,
-) -> (Option<u16>, Option<u16>) {
-    let (Some(s), Some(e)) = (season, episode) else {
-        return (season, episode);
-    };
-    let Some(found) = numbering.get(&(i32::from(s), i32::from(e))) else {
-        return (season, episode);
-    };
-    match (u16::try_from(found.season), u16::try_from(found.episode)) {
-        (Ok(gs), Ok(ge)) => (Some(gs), Some(ge)),
-        _ => (season, episode),
-    }
 }
 
 /// Search axis for a manual search. A series with a season asks the TVDB
@@ -7132,56 +7050,8 @@ fn humanize_bytes(b: u64) -> String {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-    use super::{audio_chips_from_languages, search_coordinates, subtitle_chips_from_languages};
-    use crate::db::episode_numbering::Numbering;
+    use super::{audio_chips_from_languages, subtitle_chips_from_languages};
     use brarr_core::Language;
-    use std::collections::HashMap;
-
-    /// Dragon Ball Super's applied ordering, the part of it that matters
-    /// here: canonical episode 47 is the first of the fourth arc.
-    fn dbs() -> HashMap<(i32, i32), Numbering> {
-        let mut map = HashMap::new();
-        map.insert(
-            (1, 47),
-            Numbering {
-                season: 4,
-                episode: 1,
-            },
-        );
-        map
-    }
-
-    /// The gap this closes: the magnifier asked the indexer for `S01E47`
-    /// while every release for it is named `S04E01`.
-    #[test]
-    fn the_manual_search_asks_for_the_numbering_releases_use() {
-        assert_eq!(
-            search_coordinates(&dbs(), Some(1), Some(47)),
-            (Some(4), Some(1))
-        );
-    }
-
-    /// A title with no ordering applied — almost all of them — is
-    /// untouched, and so is an episode the ordering does not cover.
-    #[test]
-    fn an_untranslated_coordinate_passes_through() {
-        assert_eq!(
-            search_coordinates(&HashMap::new(), Some(4), Some(7)),
-            (Some(4), Some(7))
-        );
-        assert_eq!(
-            search_coordinates(&dbs(), Some(1), Some(48)),
-            (Some(1), Some(48))
-        );
-    }
-
-    /// A pack request is a season with no episode, and under an ordering
-    /// that regroups across seasons one canonical season is every arc at
-    /// once. It passes through rather than being guessed at.
-    #[test]
-    fn a_pack_request_is_not_translated() {
-        assert_eq!(search_coordinates(&dbs(), Some(1), None), (Some(1), None));
-    }
 
     #[test]
     fn pt_br_audio_renders_as_green_pt_chip() {

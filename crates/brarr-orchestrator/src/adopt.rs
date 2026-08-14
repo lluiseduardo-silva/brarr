@@ -37,7 +37,7 @@ use uuid::Uuid;
 
 use crate::db::grabs::{self, Grab, GrabTarget};
 use crate::db::library::{self, Episode, LibraryItem, MediaType};
-use crate::db::{episode_numbering, root_folders};
+use crate::db::root_folders;
 use crate::episode_match::EpisodeMatcher;
 use crate::scan;
 use crate::{AppError, AppState};
@@ -561,8 +561,7 @@ pub async fn plan(
     let distinct: HashSet<Uuid> = assigned.iter().flatten().map(|i| i.id).collect();
     for id in distinct {
         let eps = library::episodes(pool, id).await?;
-        let reverse = episode_numbering::reverse_for_item(pool, id).await?;
-        matchers.insert(id, EpisodeMatcher::new(&eps, reverse));
+        matchers.insert(id, EpisodeMatcher::new(&eps));
         episodes.insert(id, eps);
         live.insert(id, grabs::live_for_item(pool, id).await?);
     }
@@ -685,9 +684,8 @@ pub async fn plan_one(
         row.episode = u16::try_from(ep.episode_number).ok();
         row.marker_error = None;
     }
-    let reverse = episode_numbering::reverse_for_item(pool, item.id).await?;
     let mut matchers = HashMap::new();
-    matchers.insert(item.id, EpisodeMatcher::new(&episodes, reverse));
+    matchers.insert(item.id, EpisodeMatcher::new(&episodes));
     let mut by_item = HashMap::new();
     by_item.insert(item.id, episodes);
     let mut live = HashMap::new();

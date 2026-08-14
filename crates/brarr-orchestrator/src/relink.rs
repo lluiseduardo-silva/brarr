@@ -29,7 +29,7 @@ use std::path::Path;
 use tracing::{debug, info};
 use uuid::Uuid;
 
-use crate::db::{Pool, episode_numbering, grabs, library};
+use crate::db::{Pool, grabs, library};
 use crate::episode_match::EpisodeMatcher;
 use crate::{AppError, adopt};
 
@@ -77,8 +77,7 @@ pub async fn run(pool: &Pool) -> Result<RelinkReport, AppError> {
     let mut trees: HashMap<Uuid, EpisodeMatcher> = HashMap::with_capacity(items.len());
     for item_id in items {
         let episodes = library::episodes(pool, item_id).await?;
-        let reverse = episode_numbering::reverse_for_item(pool, item_id).await?;
-        trees.insert(item_id, EpisodeMatcher::new(&episodes, reverse));
+        trees.insert(item_id, EpisodeMatcher::new(&episodes));
     }
 
     for grab in &orphans {
@@ -95,10 +94,8 @@ pub async fn run(pool: &Pool) -> Result<RelinkReport, AppError> {
             continue;
         };
 
-        // The name carries the numbering the release used, which under an
-        // applied ordering is not the catalogue's. No absolute number is
-        // available here — a name carrying one carries no marker to have
-        // reached this line with.
+        // No absolute number is available here — a name carrying one
+        // carries no marker to have reached this line with.
         let found = trees
             .get(&grab.item_id)
             .and_then(|m| m.resolve(i32::from(season), i32::from(number), None));

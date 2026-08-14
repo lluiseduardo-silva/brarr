@@ -276,75 +276,39 @@ async fn pausing_stops_the_sweep_and_says_so() {
     assert!(!resumed.paused);
 }
 
-/// **Kaiju No. 8's shape, on screen.**
+/// **One coordinate per row, and it is the stored one.**
 ///
-/// TMDB flattens the series and the scene cuts it in two, so canonical
-/// episode 13 is `S02E01` to every release, every indexer and every file
-/// on disk. The row used to read `S01E13` — a coordinate that exists
-/// nowhere outside brarr — with nothing on the page to explain it.
+/// The screen used to carry two — what brarr searched for, and the
+/// catalogue's own number beside it — because the tree was TMDB's and
+/// the search was translated out of it. Canonical episode 13 of a
+/// flattened series is `S02E01` to every release, every indexer and
+/// every file on disk, and a row reading `S01E13` named a coordinate
+/// that existed nowhere outside brarr.
 ///
-/// The row now leads with what brarr searches for and keeps the
-/// catalogue's number beside it, the season header says which span it
-/// covers, and the hero names the source. All four are asserted through
-/// the real router, because the value is only useful if it survives the
-/// handler, the view mapping and the template together.
+/// The second number, the season header's span and the hero's "busca:"
+/// badge were all ways of explaining a disagreement that no longer
+/// exists. This asserts through the real router that none of them came
+/// back — a stale badge would be worse than the original problem, since
+/// it would claim a translation that is not happening.
 #[tokio::test]
-async fn a_translated_episode_shows_the_number_releases_use() {
-    use brarr_orchestrator::db::episode_numbering::{self, Numbering, NumberingRow, Source};
-
+async fn an_episode_row_shows_the_stored_coordinate_and_only_that() {
     let (addr, state) = spawn().await;
     let item = seed_series(&state).await;
-
-    // Season 2 episode 1 of the catalogue is `S05E09` to the scene.
-    let rows = vec![NumberingRow {
-        part_order: 5,
-        part_name: None,
-        group: Numbering {
-            season: 5,
-            episode: 9,
-        },
-        canonical: Numbering {
-            season: 2,
-            episode: 1,
-        },
-        tmdb_episode_id: None,
-    }];
-    assert!(
-        episode_numbering::apply_derived(state.pool(), item, Source::Tvdb, &rows)
-            .await
-            .unwrap()
-    );
 
     let seasons = library::seasons(state.pool(), item).await.unwrap();
     let s2 = seasons.iter().find(|s| s.season_number == 2).unwrap();
     let body = get(addr, &format!("/library/{item}/season/{}", s2.id)).await;
 
     assert!(
-        body.contains("S05E09"),
-        "the row must lead with the coordinate brarr searches for"
-    );
-    assert!(
         body.contains("S02E01"),
-        "and keep the catalogue's own number, or the row cannot be \
-         lined up against the season it lives in"
+        "the row carries the coordinate the catalogue holds"
     );
 
     let page = get(addr, &format!("/library/{item}")).await;
     assert!(
-        page.contains("busca: S05"),
-        "the season header says which span its episodes answer to"
+        !page.contains("busca: S"),
+        "nothing on the page may claim a translation any more: {page:.0}"
     );
-    assert!(
-        page.contains(episode_numbering::TVDB_NUMBERING_NAME),
-        "and the hero names the numbering in force — it used to live \
-         only as muted text inside a dialog nobody had opened"
-    );
-
-    // A title with no translation is untouched: no second number, no
-    // badge, exactly the markup it had before any of this existed.
-    let plain = seed_series_with_special(&state).await;
-    let plain_page = get(addr, &format!("/library/{plain}")).await;
-    assert!(!plain_page.contains("busca: S"), "{plain_page:.0}");
 }
 
 /// **Both metadata licences are conditioned on this being displayed.**
