@@ -55,7 +55,7 @@ use brarr_orchestrator::db::settings::{
 use brarr_orchestrator::state::{LogReloader, RuntimeConfig};
 use brarr_orchestrator::{
     AppState, AuthConfig, BypassConfig, TrustedPeers, arr_import, db, grpc, import, maintenance,
-    poll, queue, relink, scan, tvdb_sync, verify, web,
+    poll, queue, relink, scan, verify, web,
 };
 use tracing::warn;
 use tracing_subscriber::layer::SubscriberExt;
@@ -239,11 +239,6 @@ async fn main() -> Result<()> {
     // no-ops while no instance is a source or TMDB is unconfigured, so a
     // deployment that never touches the *arr screen sees no change.
     let _arr_sync_handle = arr_import::spawn(state.clone());
-    // TheTVDB numbering sweep. It answers the same question the *arr
-    // sweep does — which coordinates do releases actually use — but at
-    // the source, so it keeps working on the day the *arr comes out.
-    // No-ops while no API key is configured.
-    let _tvdb_sync_handle = tvdb_sync::spawn(state.clone());
     // One-shot repair, not a long-lived task: until this release a
     // metadata refresh unlinked every per-episode grab, and the damage
     // rendered as *complete* rather than as missing, so nothing would

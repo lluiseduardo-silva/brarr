@@ -5483,9 +5483,14 @@ async fn load_settings_values(state: &AppState) -> Result<SettingsValues, AppErr
         tmdb_language: get(settings::KEY_TMDB_LANGUAGE),
         tmdb_country: get(settings::KEY_TMDB_COUNTRY),
         tmdb_ttl_days: get(settings::KEY_TMDB_TTL_DAYS),
-        tvdb_configured: crate::tvdb_sync::is_configured(state.pool()).await?,
+        // Asked of the registry, which is what actually decides whether
+        // a provider can be called — the screen and the dispatch now read
+        // the same fact rather than two functions that agreed by habit.
+        tvdb_configured: Registry::build(state.pool())
+            .await?
+            .get(brarr_core::MetadataSource::Tvdb)
+            .is_some(),
         tvdb_pin: get(settings::KEY_TVDB_PIN),
-        tvdb_sync_interval_secs: get(settings::KEY_TVDB_SYNC_INTERVAL_SECS),
     })
 }
 
@@ -5553,8 +5558,6 @@ struct SettingsGeneralForm {
     tvdb_api_key: String,
     #[serde(default)]
     tvdb_pin: String,
-    #[serde(default)]
-    tvdb_sync_interval_secs: String,
 }
 
 #[allow(
@@ -5785,12 +5788,6 @@ async fn settings_general(
     // and only meaningful for a user-supported key — so it is written
     // unconditionally, blank included, and clearing it is possible.
     settings::set(pool, settings::KEY_TVDB_PIN, form.tvdb_pin.trim()).await?;
-    settings::set(
-        pool,
-        settings::KEY_TVDB_SYNC_INTERVAL_SECS,
-        form.tvdb_sync_interval_secs.trim(),
-    )
-    .await?;
     let tvdb_api_key = form.tvdb_api_key.trim();
     if !tvdb_api_key.is_empty() {
         settings::set(pool, settings::KEY_TVDB_API_KEY, tvdb_api_key).await?;

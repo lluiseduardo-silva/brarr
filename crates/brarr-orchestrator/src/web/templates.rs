@@ -1177,8 +1177,6 @@ pub struct SettingsValues {
     pub tvdb_configured: bool,
     /// Subscriber PIN, for a user-supported key. Blank for brarr's own.
     pub tvdb_pin: String,
-    /// Seconds between numbering sweeps; blank means the default.
-    pub tvdb_sync_interval_secs: String,
 }
 
 /// One-shot flash message rendered above the settings form. `kind`

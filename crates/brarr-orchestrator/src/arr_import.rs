@@ -65,7 +65,7 @@ use crate::db::arr_instances::{self, ArrInstanceRow};
 use crate::db::arr_root_mappings::{self, ArrRootMapping};
 use crate::db::library::{self, LibraryItem, MediaType, MonitorScope};
 use crate::db::{Pool, episode_numbering, grabs};
-use crate::episode_match::{self, EpisodeMatcher, ExternalNumber};
+use crate::episode_match::EpisodeMatcher;
 use crate::remote_path::{self, PrefixRule};
 use crate::structure;
 use crate::tmdb_sync;
@@ -262,54 +262,6 @@ fn parse_air_date(raw: &str) -> Option<OffsetDateTime> {
     time::Date::parse(raw.trim(), &format)
         .ok()
         .map(|d| OffsetDateTime::new_in_offset(d, time::Time::MIDNIGHT, time::UtcOffset::UTC))
-}
-
-/// Store the \*arr's numbering as this title's search numbering.
-///
-/// **The point of the whole feature.** `20260808130000` gave brarr a
-/// translation table and a screen to pick a TMDB episode group; two
-/// titles got one in a week, out of the fifteen that need it, because
-/// picking an ordering by hand per title — after discovering it exists
-/// and which of eleven is right — is work nobody does. The \*arr already
-/// holds the answer and brarr already reads it every pass.
-///
-/// The matcher here is built with an **empty** reverse map on purpose:
-/// deriving the translation from a translation this function itself
-/// wrote would be self-referential, and a wrong row would then keep
-/// re-deriving itself. Only the canonical coordinate and the absolute
-/// axis get a vote.
-///
-/// Best-effort by design — a title whose numbering cannot be derived is
-/// left on the canonical one, which is where it already was.
-async fn sync_search_numbering(
-    pool: &Pool,
-    item: &LibraryItem,
-    detail: &SeriesDetail,
-) -> Result<(), AppError> {
-    let episodes = library::episodes(pool, item.id).await?;
-    let external: Vec<ExternalNumber> = detail
-        .numbering
-        .iter()
-        .map(|n| ExternalNumber {
-            season: n.season,
-            episode: n.episode,
-            absolute: n.absolute,
-            aired: n.aired,
-        })
-        .collect();
-    let rows = episode_match::derive_numbering(&episodes, &external);
-
-    if episode_numbering::apply_derived(pool, item.id, episode_numbering::Source::Arr, &rows)
-        .await?
-        && !rows.is_empty()
-    {
-        debug!(
-            target: "brarr_orchestrator::arr_import",
-            item = %item.id, title = %item.title, episodes = rows.len(),
-            "derived the search numbering from the *arr"
-        );
-    }
-    Ok(())
 }
 
 /// Per-episode monitoring, specials excluded like everywhere else.
@@ -948,13 +900,6 @@ async fn import_title(
     if created && ctx.monitoring == MonitorChoice::Mirror {
         mirror_monitoring(pool, &item, title, &detail).await?;
     }
-    if title.media_type == MediaType::Tv {
-        // After the tree, because it reads it; before the files, because
-        // a numbering is what makes the *next* sweep able to search for
-        // what the files do not cover.
-        sync_search_numbering(pool, &item, &detail).await?;
-    }
-
     let files = if title.media_type == MediaType::Tv {
         &detail.files
     } else {

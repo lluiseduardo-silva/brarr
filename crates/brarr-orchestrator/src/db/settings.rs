@@ -82,9 +82,6 @@ pub const KEY_TVDB_API_KEY: &str = "tvdb_api_key";
 /// blank — see `brarr_tvdb::TvdbAuth::pin`.
 pub const KEY_TVDB_PIN: &str = "tvdb_pin";
 
-/// How often the `TheTVDB` numbering sweep runs, in seconds.
-pub const KEY_TVDB_SYNC_INTERVAL_SECS: &str = "tvdb_sync_interval_secs";
-
 /// `tracing-subscriber` env filter (replaces `RUST_LOG`).
 pub const KEY_LOG_LEVEL: &str = "log_level";
 /// Backtrace mode — `0` / `1` / `full`. Restart required (workspace
