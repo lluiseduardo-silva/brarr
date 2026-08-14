@@ -366,20 +366,33 @@ async fn every_page_carries_the_metadata_attributions() {
     let (addr, state) = spawn().await;
     let item = seed_series(&state).await;
 
+    // Walks the sources rather than naming three constants, so a
+    // provider added without a licence line fails here instead of
+    // shipping unattributed. The two that need one are asserted by the
+    // walk; the one that does not says so in `is_required`.
+    let required: Vec<_> = brarr_orchestrator::web::attributions()
+        .into_iter()
+        .filter(brarr_orchestrator::web::Attribution::is_required)
+        .collect();
+    assert!(
+        required.len() >= 2,
+        "TMDB and TheTVDB both condition their licence on this"
+    );
+
     for path in ["/library", &format!("/library/{item}")] {
         let html = get(addr, path).await;
-        assert!(
-            html.contains(brarr_orchestrator::web::TMDB_ATTRIBUTION),
-            "{path} must carry TMDB's phrase verbatim"
-        );
-        assert!(
-            html.contains(brarr_orchestrator::web::TVDB_ATTRIBUTION),
-            "{path} must carry TheTVDB's attribution"
-        );
-        assert!(
-            html.contains(brarr_orchestrator::web::TVDB_ATTRIBUTION_URL),
-            "{path} must carry a direct link to TheTVDB.com"
-        );
+        for attribution in &required {
+            assert!(
+                html.contains(attribution.text),
+                "{path} must carry {}'s phrase verbatim",
+                attribution.label
+            );
+            assert!(
+                html.contains(attribution.url),
+                "{path} must carry a direct link for {}",
+                attribution.label
+            );
+        }
     }
 }
 

@@ -62,6 +62,7 @@ pub mod fuzzy;
 pub mod grpc;
 pub mod import;
 pub mod maintenance;
+pub mod metadata;
 pub mod poll;
 pub mod provider_cache;
 pub mod push;

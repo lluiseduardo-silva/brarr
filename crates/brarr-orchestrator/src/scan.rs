@@ -869,6 +869,8 @@ mod tests {
             original_title: None,
             year: Some(1999),
             overview: None,
+            poster_source: None,
+            backdrop_source: None,
             poster_path: None,
             backdrop_path: None,
             tmdb_status: None,

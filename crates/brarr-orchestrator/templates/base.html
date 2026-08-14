@@ -178,16 +178,13 @@
        Ficou sem renderizar desde que o `brarr-tmdb` existe: a constante
        estava lá, `pub`, e nenhum template a lia. #}
     <footer class="app-shell px-8 py-6 text-xs text-fg-muted">
-        <p>
-            {{ crate::web::TMDB_ATTRIBUTION }}
-            <a href="https://www.themoviedb.org" target="_blank" rel="noopener noreferrer"
-               class="underline">TMDB</a>.
-        </p>
+        {% for a in crate::web::attributions() %}{% if a.is_required() %}
         <p class="mt-1">
-            {{ crate::web::TVDB_ATTRIBUTION }}
-            <a href="{{ crate::web::TVDB_ATTRIBUTION_URL }}" target="_blank" rel="noopener noreferrer"
-               class="underline">TheTVDB.com</a>.
+            {{ a.text }}
+            <a href="{{ a.url }}" target="_blank" rel="noopener noreferrer"
+               class="underline">{{ a.label }}</a>.
         </p>
+        {% endif %}{% endfor %}
     </footer>
     {% endblock %}
 

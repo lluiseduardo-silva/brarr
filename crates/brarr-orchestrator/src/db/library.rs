@@ -27,6 +27,16 @@ use crate::{AppError, db::Pool};
 /// boundary. Call sites keep saying `library::MediaType`.
 pub use brarr_core::MediaType;
 
+/// Read a `*_source` column.
+///
+/// An unregistered label reads as `None` rather than failing the row: a
+/// source this build does not know is a reason to render no image, never
+/// a reason to make the title unreadable.
+fn source_of(row: &SqliteRow, column: &str) -> Result<Option<MetadataSource>, AppError> {
+    let raw: Option<String> = row.try_get(column)?;
+    Ok(raw.as_deref().and_then(MetadataSource::parse))
+}
+
 /// Read the persisted label, wording the refusal for this crate.
 ///
 /// The parse itself lives on the core type; only the error type is local,
@@ -152,6 +162,16 @@ pub struct LibraryItem {
     pub poster_path: Option<String>,
     /// Backdrop path, same rules as [`Self::poster_path`].
     pub backdrop_path: Option<String>,
+    /// Who stored [`Self::poster_path`], and therefore how to read it.
+    ///
+    /// Not an owner and not a precedence: TMDB keeps a path relative to
+    /// its CDN and TheTVDB returns an absolute URL, so the value cannot
+    /// be turned into a URL without knowing who wrote it. `None` for a
+    /// row written before the column existed, which renders no image
+    /// rather than a broken one.
+    pub poster_source: Option<MetadataSource>,
+    /// Who stored [`Self::backdrop_path`].
+    pub backdrop_source: Option<MetadataSource>,
     /// TMDB status string (`Returning Series`, `Ended`, `Released`, …).
     pub tmdb_status: Option<String>,
     /// Runtime in minutes (movies; episode average for series).
@@ -347,6 +367,8 @@ fn row_to_item(row: &SqliteRow) -> Result<LibraryItem, AppError> {
         overview: row.try_get("overview")?,
         poster_path: row.try_get("poster_path")?,
         backdrop_path: row.try_get("backdrop_path")?,
+        poster_source: source_of(row, "poster_source")?,
+        backdrop_source: source_of(row, "backdrop_source")?,
         tmdb_status: row.try_get("tmdb_status")?,
         runtime_minutes: row
             .try_get::<Option<i64>, _>("runtime_minutes")?
@@ -364,7 +386,8 @@ fn row_to_item(row: &SqliteRow) -> Result<LibraryItem, AppError> {
 }
 
 const ITEM_COLUMNS: &str = "id, media_type, tmdb_id, imdb_id, tvdb_id, title, original_title, \
-     year, overview, poster_path, backdrop_path, tmdb_status, runtime_minutes, \
+     year, overview, poster_path, backdrop_path, poster_source, backdrop_source, \
+     tmdb_status, runtime_minutes, \
      next_air_date, digital_release_at, physical_release_at, monitored, \
      profile_id, root_folder, monitor_scope, added_at, metadata_refreshed_at";
 

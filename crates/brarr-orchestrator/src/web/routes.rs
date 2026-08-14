@@ -46,6 +46,7 @@ use crate::db::{
     arr_instances, decisions, download_clients, episode_numbering, grabs, library, path_mappings,
     providers, push_history, root_folders, searches,
 };
+use crate::metadata::art;
 use crate::scan::ScanProgress;
 #[allow(
     unused_imports,
@@ -75,7 +76,7 @@ use crate::web::templates::{
     WebhookEventView, WebhooksTemplate,
 };
 use crate::{AppError, AppState};
-use brarr_core::TmdbId;
+use brarr_core::{MetadataSource, TmdbId};
 
 /// Build the Axum router with `state` as shared state.
 pub fn router(state: AppState, static_dir: &std::path::Path) -> Router {
@@ -1100,10 +1101,6 @@ struct LibraryAddOptionsQuery {
     year: Option<i32>,
 }
 
-/// Poster size used on the index and the add screen. Small enough that a
-/// full page of them is cheap, large enough not to look soft at 100px.
-const POSTER_SIZE: &str = "w185";
-
 /// Render a stored date as `dd/mm/aaaa`.
 fn short_date(ts: OffsetDateTime) -> String {
     format!("{:02}/{:02}/{}", ts.day(), u8::from(ts.month()), ts.year())
@@ -1215,7 +1212,11 @@ async fn library_page(
                 year: item.year.map_or_else(|| "—".to_owned(), |y| y.to_string()),
                 kind_label: if is_series { "Série" } else { "Filme" }.to_owned(),
                 is_series,
-                poster_url: brarr_tmdb::image_url(item.poster_path.as_deref(), POSTER_SIZE),
+                poster_url: art::url(
+                    item.poster_source.unwrap_or(MetadataSource::Tmdb),
+                    item.poster_path.as_deref(),
+                    art::ImageSize::Index,
+                ),
                 monitored: item.monitored,
                 profile,
                 tmdb_id: item.tmdb_id,
@@ -1509,7 +1510,11 @@ async fn library_add(
                         title: h.title,
                         year,
                         overview: h.overview,
-                        poster_url: brarr_tmdb::image_url(h.poster_path.as_deref(), POSTER_SIZE),
+                        poster_url: art::url(
+                            MetadataSource::Tmdb,
+                            h.poster_path.as_deref(),
+                            art::ImageSize::Index,
+                        ),
                         in_library,
                     });
                 }
@@ -1533,7 +1538,11 @@ async fn library_add(
                         title: h.name,
                         year,
                         overview: h.overview,
-                        poster_url: brarr_tmdb::image_url(h.poster_path.as_deref(), POSTER_SIZE),
+                        poster_url: art::url(
+                            MetadataSource::Tmdb,
+                            h.poster_path.as_deref(),
+                            art::ImageSize::Index,
+                        ),
                         in_library,
                     });
                 }
@@ -1826,7 +1835,11 @@ async fn library_detail(
             year: item.year.map_or_else(|| "—".to_owned(), |y| y.to_string()),
             kind_label: if is_series { "Série" } else { "Filme" }.to_owned(),
             is_series,
-            poster_url: brarr_tmdb::image_url(item.poster_path.as_deref(), "w342"),
+            poster_url: art::url(
+                item.poster_source.unwrap_or(MetadataSource::Tmdb),
+                item.poster_path.as_deref(),
+                art::ImageSize::Hero,
+            ),
             overview: item.overview,
             tmdb_id: item.tmdb_id,
             imdb_id: item.imdb_id,
