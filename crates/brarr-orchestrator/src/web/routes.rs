@@ -2752,7 +2752,10 @@ async fn library_grab(
     )))
 }
 
-/// `POST /library/{id}/refresh` — re-pull metadata from TMDB.
+/// `POST /library/{id}/refresh` — re-pull metadata.
+///
+/// TMDB for the descriptive half, and whoever owns the shape for the
+/// tree. Those became two questions the day a title could be moved.
 async fn library_refresh(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -2760,7 +2763,8 @@ async fn library_refresh(
     let uuid = Uuid::parse_str(&id)
         .map_err(|e| AppError::InvalidInput(format!("invalid library id: {e}")))?;
     let tmdb = crate::tmdb_sync::client(state.pool()).await?;
-    crate::tmdb_sync::refresh(state.pool(), &tmdb, uuid).await?;
+    let registry = Registry::build(state.pool()).await?;
+    crate::tmdb_sync::refresh(state.pool(), &tmdb, &registry, uuid).await?;
     Ok(Redirect::to(&format!("/library/{id}")).into_response())
 }
 

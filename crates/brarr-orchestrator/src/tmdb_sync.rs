@@ -357,12 +357,25 @@ pub async fn add_with_options(
 pub async fn refresh(
     pool: &Pool,
     tmdb: &TmdbClient,
+    registry: &crate::metadata::registry::Registry,
     item_id: Uuid,
 ) -> Result<LibraryItem, AppError> {
     let item = library::get_by_id(pool, item_id).await?;
     match item.media_type {
         MediaType::Movie => add_movie(pool, tmdb, item.tmdb_id).await,
-        MediaType::Tv => add_series(pool, tmdb, item.tmdb_id).await,
+        // The two facets have two owners, and a refresh has to ask each
+        // of them its own question. Title, synopsis and artwork are
+        // TMDB's and stay TMDB's; the shape belongs to whoever the item
+        // records, which for a flipped title is not TMDB — and handing
+        // it TMDB's tree anyway is a write the source gate refuses, so
+        // the title would simply stop refreshing.
+        MediaType::Tv => {
+            let details = tmdb.tv(item.tmdb_id).await?;
+            let refreshed = library::upsert(pool, &tv_to_item(&details)).await?;
+            let tree = crate::metadata::owned::tree(pool, registry, refreshed.id).await?;
+            structure::apply(pool, refreshed.id, &tree).await?;
+            Ok(refreshed)
+        }
     }
 }
 

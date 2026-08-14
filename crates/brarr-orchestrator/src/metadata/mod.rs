@@ -7,6 +7,8 @@
 //! - [`art`] builds an image URL for a stored path, given who stored it.
 //! - [`axis`] turns a catalogue identity into the search keys the tracker
 //!   fan-out speaks — and reports what it could not use.
+//! - [`owned`] fetches the tree a title is actually under, rather than
+//!   the one its provider happens to call default.
 //! - [`registry`] says which providers this deployment can reach, and
 //!   filters on capabilities *before* anything is dispatched.
 //!
@@ -19,4 +21,5 @@
 
 pub mod art;
 pub mod axis;
+pub mod owned;
 pub mod registry;

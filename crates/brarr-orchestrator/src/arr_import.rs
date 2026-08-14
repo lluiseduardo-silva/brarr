@@ -841,8 +841,10 @@ async fn run_instance(
         "importing an *arr catalogue"
     );
 
+    let registry = crate::metadata::registry::Registry::build(state.pool()).await?;
     let ctx = TitleContext {
         tmdb: &tmdb,
+        registry: &registry,
         client: &client,
         rules: &rules,
         mappings: &mappings,
@@ -875,6 +877,10 @@ async fn run_instance(
 /// `too-many-arguments-threshold = 6`.
 struct TitleContext<'a> {
     tmdb: &'a TmdbClient,
+    /// Built once per sweep. The tree a title is under may come from a
+    /// source this module never names, and rebuilding the clients per
+    /// title would pay for TLS once per series.
+    registry: &'a crate::metadata::registry::Registry,
     client: &'a ArrClient,
     rules: &'a [PrefixRule],
     mappings: &'a [ArrRootMapping],
@@ -933,7 +939,7 @@ async fn import_title(
     let detail = match title.media_type {
         MediaType::Movie => SeriesDetail::default(),
         MediaType::Tv => {
-            sync_tree(pool, ctx.tmdb, &item, tmdb_id).await?;
+            sync_tree(pool, ctx.registry, &item).await?;
             series_detail(ctx.client, title.arr_id)
                 .await
                 .map_err(|e| AppError::InvalidInput(e.to_string()))?
@@ -1038,13 +1044,19 @@ async fn upsert_metadata(
 /// `if created` gate — which is what made the v0.13 unlink hit a whole TV
 /// library every half hour. [`structure::apply`] is what makes that
 /// frequency safe rather than merely survivable.
+///
+/// **Asks whoever owns the shape**, not TMDB. A title the operator moved
+/// to TheTVDB or pinned to an episode group would otherwise be handed
+/// TMDB's own tree every half hour and have it refused by the source
+/// gate — safe, but the title would never pick up a new episode again,
+/// and the log would blame the provider for the caller asking the wrong
+/// question.
 async fn sync_tree(
     pool: &Pool,
-    tmdb: &TmdbClient,
+    registry: &crate::metadata::registry::Registry,
     item: &LibraryItem,
-    tmdb_id: i64,
 ) -> Result<(), AppError> {
-    let tree = tmdb_sync::canonical_tree(tmdb, tmdb_id).await?;
+    let tree = crate::metadata::owned::tree(pool, registry, item.id).await?;
     structure::apply(pool, item.id, &tree).await?;
     Ok(())
 }
