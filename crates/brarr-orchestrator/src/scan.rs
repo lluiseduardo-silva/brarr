@@ -7,9 +7,12 @@
 //! One pass, per target:
 //!
 //! ```text
-//!   library::monitored()        ── movies, and aired monitored episodes
+//!   library::monitored()        ── released movies, aired monitored episodes
 //!         │
-//!         ├─ grabs::blocking_for()  ── already taken care of? skip
+//!         ├─ grabs::live_coverage()  ── already taken care of? skip
+//!         ▼
+//!   sort_queue()                ── fresh first, then least recently searched
+//!         │                        (only the first N fit this cycle)
 //!         ▼
 //!   search::run_search()        ── the same fan-out the UI uses
 //!         │
@@ -31,6 +34,37 @@
 //! The accepted lie is a file deleted outside brarr — reconciling
 //! against the disk arrives with the import phase.
 //!
+//! ## The queue rotates, and that is what makes the ceiling honest
+//!
+//! A cycle dispatches at most [`DEFAULT_SEARCHES_PER_CYCLE`] searches, so
+//! a catalogue with hundreds of gaps is swept over many cycles rather
+//! than in one burst that looks like abuse. That budget used to be spent
+//! from a fixed head — items by `metadata_refreshed_at`, then season and
+//! episode — and nothing ever moved it, so the same targets were searched
+//! every cycle forever while the rest were never searched at all.
+//!
+//! The head of that list is the worst possible place to spend a budget:
+//! a target is wanted *because* nothing was found for it, so whatever
+//! sits at the front is precisely what keeps finding nothing. Measured on
+//! this operator's catalogue — 294 wanted targets against a ceiling of
+//! 25, of which 269 had never been searched once. One title contributed
+//! twelve of the twenty-five: a season whose files exist under a
+//! different cut of the show, so those gaps can never close, and they
+//! were holding the budget for the whole library.
+//!
+//! [`sort_queue`] spends it least-recently-searched first, within two
+//! tiers: what came out inside [`FRESH_WINDOW`], and everything else.
+//! That is brarr's version of the split Sonarr draws between its RSS pass
+//! and its search for missing episodes — two tiers of one queue rather
+//! than two schedules to keep in agreement.
+//!
+//! The tiers **divide** the cycle ([`split_budget`]) instead of ordering
+//! it, and that distinction was measured rather than guessed: the same
+//! catalogue carries 30 targets inside the window, which alone exceeds
+//! the ceiling. Strict priority would have spent every cycle on the fresh
+//! tier and left the 249 others at zero — the identical starvation, one
+//! tier down, and harder to spot because the sweep would look busy.
+//!
 //! ## Why the candidate loop keeps going
 //!
 //! The barrier can refuse a release the scanner just picked: a previous
@@ -50,6 +84,7 @@
 //! but recognising one means parsing which episodes it covers, which is
 //! the import phase's problem. Not grabbing is the safe failure here.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -60,25 +95,53 @@ use tokio::task::JoinHandle;
 // `tokio::time` would shadow the `time` crate this module also uses.
 use tokio::time::sleep;
 use tracing::{debug, info, warn};
+use uuid::Uuid;
 
 use crate::db::decisions::DecisionRow;
 use crate::db::grabs::{self, NewGrab, Protocol};
-use crate::db::library::{self, Episode, LibraryItem, MediaType};
+use crate::db::library::{self, Episode, LibraryItem, MediaType, ProductionStatus};
 use crate::db::quality_profiles::{self, QualityProfileRow};
-use crate::db::{download_clients, item_ids, searches};
+use crate::db::{download_clients, item_ids, scan_attempts, searches};
 use crate::deliver::{self, DeliveryOutcome};
 use crate::metadata::axis;
 use crate::search::{self, SearchKeys};
 use crate::{AppError, AppState};
 
-/// Ceiling on searches per sweep.
+/// Ceiling on searches per sweep, when `/settings` names none.
 ///
 /// A library adopted all at once can have hundreds of wanted episodes,
 /// and firing one search each would hammer every configured tracker in a
 /// burst that looks exactly like abuse. What does not fit this cycle is
 /// picked up by the next one — and is reported in
 /// [`ScanSummary::skipped_over_cap`] rather than silently dropped.
-pub const MAX_SEARCHES_PER_CYCLE: usize = 25;
+///
+/// **The ceiling is only honest because the queue rotates.** It used to
+/// be spent from a fixed head — items by `metadata_refreshed_at`, then
+/// season and episode — and nothing ever moved, so the same targets were
+/// searched every cycle forever. Those are by definition the ones that
+/// never find anything: a target is wanted precisely because nothing was
+/// found for it. Measured on this operator's catalogue: 294 wanted
+/// targets against this ceiling, so 269 of them had never been searched
+/// once, including every episode that had just aired. See [`sort_queue`].
+pub const DEFAULT_SEARCHES_PER_CYCLE: usize = 25;
+
+/// Floor for the configured ceiling.
+///
+/// Zero is a paused scanner spelled a second way, and
+/// [`crate::db::settings::KEY_PAUSED`] is the one that says so — an
+/// operator who reaches for this box wants fewer searches, not a sweep
+/// that silently stops sweeping.
+pub const MIN_SEARCHES_PER_CYCLE: usize = 1;
+
+/// How recently a target has to have come out to jump the backlog.
+///
+/// Rotation alone puts a newly aired episode behind whatever backlog
+/// precedes it — on this operator's catalogue a full pass is roughly six
+/// hours, and the episode that aired this afternoon is the one being
+/// waited for. This is brarr's version of the split Sonarr draws between
+/// its RSS pass and its search for missing episodes: one sweep, two
+/// tiers, rather than two schedules to keep in agreement.
+const FRESH_WINDOW: time::Duration = time::Duration::days(14);
 
 /// Threshold applied to an item with no quality profile attached.
 /// Same default as an \*arr instance without one: roughly "PT-BR audio
@@ -142,6 +205,13 @@ pub struct ScanSummary {
     /// Episodes in scope, monitored, that have not aired. The other
     /// honest answer.
     pub skipped_unaired: usize,
+    /// Films that are not out yet.
+    ///
+    /// Kept apart from [`Self::skipped_unaired`] because the two have
+    /// different fixes: an unaired episode is a date to wait for, and a
+    /// film with no digital release may well be on a shelf somewhere
+    /// under a status the operator can check.
+    pub skipped_unreleased: usize,
     /// The item carries no id the search axis can use, so no target was
     /// buildable at all.
     ///
@@ -168,16 +238,21 @@ pub struct ScanSummary {
 }
 
 impl ScanSummary {
-    fn merge(&mut self, other: Self) {
-        self.targets += other.targets;
-        self.skipped_covered += other.skipped_covered;
-        self.skipped_over_cap += other.skipped_over_cap;
-        self.searches += other.searches;
-        self.grabbed += other.grabbed;
-        self.no_candidate += other.no_candidate;
-        self.skipped_unmonitored += other.skipped_unmonitored;
-        self.skipped_unaired += other.skipped_unaired;
-        self.failures.extend(other.failures);
+    /// Take everything [`build_targets`] decided *not* to search.
+    ///
+    /// The counters are additive because the scheduled sweep folds every
+    /// item into one summary; the narrowed sweep folds exactly one, and
+    /// reads them as its whole report.
+    fn absorb(&mut self, plan: &TargetPlan) {
+        self.skipped_unmonitored += plan.skipped_unmonitored;
+        self.skipped_unaired += plan.skipped_unaired;
+        self.skipped_unreleased += plan.skipped_unreleased;
+        self.no_search_axis |= plan.no_search_axis;
+        self.axis_rejections.extend(
+            plan.rejected
+                .iter()
+                .map(crate::metadata::axis::AxisRejection::message),
+        );
     }
 }
 
@@ -189,7 +264,7 @@ pub fn spawn(state: AppState) -> JoinHandle<()> {
     info!(
         target: "brarr_orchestrator::scan",
         interval_secs = state.poll_interval().as_secs(),
-        cap = MAX_SEARCHES_PER_CYCLE,
+        default_cap = DEFAULT_SEARCHES_PER_CYCLE,
         "starting the library scanner"
     );
     tokio::spawn(async move {
@@ -250,13 +325,214 @@ async fn run_one_cycle(state: &AppState) {
 /// instead of aborting the sweep.
 pub async fn run_once(state: &AppState) -> Result<ScanSummary, AppError> {
     let items = library::monitored(state.pool()).await?;
+    // Two bulk reads instead of one query per target. The sweep needs the
+    // whole wanted list in hand before it can order it, and asking per
+    // target was already thousands of queries a cycle — a cost that scaled
+    // with the catalogue rather than with the budget actually spent.
+    let coverage = grabs::live_coverage(state.pool()).await?;
+    let attempts = scan_attempts::last_searched(state.pool()).await?;
+    let now = OffsetDateTime::now_utc();
+
     let mut summary = ScanSummary::default();
-    let mut budget = MAX_SEARCHES_PER_CYCLE;
+    let mut queue: Vec<Wanted<'_>> = Vec::new();
     for item in &items {
-        let one = scan_item(state, item, &mut budget, Scope::Item).await?;
-        summary.merge(one);
+        let plan = build_targets(state, item, Scope::Item).await?;
+        summary.absorb(&plan);
+        for target in plan.targets {
+            summary.targets += 1;
+            if is_covered(&coverage, item.id, target.grab_target()) {
+                summary.skipped_covered += 1;
+                continue;
+            }
+            let key = (item.id, target.episode.as_ref().map(|e| e.id));
+            queue.push(Wanted {
+                tier: tier_of(item, target.episode.as_ref(), now),
+                last_searched: attempts.get(&key).copied(),
+                item,
+                target,
+            });
+        }
+    }
+
+    // Two tiers, each rotating on its own, each with a guaranteed share
+    // of the cycle — see `split_budget` for why this is not a priority
+    // order.
+    let (mut fresh, mut backlog): (Vec<_>, Vec<_>) =
+        queue.into_iter().partition(|w| w.tier == Tier::Fresh);
+    sort_queue(&mut fresh);
+    sort_queue(&mut backlog);
+
+    let budget = configured_budget(state.pool()).await;
+    let (take_fresh, take_backlog) = split_budget(budget, fresh.len(), backlog.len());
+    summary.skipped_over_cap = (fresh.len() - take_fresh) + (backlog.len() - take_backlog);
+    fresh.truncate(take_fresh);
+    backlog.truncate(take_backlog);
+    debug!(
+        target: "brarr_orchestrator::scan",
+        fresh = take_fresh,
+        backlog = take_backlog,
+        over_cap = summary.skipped_over_cap,
+        "queue for this cycle"
+    );
+    let queue: Vec<Wanted<'_>> = fresh.into_iter().chain(backlog).collect();
+
+    // Resolved once per item rather than once per target: a series
+    // contributing eight episodes to one cycle would otherwise read the
+    // same profile eight times.
+    let mut profiles: HashMap<Uuid, Option<QualityProfileRow>> = HashMap::new();
+    for wanted in &queue {
+        // Not `entry()`: the lookup has to happen before the `await` that
+        // fills it, and holding the entry across one would borrow the map
+        // for the whole call.
+        if let std::collections::hash_map::Entry::Vacant(slot) = profiles.entry(wanted.item.id) {
+            let profile = resolve_profile(state, wanted.item).await?;
+            slot.insert(profile);
+        }
+        let profile = profiles.get(&wanted.item.id).and_then(Option::as_ref);
+        summary.searches += 1;
+        run_target(state, wanted.item, &wanted.target, profile, &mut summary).await?;
     }
     Ok(summary)
+}
+
+/// One target waiting for a slot, with everything that decides its place
+/// in line.
+struct Wanted<'a> {
+    /// Which half of the queue it sits in.
+    tier: Tier,
+    /// When this exact target was last searched. `None` — never — sorts
+    /// ahead of every searched one, which is what drains a fresh
+    /// catalogue instead of circling its first page.
+    last_searched: Option<OffsetDateTime>,
+    /// Borrowed from the caller's list: the queue holds a few hundred of
+    /// these and a `LibraryItem` is not a cheap clone.
+    item: &'a LibraryItem,
+    /// What to search for.
+    target: Target,
+}
+
+/// Which half of the queue a target belongs to.
+///
+/// Derived `Ord` puts [`Self::Fresh`] first, and the declaration order is
+/// the ordering — there is no second place saying so.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Tier {
+    /// Out within [`FRESH_WINDOW`].
+    Fresh,
+    /// Everything else.
+    Backlog,
+}
+
+/// Where a target sits, from the date it became findable.
+///
+/// Only reached for targets that already passed the release gate, so the
+/// date is in the past and the question is only how far.
+fn tier_of(item: &LibraryItem, episode: Option<&Episode>, now: OffsetDateTime) -> Tier {
+    let out_at = match episode {
+        Some(e) => e.air_date,
+        None => item.digital_release_at,
+    };
+    match out_at {
+        Some(date) if date > now - FRESH_WINDOW => Tier::Fresh,
+        // Older than the window — or a film with no digital date at all,
+        // which is most of a back catalogue and is never news.
+        _ => Tier::Backlog,
+    }
+}
+
+/// The order the budget is spent in.
+///
+/// Fresh first, then least-recently-searched, and never-searched ahead of
+/// both — which `Option`'s own ordering already says, so it is not
+/// written twice. The label breaks what is left, so a cycle is
+/// reproducible and a test can assert on one.
+///
+/// This function is the whole fix for the starvation: with a fixed order
+/// the ceiling meant the first N wanted targets were searched forever and
+/// target N+1 never once, and the head of that list is the part that
+/// never finds anything.
+fn sort_queue(queue: &mut [Wanted<'_>]) {
+    queue.sort_by(|a, b| {
+        a.tier
+            .cmp(&b.tier)
+            .then(a.last_searched.cmp(&b.last_searched))
+            .then_with(|| a.target.label.cmp(&b.target.label))
+    });
+}
+
+/// Share of a cycle the fresh tier is guaranteed, as `NUM / DEN`.
+///
+/// Expressed as two integers rather than a float because a budget is
+/// counted in searches, and a rounding rule is easier to read than a cast.
+const FRESH_SHARE_NUM: usize = 7;
+/// Denominator of [`FRESH_SHARE_NUM`].
+const FRESH_SHARE_DEN: usize = 10;
+
+/// How one cycle's budget is divided between the two tiers.
+///
+/// **This is a split, not a priority order, and the measurement is why.**
+/// "Fresh first, then whatever is left" reads like the obvious rule and
+/// is wrong on real data: on this operator's catalogue the fresh tier is
+/// 30 targets against a ceiling of 25, so strict priority would spend
+/// every cycle inside the two-week window and the 249 backlog targets
+/// would get exactly zero searches — the same starvation this rotation
+/// exists to end, moved one tier down and harder to see, because the
+/// sweep would look busy.
+///
+/// **Neither share is a cap when the other tier cannot fill its own.** A
+/// share is a floor for the tier that needs it; a quiet week has no fresh
+/// episodes and the backlog should get the whole cycle, not 30% of it.
+///
+/// The fresh tier wins a budget of one, because a single slot spent on
+/// what aired yesterday beats one spent on a gap that has been open for
+/// years.
+fn split_budget(budget: usize, fresh: usize, backlog: usize) -> (usize, usize) {
+    let share = (budget * FRESH_SHARE_NUM / FRESH_SHARE_DEN).max(1);
+    let take_fresh = fresh.min(share.max(budget.saturating_sub(backlog)));
+    let take_backlog = backlog.min(budget - take_fresh);
+    (take_fresh, take_backlog)
+}
+
+/// Whether any live grab answers for this target.
+///
+/// [`grabs::live_coverage`] plus [`grabs::Coverage::covers`] in Rust,
+/// rather than [`grabs::blocking_for`] per target. The two are the same
+/// rule — a test confronts the SQL predicate with the Rust one — and this
+/// side is the one that does not cost a round trip per episode.
+fn is_covered(coverage: &[grabs::Coverage], item_id: Uuid, target: grabs::GrabTarget) -> bool {
+    coverage
+        .iter()
+        .any(|row| row.item_id == item_id && row.covers(target))
+}
+
+/// The ceiling as configured, floored.
+///
+/// Read fresh every cycle so an edit in `/settings` lands on the next
+/// tick rather than at the next restart — the same hot-reload contract
+/// the poller and the \*arr sweep have. A blank, missing or unreadable
+/// setting is the default, not a stall: this task has to keep sweeping
+/// while the DB hiccups.
+async fn configured_budget(pool: &crate::db::Pool) -> usize {
+    let stored = match crate::db::settings::get(
+        pool,
+        crate::db::settings::KEY_SCAN_SEARCHES_PER_CYCLE,
+    )
+    .await
+    {
+        Ok(Some(row)) => row.value.trim().parse::<usize>().ok(),
+        Ok(None) => None,
+        Err(e) => {
+            warn!(
+                target: "brarr_orchestrator::scan",
+                error = %e,
+                "could not read the search ceiling; using the default"
+            );
+            None
+        }
+    };
+    stored
+        .unwrap_or(DEFAULT_SEARCHES_PER_CYCLE)
+        .max(MIN_SEARCHES_PER_CYCLE)
 }
 
 /// Sweep one item, ignoring the per-cycle cap. This is the "buscar
@@ -275,8 +551,7 @@ pub async fn run_once_for_item(
             ..ScanSummary::default()
         });
     }
-    let mut budget = usize::MAX;
-    scan_item(state, item, &mut budget, Scope::Item).await
+    scan_item(state, item, Scope::Item).await
 }
 
 /// Which slice of an item a sweep should look at.
@@ -340,8 +615,7 @@ pub async fn run_once_for_target(
             ..ScanSummary::default()
         });
     }
-    let mut budget = usize::MAX;
-    scan_item(state, item, &mut budget, scope).await
+    scan_item(state, item, scope).await
 }
 
 /// One target: a movie, or one episode of a series.
@@ -368,67 +642,91 @@ impl Target {
     }
 }
 
+/// Sweep one item, ignoring the per-cycle ceiling and the rotation.
+///
+/// Both exist to share a bounded budget fairly across a whole catalogue,
+/// and neither has anything to say when the operator has pointed at one
+/// title: there is nothing to be fair to.
 async fn scan_item(
     state: &AppState,
     item: &LibraryItem,
-    budget: &mut usize,
     scope: Scope,
 ) -> Result<ScanSummary, AppError> {
     let mut summary = ScanSummary::default();
     let profile = resolve_profile(state, item).await?;
+    let coverage = grabs::live_coverage_for_item(state.pool(), item.id).await?;
     let plan = build_targets(state, item, scope).await?;
-    summary.skipped_unmonitored = plan.skipped_unmonitored;
-    summary.skipped_unaired = plan.skipped_unaired;
-    summary.no_search_axis = plan.no_search_axis;
-    summary.axis_rejections = plan
-        .rejected
-        .iter()
-        .map(crate::metadata::axis::AxisRejection::message)
-        .collect();
+    summary.absorb(&plan);
 
-    for target in plan.targets {
+    for target in &plan.targets {
         summary.targets += 1;
-        let covered = grabs::blocking_for(state.pool(), item.id, target.grab_target()).await?;
-        if !covered.is_empty() {
+        if is_covered(&coverage, item.id, target.grab_target()) {
             summary.skipped_covered += 1;
             continue;
         }
-        if *budget == 0 {
-            summary.skipped_over_cap += 1;
-            continue;
-        }
-        *budget -= 1;
         summary.searches += 1;
-
-        let outcome = match search::run_search(state, target.keys.clone()).await {
-            Ok(o) => o,
-            Err(e) => {
-                summary.failures.push((target.label.clone(), e.to_string()));
-                continue;
-            }
-        };
-        // The column exists for exactly this: an ad-hoc search leaves it
-        // NULL, a sweep names the item that asked for it.
-        if let Err(e) =
-            searches::attach_library_item(state.pool(), outcome.search.id, item.id).await
-        {
-            warn!(target: "brarr_orchestrator::scan", error = %e, "could not tie the search to its item");
-        }
-
-        let candidates = pick_candidates(&outcome.decisions, profile.as_ref(), &target);
-        if candidates.is_empty() {
-            summary.no_candidate += 1;
-            continue;
-        }
-        match take_first_available(state, item, &target, &candidates).await? {
-            TargetOutcome::Grabbed => summary.grabbed += 1,
-            TargetOutcome::Nothing => summary.no_candidate += 1,
-            TargetOutcome::Failed(reason) => {
-                summary.failures.push((target.label.clone(), reason));
-            }
-        }
+        run_target(state, item, target, profile.as_ref(), &mut summary).await?;
     }
     Ok(summary)
+}
+
+/// Search one target and act on what came back.
+///
+/// Shared by the scheduled sweep and the buttons, so the two can never
+/// judge the same release differently — the caller has already decided
+/// this target is worth a slot and counted the search.
+async fn run_target(
+    state: &AppState,
+    item: &LibraryItem,
+    target: &Target,
+    profile: Option<&QualityProfileRow>,
+    summary: &mut ScanSummary,
+) -> Result<(), AppError> {
+    // Stamped at dispatch rather than on success, and that is the whole
+    // point: a target whose search errors, or finds nothing, has to move
+    // down the queue too. Recording only successes would leave exactly
+    // the un-findable targets at the head forever, which is the defect
+    // this rotation exists to close.
+    //
+    // Best-effort, like `record_provider_metric`: bookkeeping does not
+    // get to fail a sweep.
+    if let Err(e) = scan_attempts::record(
+        state.pool(),
+        item.id,
+        target.episode.as_ref().map(|e| e.id),
+        OffsetDateTime::now_utc(),
+    )
+    .await
+    {
+        warn!(target: "brarr_orchestrator::scan", error = %e, "could not record the search attempt");
+    }
+
+    let outcome = match search::run_search(state, target.keys.clone()).await {
+        Ok(o) => o,
+        Err(e) => {
+            summary.failures.push((target.label.clone(), e.to_string()));
+            return Ok(());
+        }
+    };
+    // The column exists for exactly this: an ad-hoc search leaves it
+    // NULL, a sweep names the item that asked for it.
+    if let Err(e) = searches::attach_library_item(state.pool(), outcome.search.id, item.id).await {
+        warn!(target: "brarr_orchestrator::scan", error = %e, "could not tie the search to its item");
+    }
+
+    let candidates = pick_candidates(&outcome.decisions, profile, target);
+    if candidates.is_empty() {
+        summary.no_candidate += 1;
+        return Ok(());
+    }
+    match take_first_available(state, item, target, &candidates).await? {
+        TargetOutcome::Grabbed => summary.grabbed += 1,
+        TargetOutcome::Nothing => summary.no_candidate += 1,
+        TargetOutcome::Failed(reason) => {
+            summary.failures.push((target.label.clone(), reason));
+        }
+    }
+    Ok(())
 }
 
 /// What happened to one target after candidates were picked.
@@ -529,6 +827,22 @@ async fn build_targets(
         // of quietly searching the whole film.
         MediaType::Movie if scope.is_narrowed() => Ok(TargetPlan::default()),
         MediaType::Movie => {
+            // A film that is not out is not missing, and asking every
+            // tracker about it each cycle is the same traffic
+            // `episode_targets` refuses to generate for an unaired
+            // episode. `coverage::movie_progress` has painted these "não
+            // estreou" on the shelf since v0.7.1 while the sweep chased
+            // them every half hour — the season 0 asymmetry again,
+            // pointing the other way: there the screen counted what the
+            // sweep would not touch, here the sweep chases what the
+            // screen already refuses to call a gap.
+            if !movie_is_out(item, OffsetDateTime::now_utc()) {
+                return Ok(TargetPlan {
+                    skipped_unreleased: 1,
+                    rejected,
+                    ..TargetPlan::default()
+                });
+            }
             let Some(target) = movie_target(item, &axis) else {
                 return Ok(TargetPlan {
                     no_search_axis: true,
@@ -569,6 +883,43 @@ async fn build_targets(
             ))
         }
     }
+}
+
+/// Whether a film exists to be found yet.
+///
+/// Two questions, and the order matters. **Production status first**: a
+/// film still being made carries no release date of any kind, so a date
+/// test alone reads "no date ⇒ out" and sends the sweep after a 2027
+/// sequel every half hour — measured on this operator's catalogue, two of
+/// the seventeen wanted films. Then the digital date, which is when a
+/// film becomes findable at all; the theatrical window is exactly what
+/// the detail page already warns about.
+///
+/// **A missing date on a released film still counts as out**, which is
+/// the default [`crate::coverage::movie_progress`] documents: TMDB
+/// carries no digital date for most older films, and the opposite
+/// default would take half a back catalogue out of the sweep.
+///
+/// The `match` is exhaustive rather than a two-arm test, so a seventh
+/// production status has to be placed here instead of quietly joining
+/// whichever side the wildcard fell on.
+fn movie_is_out(item: &LibraryItem, now: OffsetDateTime) -> bool {
+    if let Some(status) = item.status {
+        match status {
+            // Announced, or being made. There is nothing to find, and
+            // there is no date to reason about either.
+            ProductionStatus::InProduction | ProductionStatus::Announced => return false,
+            // `Released` is the film answer. The three series values
+            // cannot describe a film at all, so a row carrying one is a
+            // mis-mapped provider — which is a reason to look at the
+            // metadata, not a reason to stop searching for the film.
+            ProductionStatus::Released
+            | ProductionStatus::Returning
+            | ProductionStatus::Ended
+            | ProductionStatus::Cancelled => {}
+        }
+    }
+    item.digital_release_at.is_none_or(|date| date <= now)
 }
 
 /// Search axis for a movie. `None` when the item carries no usable id,
@@ -680,6 +1031,8 @@ struct TargetPlan {
     skipped_unmonitored: usize,
     /// In scope and monitored, but it has not aired.
     skipped_unaired: usize,
+    /// A film that is not out yet. Always 0 or 1 — a film is one target.
+    skipped_unreleased: usize,
     /// No usable search id on the item at all.
     no_search_axis: bool,
     /// Ids brarr holds and cannot search with, so the badge can name the
@@ -1253,20 +1606,226 @@ mod tests {
 
     #[test]
     fn the_summary_adds_up_across_items() {
-        let mut a = ScanSummary {
+        let mut summary = ScanSummary {
             targets: 2,
-            grabbed: 1,
+            skipped_unaired: 1,
             ..ScanSummary::default()
         };
-        a.merge(ScanSummary {
-            targets: 3,
-            skipped_covered: 3,
-            failures: vec![("x".to_owned(), "y".to_owned())],
-            ..ScanSummary::default()
+        summary.absorb(&TargetPlan {
+            skipped_unmonitored: 3,
+            skipped_unaired: 4,
+            skipped_unreleased: 1,
+            no_search_axis: true,
+            ..TargetPlan::default()
         });
-        assert_eq!(a.targets, 5);
-        assert_eq!(a.skipped_covered, 3);
-        assert_eq!(a.grabbed, 1);
-        assert_eq!(a.failures.len(), 1);
+        assert_eq!(summary.targets, 2, "absorb only takes the skip counters");
+        assert_eq!(summary.skipped_unmonitored, 3);
+        assert_eq!(summary.skipped_unaired, 5, "additive across items");
+        assert_eq!(summary.skipped_unreleased, 1);
+        assert!(summary.no_search_axis);
+    }
+
+    // ---- the release gate on the film path -----------------------------
+
+    fn film(status: Option<ProductionStatus>, digital: Option<OffsetDateTime>) -> LibraryItem {
+        LibraryItem {
+            status,
+            digital_release_at: digital,
+            ..item(MediaType::Movie)
+        }
+    }
+
+    /// The traffic `episode_targets` has always refused to generate, on
+    /// the path that never had the check.
+    ///
+    /// Measured live before this existed: of seventeen wanted films, the
+    /// sweep was asking every configured tracker every thirty minutes
+    /// about a 2027 sequel that is still being shot and a sequel whose
+    /// digital release was four days away — while `coverage` painted both
+    /// "não estreou" on the shelf.
+    #[test]
+    fn a_film_that_is_not_out_yet_is_not_searched() {
+        let now = OffsetDateTime::now_utc();
+        let soon = now + time::Duration::days(4);
+        let past = now - time::Duration::days(400);
+
+        assert!(
+            !movie_is_out(&film(Some(ProductionStatus::Released), Some(soon)), now),
+            "a digital release still ahead of us is nothing to find"
+        );
+        assert!(
+            !movie_is_out(&film(Some(ProductionStatus::InProduction), None), now),
+            "still being shot, and carrying no date to reason about"
+        );
+        assert!(
+            !movie_is_out(&film(Some(ProductionStatus::Announced), None), now),
+            "announced and not shot"
+        );
+        assert!(
+            movie_is_out(&film(Some(ProductionStatus::Released), Some(past)), now),
+            "out, and out a while"
+        );
+        assert!(
+            movie_is_out(&film(Some(ProductionStatus::Released), None), now),
+            "TMDB carries no digital date for most older films; the \
+             opposite default would take half a back catalogue out"
+        );
+        assert!(
+            movie_is_out(&film(None, None), now),
+            "an unknown status is not a reason to stop searching"
+        );
+    }
+
+    // ---- the queue -----------------------------------------------------
+
+    fn wanted_episode(
+        series: &LibraryItem,
+        season: i32,
+        number: i32,
+        aired_days_ago: i64,
+        searched_days_ago: Option<i64>,
+        now: OffsetDateTime,
+    ) -> Wanted<'_> {
+        let mut ep = episode(season, number, true, None);
+        ep.air_date = Some(now - time::Duration::days(aired_days_ago));
+        Wanted {
+            tier: tier_of(series, Some(&ep), now),
+            last_searched: searched_days_ago.map(|d| now - time::Duration::days(d)),
+            target: Target {
+                label: format!("{} S{season:02}E{number:02}", series.title),
+                episode: Some(ep),
+                keys: SearchKeys::default(),
+                episode_marker: None,
+            },
+            item: series,
+        }
+    }
+
+    /// The regression this whole rotation exists for, in the shape it was
+    /// measured in.
+    ///
+    /// One title contributed twelve of the twenty-five slots a cycle had:
+    /// a season whose files are on disk under a different cut of the show,
+    /// so those gaps can never close and every search for them finds
+    /// nothing — forever, since a target is wanted precisely because
+    /// nothing was found. Under the old fixed order (season, then
+    /// episode) the episode that aired two days earlier sat behind all of
+    /// them and was never searched once, in any cycle.
+    #[test]
+    fn a_freshly_aired_episode_outranks_a_backlog_that_would_never_end() {
+        let series = item(MediaType::Tv);
+        let now = OffsetDateTime::now_utc();
+        let mut queue: Vec<Wanted<'_>> = (14..=25)
+            .map(|n| wanted_episode(&series, 1, n, 3500, Some(1), now))
+            .collect();
+        queue.push(wanted_episode(&series, 4, 12, 2, None, now));
+
+        sort_queue(&mut queue);
+
+        assert_eq!(queue[0].tier, Tier::Fresh);
+        assert_eq!(
+            queue[0].target.label, "The Matrix S04E12",
+            "the episode the operator is actually waiting for"
+        );
+    }
+
+    /// Never-searched ahead of searched, and older attempts ahead of
+    /// newer ones. `Option`'s own ordering says the first half, which is
+    /// why it is not written a second time in `sort_queue`.
+    #[test]
+    fn the_queue_rotates_least_recently_searched_first() {
+        let series = item(MediaType::Tv);
+        let now = OffsetDateTime::now_utc();
+        let mut queue = vec![
+            wanted_episode(&series, 1, 1, 900, Some(1), now),
+            wanted_episode(&series, 1, 2, 900, None, now),
+            wanted_episode(&series, 1, 3, 900, Some(30), now),
+        ];
+
+        sort_queue(&mut queue);
+
+        let order: Vec<&str> = queue.iter().map(|w| w.target.label.as_str()).collect();
+        assert_eq!(
+            order,
+            vec![
+                "The Matrix S01E02",
+                "The Matrix S01E03",
+                "The Matrix S01E01"
+            ],
+            "never searched, then the oldest attempt, then the newest"
+        );
+    }
+
+    /// Freshness is decided by the date, not by the tier being a nicer
+    /// place to sit: a film with no digital date at all is most of a back
+    /// catalogue, and putting it in front of what aired this week would
+    /// undo the tier.
+    #[test]
+    fn a_film_with_no_release_date_is_backlog_not_fresh() {
+        let now = OffsetDateTime::now_utc();
+        let old = film(Some(ProductionStatus::Released), None);
+        assert_eq!(tier_of(&old, None, now), Tier::Backlog);
+
+        let just_out = film(
+            Some(ProductionStatus::Released),
+            Some(now - time::Duration::days(3)),
+        );
+        assert_eq!(tier_of(&just_out, None, now), Tier::Fresh);
+
+        let last_year = film(
+            Some(ProductionStatus::Released),
+            Some(now - time::Duration::days(365)),
+        );
+        assert_eq!(tier_of(&last_year, None, now), Tier::Backlog);
+    }
+
+    /// A share is a floor for the tier that needs it and never a cap on
+    /// the cycle — the arithmetic both directions depend on.
+    #[test]
+    fn the_budget_splits_without_leaving_slots_unspent() {
+        // The measured case: the fresh tier alone exceeds the ceiling, so
+        // strict priority would leave the backlog at zero forever.
+        assert_eq!(split_budget(25, 30, 249), (17, 8));
+
+        // A quiet week. The backlog takes what fresh cannot use, rather
+        // than the cycle running at 30% for want of new episodes.
+        assert_eq!(split_budget(25, 3, 249), (3, 22));
+        assert_eq!(split_budget(25, 0, 5), (0, 5));
+
+        // And the mirror: a nearly-empty backlog does not hold slots the
+        // fresh tier could spend.
+        assert_eq!(split_budget(25, 30, 2), (23, 2));
+
+        // Nothing wanted at all, and a budget of one — where integer
+        // rounding would otherwise hand the fresh tier zero.
+        assert_eq!(split_budget(25, 0, 0), (0, 0));
+        assert_eq!(split_budget(1, 5, 5), (1, 0));
+    }
+
+    /// The ceiling is hot-reloadable, and the one value it must never
+    /// take is zero — that is a paused scanner spelled a second way, and
+    /// `KEY_PAUSED` is the one that says so.
+    #[tokio::test]
+    async fn the_ceiling_is_read_fresh_and_floored() {
+        let pool = crate::db::open_memory().await.expect("open in-memory db");
+        assert_eq!(
+            configured_budget(&pool).await,
+            DEFAULT_SEARCHES_PER_CYCLE,
+            "an unset key is the default, not a stall"
+        );
+
+        let key = crate::db::settings::KEY_SCAN_SEARCHES_PER_CYCLE;
+        crate::db::settings::set(&pool, key, "60").await.unwrap();
+        assert_eq!(configured_budget(&pool).await, 60);
+
+        crate::db::settings::set(&pool, key, "0").await.unwrap();
+        assert_eq!(configured_budget(&pool).await, MIN_SEARCHES_PER_CYCLE);
+
+        crate::db::settings::set(&pool, key, "  ").await.unwrap();
+        assert_eq!(
+            configured_budget(&pool).await,
+            DEFAULT_SEARCHES_PER_CYCLE,
+            "blanked from the UI means the default"
+        );
     }
 }

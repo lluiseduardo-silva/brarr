@@ -175,6 +175,17 @@
                 entra <strong>pausado</strong>, sempre — esse caminho nunca liga monitoramento. Mínimo 60s.
             </span>
         </label>
+        <label class="block max-w-xs mt-4">
+            <span class="block mb-1.5 text-xs font-medium uppercase tracking-[0.06em] text-fg-muted">Buscas por ciclo da varredura</span>
+            <input name="scan_searches_per_cycle" value="{{ values.scan_searches_per_cycle }}" inputmode="numeric" placeholder="25"
+                   class="w-full px-3 h-10 rounded-md bg-bg-canvas border border-border-strong text-sm text-fg-primary placeholder:text-fg-muted focus:outline-none focus:border-accent-solid">
+            <span class="block mt-1 text-xs text-fg-muted">
+                Teto de buscas que uma passada da varredura dispara, para não bater em todos os trackers
+                de uma vez. O que não couber entra na passada seguinte: a fila roda pelo
+                <strong>menos buscado primeiro</strong>, com o que estreou nos últimos 14 dias na frente.
+                Mínimo 1 — para parar a varredura, use a pausa.
+            </span>
+        </label>
     </section>
 
     <section class="settings-section {% if section != "metadados" %}hidden{% endif %} card-hairline bg-bg-surface border border-border-default rounded-xl p-5">

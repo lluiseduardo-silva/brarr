@@ -1131,6 +1131,10 @@ pub struct SettingsValues {
     /// Cadence of the passive *arr sweep, in seconds. Blank shows the
     /// default the task is actually using.
     pub arr_sync_interval_secs: String,
+    /// Ceiling on searches the sweep dispatches per cycle. Blank shows
+    /// [`crate::scan::DEFAULT_SEARCHES_PER_CYCLE`], which is what the
+    /// sweep is actually using.
+    pub scan_searches_per_cycle: String,
     /// History-retention window in days (matches
     /// `BRARR_DECISIONS_RETENTION_DAYS`). `"0"` = keep forever.
     pub decisions_retention_days: String,

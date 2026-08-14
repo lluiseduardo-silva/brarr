@@ -30,6 +30,13 @@ pub const KEY_POLL_INTERVAL_SECS: &str = "poll_interval_secs";
 /// [`crate::arr_import::DEFAULT_SYNC_INTERVAL`]. Read fresh on every
 /// cycle, so an edit here lands without a restart.
 pub const KEY_ARR_SYNC_INTERVAL_SECS: &str = "arr_sync_interval_secs";
+/// Ceiling on how many searches one sweep of the library may dispatch.
+/// Blank falls back to [`crate::scan::DEFAULT_SEARCHES_PER_CYCLE`], and
+/// the floor is [`crate::scan::MIN_SEARCHES_PER_CYCLE`] — zero would be a
+/// paused scanner spelled a second way, and [`KEY_PAUSED`] is the one
+/// that says so. Read fresh on every cycle, so an edit lands without a
+/// restart.
+pub const KEY_SCAN_SEARCHES_PER_CYCLE: &str = "scan_searches_per_cycle";
 /// How many days of `decisions` / `searches` history to keep before the
 /// background maintenance task prunes them. `0` = keep forever (disabled).
 /// Replaces `BRARR_DECISIONS_RETENTION_DAYS`.

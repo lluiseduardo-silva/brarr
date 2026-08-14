@@ -22,6 +22,7 @@ pub mod providers;
 pub mod push_history;
 pub mod quality_profiles;
 pub mod root_folders;
+pub mod scan_attempts;
 pub mod searches;
 #[cfg(test)]
 pub(crate) mod seed;

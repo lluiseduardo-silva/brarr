@@ -3491,6 +3491,17 @@ fn scan_badge(summary: &crate::scan::ScanSummary) -> PingBadge {
                 summary.skipped_unaired
             ),
         }
+    } else if summary.targets == 0 && summary.skipped_unreleased > 0 {
+        // Kept apart from the unaired branch because the fix differs: an
+        // episode is a date to wait for, a film may simply be carrying a
+        // production status the operator can go and look at.
+        PingBadge {
+            ok: true,
+            label: "ainda não estreou".to_string(),
+            detail:
+                "o filme ainda está em produção ou o lançamento digital não chegou; não há o que procurar"
+                    .to_string(),
+        }
     } else if summary.skipped_covered > 0 && summary.searches == 0 {
         PingBadge {
             ok: true,
@@ -5516,6 +5527,16 @@ async fn load_settings_values(state: &AppState) -> Result<SettingsValues, AppErr
                 stored
             }
         },
+        scan_searches_per_cycle: {
+            let stored = get(settings::KEY_SCAN_SEARCHES_PER_CYCLE);
+            if stored.is_empty() {
+                // Same rationale as the poller: show what the sweep is
+                // actually using rather than an empty box.
+                crate::scan::DEFAULT_SEARCHES_PER_CYCLE.to_string()
+            } else {
+                stored
+            }
+        },
         decisions_retention_days: if map.contains_key(settings::KEY_DECISIONS_RETENTION_DAYS) {
             get(settings::KEY_DECISIONS_RETENTION_DAYS)
         } else {
@@ -5591,6 +5612,8 @@ struct SettingsGeneralForm {
     poll_interval_secs: String,
     #[serde(default)]
     arr_sync_interval_secs: String,
+    #[serde(default)]
+    scan_searches_per_cycle: String,
     #[serde(default)]
     decisions_retention_days: String,
     // Checkbox: present (`"1"`) when ticked, absent (`""`) when not.
@@ -5741,6 +5764,41 @@ async fn settings_general(
         }
     };
 
+    // Zero is refused rather than clamped, because it is the one value
+    // an operator could type meaning "stop searching" — and the pause
+    // switch is what says that. Clamping silently would leave the box
+    // showing a number the sweep is not using.
+    let scan_budget = if form.scan_searches_per_cycle.trim().is_empty() {
+        None
+    } else {
+        match form.scan_searches_per_cycle.trim().parse::<usize>() {
+            Ok(n) if n >= crate::scan::MIN_SEARCHES_PER_CYCLE => Some(n),
+            Ok(n) => {
+                return settings_flash_render(
+                    &state,
+                    SettingsFlash {
+                        kind: "err".to_string(),
+                        message: format!(
+                            "Buscas por ciclo muito baixo: {n} (mínimo {}). Para parar a varredura use a pausa.",
+                            crate::scan::MIN_SEARCHES_PER_CYCLE
+                        ),
+                    },
+                )
+                .await;
+            }
+            Err(e) => {
+                return settings_flash_render(
+                    &state,
+                    SettingsFlash {
+                        kind: "err".to_string(),
+                        message: format!("Buscas por ciclo inválido: {e}"),
+                    },
+                )
+                .await;
+            }
+        }
+    };
+
     let retention_days = if form.decisions_retention_days.trim().is_empty() {
         None
     } else {
@@ -5806,6 +5864,12 @@ async fn settings_general(
         pool,
         settings::KEY_ARR_SYNC_INTERVAL_SECS,
         &arr_sync_secs.map(|s| s.to_string()).unwrap_or_default(),
+    )
+    .await?;
+    settings::set(
+        pool,
+        settings::KEY_SCAN_SEARCHES_PER_CYCLE,
+        &scan_budget.map(|n| n.to_string()).unwrap_or_default(),
     )
     .await?;
     settings::set(
