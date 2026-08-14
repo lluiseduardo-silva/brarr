@@ -53,7 +53,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use brarr_core::{ImdbId, TmdbId, TvdbId};
+use brarr_core::TvdbId;
 use time::OffsetDateTime;
 use tokio::task::JoinHandle;
 // `tokio::time::sleep` by name rather than the module: importing
@@ -65,8 +65,9 @@ use crate::db::decisions::DecisionRow;
 use crate::db::grabs::{self, NewGrab, Protocol};
 use crate::db::library::{self, Episode, LibraryItem, MediaType};
 use crate::db::quality_profiles::{self, QualityProfileRow};
-use crate::db::{download_clients, searches};
+use crate::db::{download_clients, item_ids, searches};
 use crate::deliver::{self, DeliveryOutcome};
+use crate::metadata::axis;
 use crate::search::{self, SearchKeys};
 use crate::{AppError, AppState};
 
@@ -149,6 +150,14 @@ pub struct ScanSummary {
     /// most: a series imported without a TVDB id can never be swept, and
     /// the badge said the trackers had nothing.
     pub no_search_axis: bool,
+    /// Ids brarr holds and cannot search with, in the operator's words.
+    ///
+    /// The difference between "sem id de busca" and *which* id, and it
+    /// matters most for the case that produced it: an id that is
+    /// perfectly good in its own catalogue and simply not something any
+    /// indexer accepts. That is a title to resolve, not a tracker to
+    /// check.
+    pub axis_rejections: Vec<String>,
     /// The operator switched brarr off. A **fourth** way to do nothing,
     /// and the one most likely to be forgotten — which is exactly why it
     /// gets its own answer instead of joining "nada encontrado".
@@ -371,6 +380,11 @@ async fn scan_item(
     summary.skipped_unmonitored = plan.skipped_unmonitored;
     summary.skipped_unaired = plan.skipped_unaired;
     summary.no_search_axis = plan.no_search_axis;
+    summary.axis_rejections = plan
+        .rejected
+        .iter()
+        .map(crate::metadata::axis::AxisRejection::message)
+        .collect();
 
     for target in plan.targets {
         summary.targets += 1;
@@ -493,34 +507,55 @@ async fn resolve_profile(
 }
 
 /// Everything worth searching for on one item, within `scope`.
+///
+/// **The axis comes from the identity set, through the one resolver that
+/// reports what it could not use.** Reading the three columns here meant
+/// a film whose id would not convert left the sweep via
+/// `movie_target(item).into_iter().collect()` — no counter, no log, and
+/// a screen that went on saying "faltando" while the badge blamed the
+/// trackers. `metadata::axis::resolve` hands back both halves, and a
+/// caller that wants to ignore a rejection has to say so.
 async fn build_targets(
     state: &AppState,
     item: &LibraryItem,
     scope: Scope,
 ) -> Result<TargetPlan, AppError> {
+    let ids = item_ids::for_item(state.pool(), item.id).await?;
+    let (axis, rejected) = axis::resolve(&ids, item.media_type);
+
     match item.media_type {
         // A movie has no seasons, so a narrowed sweep of one is a
         // contradiction rather than an empty result — refuse it instead
         // of quietly searching the whole film.
         MediaType::Movie if scope.is_narrowed() => Ok(TargetPlan::default()),
-        MediaType::Movie => Ok(TargetPlan {
-            targets: movie_target(item).into_iter().collect(),
-            ..TargetPlan::default()
-        }),
-        MediaType::Tv => {
-            let Some(tvdb) = item.tvdb_id.and_then(|v| u32::try_from(v).ok()) else {
-                debug!(
-                    target: "brarr_orchestrator::scan",
-                    item = %item.title,
-                );
+        MediaType::Movie => {
+            let Some(target) = movie_target(item, &axis) else {
                 return Ok(TargetPlan {
                     no_search_axis: true,
+                    rejected,
                     ..TargetPlan::default()
                 });
             };
-            let Ok(tvdb) = TvdbId::new(tvdb) else {
+            Ok(TargetPlan {
+                targets: vec![target],
+                ..TargetPlan::default()
+            })
+        }
+        MediaType::Tv => {
+            // TVDB is the only per-episode axis any indexer speaks, so a
+            // series holding a TMDB id and nothing else is searchable as
+            // a title and not as an episode — which is why this asks
+            // `can_search_episodes` rather than `is_empty`.
+            let Some(tvdb) = axis.tvdb else {
+                debug!(
+                    target: "brarr_orchestrator::scan",
+                    item = %item.title,
+                    rejected = rejected.len(),
+                    "no per-episode search axis"
+                );
                 return Ok(TargetPlan {
                     no_search_axis: true,
+                    rejected,
                     ..TargetPlan::default()
                 });
             };
@@ -538,21 +573,17 @@ async fn build_targets(
 
 /// Search axis for a movie. `None` when the item carries no usable id,
 /// which cannot happen through the TMDB add path but can through a
-/// hand-edited row.
-fn movie_target(item: &LibraryItem) -> Option<Target> {
-    let tmdb = u32::try_from(item.tmdb_id)
-        .ok()
-        .and_then(|v| TmdbId::new(v).ok());
-    let imdb = item.imdb_id.as_deref().and_then(parse_imdb);
-    if tmdb.is_none() && imdb.is_none() {
+/// hand-edited row or an id from a source no indexer accepts.
+fn movie_target(item: &LibraryItem, axis: &axis::SearchAxis) -> Option<Target> {
+    if axis.tmdb.is_none() && axis.imdb.is_none() {
         return None;
     }
     Some(Target {
         label: item.title.clone(),
         episode: None,
         keys: SearchKeys {
-            tmdb,
-            imdb,
+            tmdb: axis.tmdb,
+            imdb: axis.imdb,
             ..SearchKeys::default()
         },
         episode_marker: None,
@@ -651,14 +682,9 @@ struct TargetPlan {
     skipped_unaired: usize,
     /// No usable search id on the item at all.
     no_search_axis: bool,
-}
-
-/// Parse the library's canonical `ttNNNNNNN` into the numeric id the
-/// search axis wants. The two conventions are reconciled in code — see
-/// the note on `library_items.imdb_id`.
-fn parse_imdb(raw: &str) -> Option<ImdbId> {
-    let digits = raw.trim().trim_start_matches("tt");
-    digits.parse::<u32>().ok().and_then(|v| ImdbId::new(v).ok())
+    /// Ids brarr holds and cannot search with, so the badge can name the
+    /// cause instead of blaming the trackers.
+    rejected: Vec<axis::AxisRejection>,
 }
 
 /// Releases worth grabbing for one target, best first.
@@ -842,6 +868,7 @@ fn digits(bytes: &[u8], from: usize, max_len: usize) -> Option<(u16, usize)> {
 )]
 mod tests {
     use super::*;
+    use brarr_core::{ImdbId, MetadataSource, TmdbId};
     use std::collections::HashMap;
     use uuid::Uuid;
 
@@ -920,8 +947,23 @@ mod tests {
         }
     }
 
+    /// The axis a film's identity resolves to, built the way
+    /// `build_targets` builds it.
+    fn stored(source: MetadataSource, value: &str) -> item_ids::StoredId {
+        item_ids::StoredId {
+            id: brarr_core::ExternalId::new(source, value).unwrap(),
+            verification: item_ids::Verification::Asserted,
+        }
+    }
+
     fn movie_target_for(item: &LibraryItem) -> Target {
-        movie_target(item).expect("the fixture carries both ids")
+        let ids = [
+            stored(MetadataSource::Tmdb, "603"),
+            stored(MetadataSource::Imdb, "tt0133093"),
+        ];
+        let (axis, rejected) = axis::resolve(&ids, MediaType::Movie);
+        assert!(rejected.is_empty(), "the fixture carries usable ids");
+        movie_target(item, &axis).expect("the fixture carries both ids")
     }
 
     #[test]
@@ -930,6 +972,23 @@ mod tests {
         assert_eq!(target.keys.tmdb.map(TmdbId::get), Some(603));
         assert_eq!(target.keys.imdb.map(ImdbId::get), Some(133_093));
         assert!(target.episode_marker.is_none());
+    }
+
+    /// **A film with no usable id leaves a counter behind.** It used to
+    /// leave nothing: `movie_target(item).into_iter().collect()` dropped
+    /// the `None`, so the title rendered "faltando" forever and the badge
+    /// blamed the trackers for a problem in the catalogue.
+    #[test]
+    fn a_film_with_no_usable_id_is_refused_and_the_reason_is_nameable() {
+        let (axis, rejected) = axis::resolve(&[], MediaType::Movie);
+        assert!(movie_target(&item(MediaType::Movie), &axis).is_none());
+        assert!(rejected.is_empty(), "nothing held is nothing to report");
+
+        // And one brarr *does* hold and cannot use says which.
+        let held = [stored(MetadataSource::Tvdb, "355567")];
+        let (axis, rejected) = axis::resolve(&held, MediaType::Tv);
+        assert!(axis.can_search_episodes(), "a series can use a TVDB id");
+        assert!(rejected.is_empty());
     }
 
     /// **The query, the marker and the identity are one coordinate.**
@@ -963,14 +1022,17 @@ mod tests {
         assert_eq!(held.episode_number, 23);
     }
 
+    /// The two IMDb conventions meet in `ExternalId`'s constructor now,
+    /// not in a helper each caller reimplemented. `library_items.imdb_id`
+    /// kept the `tt` and `searches.imdb_id` keeps the bare number.
     #[test]
     fn the_imdb_prefix_is_stripped_for_the_search_axis() {
-        // `library_items.imdb_id` keeps the `tt`; `searches.imdb_id`
-        // keeps the bare number. This is where the two meet.
-        assert_eq!(parse_imdb("tt0133093").map(ImdbId::get), Some(133_093));
-        assert_eq!(parse_imdb("133093").map(ImdbId::get), Some(133_093));
-        assert!(parse_imdb("").is_none());
-        assert!(parse_imdb("tt0").is_none(), "zero is not a valid id");
+        for written in ["tt0133093", "133093", "tt133093"] {
+            let (axis, rejected) =
+                axis::resolve(&[stored(MetadataSource::Imdb, written)], MediaType::Movie);
+            assert!(rejected.is_empty(), "{written}");
+            assert_eq!(axis.imdb.map(ImdbId::get), Some(133_093), "{written}");
+        }
     }
 
     #[test]

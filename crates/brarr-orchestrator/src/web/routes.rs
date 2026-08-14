@@ -2476,7 +2476,8 @@ async fn library_interactive(
     // numbered the way releases are. This screen used to be the one that
     // did *not* translate while the sweep did, so the magnifier asked for
     // `S01E47` while every release for it was named `S02E23`.
-    let keys = interactive_keys(&item, season, episode);
+    let stored_ids = item_ids::for_item(state.pool(), uuid).await?;
+    let keys = interactive_keys(&item, &stored_ids, season, episode);
     if !keys.has_any() {
         return html(&InteractiveResultsPartial {
             item_id: id,
@@ -2561,28 +2562,18 @@ async fn library_interactive(
 /// the movie axes the item carries.
 fn interactive_keys(
     item: &crate::db::library::LibraryItem,
+    ids: &[item_ids::StoredId],
     season: Option<u16>,
     episode: Option<u16>,
 ) -> crate::search::SearchKeys {
-    use brarr_core::{ImdbId, TmdbId, TvdbId};
-    let tvdb = item
-        .tvdb_id
-        .and_then(|v| u32::try_from(v).ok())
-        .and_then(|v| TvdbId::new(v).ok());
-    if let (Some(tvdb), Some(season)) = (tvdb, season) {
+    let (axis, _) = crate::metadata::axis::resolve(ids, item.media_type);
+    if let (Some(tvdb), Some(season)) = (axis.tvdb, season) {
         return crate::search::SearchKeys::from_tvdb(tvdb, Some(season), episode);
     }
     crate::search::SearchKeys {
-        tmdb: u32::try_from(item.tmdb_id)
-            .ok()
-            .and_then(|v| TmdbId::new(v).ok()),
-        imdb: item
-            .imdb_id
-            .as_deref()
-            .map(|raw| raw.trim().trim_start_matches("tt"))
-            .and_then(|d| d.parse::<u32>().ok())
-            .and_then(|v| ImdbId::new(v).ok()),
-        tvdb,
+        tmdb: axis.tmdb,
+        imdb: axis.imdb,
+        tvdb: axis.tvdb,
         ..crate::search::SearchKeys::default()
     }
 }
@@ -3321,9 +3312,17 @@ fn scan_badge(summary: &crate::scan::ScanSummary) -> PingBadge {
         PingBadge {
             ok: false,
             label: "sem id de busca".to_string(),
-            detail:
+            // Name the id when brarr holds one it cannot use. "Atualize
+            // os metadados" is the right advice for a title with nothing
+            // at all and useless for one whose id is simply in a
+            // namespace no indexer accepts — a distinction a third
+            // provider makes common rather than rare.
+            detail: if summary.axis_rejections.is_empty() {
                 "a série não tem id TVDB, que é o eixo da busca por episódio — atualize os metadados"
-                    .to_string(),
+                    .to_string()
+            } else {
+                summary.axis_rejections.join("; ")
+            },
         }
     } else if summary.targets == 0 && summary.skipped_unmonitored > 0 {
         // The two honest answers to "I clicked and nothing happened".
