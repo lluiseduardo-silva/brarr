@@ -1315,10 +1315,10 @@ async fn library_bulk(
     if !ids.is_empty() {
         match action.as_str() {
             "monitor" => {
-                library::set_monitored_many(state.pool(), &ids, true).await?;
+                library::set_monitored_cascading(state.pool(), &ids, true).await?;
             }
             "unmonitor" => {
-                library::set_monitored_many(state.pool(), &ids, false).await?;
+                library::set_monitored_cascading(state.pool(), &ids, false).await?;
             }
             "profile" => {
                 let raw = value("profile_id").unwrap_or_default();
@@ -1764,7 +1764,10 @@ async fn library_toggle_monitor(
     let uuid = Uuid::parse_str(&id)
         .map_err(|e| AppError::InvalidInput(format!("invalid library id: {e}")))?;
     let item = library::get_by_id(state.pool(), uuid).await?;
-    library::set_monitored(state.pool(), uuid, !item.monitored).await?;
+    // Cascading, like the bulk action: the item flag alone leaves the
+    // sweep with no targets, so the bookmark would go green and nothing
+    // would be chased.
+    library::set_monitored_cascading(state.pool(), &[uuid], !item.monitored).await?;
     Ok(hx_refresh())
 }
 

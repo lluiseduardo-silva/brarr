@@ -815,24 +815,32 @@ pub async fn set_monitored(pool: &Pool, id: Uuid, monitored: bool) -> Result<(),
     Ok(())
 }
 
-/// Flip the monitoring flag on many titles at once.
+/// Chase these titles, or stop chasing them — all the way down.
 ///
-/// One transaction rather than one statement with a built `IN (…)`
-/// list: the id count is operator-chosen and unbounded, SQLite caps how
-/// many parameters a statement may bind, and string-building the list
-/// is the shape that invites an injection the day someone passes
-/// something other than a `Uuid`. A few hundred updates inside one
-/// transaction is a single fsync and a few milliseconds.
+/// **The item flag on its own does nothing.** `scan::episode_targets`
+/// filters on `library_episodes.monitored`, so a title marked monitored
+/// whose episodes are not leaves the sweep with zero targets: measured
+/// in production, 41 monitored titles had 19 monitored seasons between
+/// them, every card read green and the scanner chased nothing. That is
+/// the worst kind of broken — the screen says the operator got what they
+/// asked for.
 ///
-/// Returns how many rows actually changed. An id that no longer exists
-/// is **not** an error here — a bulk action on a stale page should do
-/// what it can and report the number, not fail whole because one title
-/// was deleted in another tab.
+/// **Specials stay out on the way on and go out on the way off.**
+/// "Chase this series" does not mean the behind-the-scenes bucket, which
+/// is 1780 of this catalogue's 9043 episodes and is the rule everywhere
+/// else here: specials arrive unmonitored and stay so unless somebody
+/// says otherwise. "Stop chasing it" has no such nuance and is literal.
+///
+/// Deliberately **not** [`set_monitored`], which stays flat because
+/// `arr_import::mirror_monitoring` writes the item flag and then copies
+/// the \*arr's own per-season and per-episode flags on top — a cascade
+/// underneath it would be overwritten work, and worse, would read as
+/// this function's intent when it is the opposite.
 ///
 /// # Errors
 ///
 /// Returns [`AppError::Database`] on SQL failure.
-pub async fn set_monitored_many(
+pub async fn set_monitored_cascading(
     pool: &Pool,
     ids: &[Uuid],
     monitored: bool,
@@ -840,23 +848,42 @@ pub async fn set_monitored_many(
     if ids.is_empty() {
         return Ok(0);
     }
+    let flag = i64::from(monitored);
+    // Season 0 is only spared when turning *on*.
+    let floor = if monitored { 0 } else { -1 };
+
     let mut tx = pool.begin().await?;
     let mut changed = 0;
     for id in ids {
         changed += sqlx::query("UPDATE library_items SET monitored = ? WHERE id = ?")
-            .bind(i64::from(monitored))
+            .bind(flag)
             .bind(id.to_string())
             .execute(&mut *tx)
             .await?
             .rows_affected();
+        sqlx::query(
+            "UPDATE library_seasons SET monitored = ? WHERE item_id = ? AND season_number > ?",
+        )
+        .bind(flag)
+        .bind(id.to_string())
+        .bind(floor)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "UPDATE library_episodes SET monitored = ? WHERE item_id = ? AND season_number > ?",
+        )
+        .bind(flag)
+        .bind(id.to_string())
+        .bind(floor)
+        .execute(&mut *tx)
+        .await?;
     }
     tx.commit().await?;
     Ok(changed)
 }
 
-/// Attach a quality profile to many titles at once. `None` detaches.
-///
-/// Same transaction-and-count contract as [`set_monitored_many`].
+/// Same transaction-and-count contract as
+/// [`set_monitored_cascading`].
 ///
 /// # Errors
 ///
@@ -2101,6 +2128,71 @@ mod tests {
                 series: 1,
                 unmonitored: 1
             }
+        );
+    }
+
+    /// **Monitoring a title has to reach the tree, or it does nothing.**
+    ///
+    /// `scan::episode_targets` filters on `library_episodes.monitored`,
+    /// so an item flag on its own leaves the sweep with no targets —
+    /// measured in production, where 41 monitored titles had 19
+    /// monitored seasons between them and the scanner chased nothing
+    /// while every card read green.
+    ///
+    /// Specials stay out on the way **on** and go out on the way
+    /// **off**: "chase this series" does not mean the behind-the-scenes
+    /// bucket, and "stop chasing it" is literal.
+    #[tokio::test]
+    async fn monitoring_a_title_reaches_its_seasons_and_episodes() {
+        let pool = open_memory().await.unwrap();
+        let item = upsert(&pool, &Seed::series(76_479, "The Boys").build())
+            .await
+            .unwrap();
+        sync_seasons(&pool, item.id, &[season(0, 2), season(1, 3), season(2, 2)])
+            .await
+            .unwrap();
+        // Start from the shape the passive sweep leaves behind.
+        set_monitored_cascading(&pool, &[item.id], false)
+            .await
+            .unwrap();
+
+        set_monitored_cascading(&pool, &[item.id], true)
+            .await
+            .unwrap();
+
+        assert!(get_by_id(&pool, item.id).await.unwrap().monitored);
+        for s in seasons(&pool, item.id).await.unwrap() {
+            assert_eq!(
+                s.monitored,
+                s.season_number > 0,
+                "season {} monitored={}",
+                s.season_number,
+                s.monitored
+            );
+        }
+        for e in episodes(&pool, item.id).await.unwrap() {
+            assert_eq!(
+                e.monitored,
+                e.season_number > 0,
+                "S{}E{} monitored={}",
+                e.season_number,
+                e.episode_number,
+                e.monitored
+            );
+        }
+
+        // Off is literal: the specials go too.
+        set_monitored_cascading(&pool, &[item.id], false)
+            .await
+            .unwrap();
+        assert!(!get_by_id(&pool, item.id).await.unwrap().monitored);
+        assert!(
+            episodes(&pool, item.id)
+                .await
+                .unwrap()
+                .iter()
+                .all(|e| !e.monitored),
+            "nothing is chased after turning it off"
         );
     }
 
