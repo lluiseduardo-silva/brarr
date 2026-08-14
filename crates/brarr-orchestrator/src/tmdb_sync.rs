@@ -16,8 +16,6 @@ use brarr_tmdb::{MovieDetails, SeasonDetails, TmdbClient, TmdbError, TvDetails};
 use time::{Date, OffsetDateTime, Time};
 use uuid::Uuid;
 
-use brarr_core::{ExternalId, MetadataProvider, MetadataSource, Ordering, SeriesTree};
-
 use crate::{
     AppError,
     db::{
@@ -227,43 +225,28 @@ pub async fn add_movie(
 }
 
 /// Add a series to the library, or refresh it if already present, then
-/// rebuild its season tree.
+/// build its season tree from whoever owns its shape.
 ///
-/// One request per season on top of the details call. TMDB's rate limit
-/// is generous enough that a sequential walk is fine and keeps the
-/// ordering deterministic.
+/// **The description and the shape have different owners**, and this is
+/// where that starts. Title, synopsis and artwork come from TMDB and
+/// stay TMDB's; the tree comes from [`crate::metadata::owned::tree`],
+/// which for a series nobody has claimed yet decides — and decides
+/// TheTVDB when it can, because that is the numbering releases use.
 ///
 /// # Errors
 ///
-/// Propagates TMDB and database failures.
+/// Propagates TMDB, provider and database failures.
 pub async fn add_series(
     pool: &Pool,
     tmdb: &TmdbClient,
+    registry: &crate::metadata::registry::Registry,
     tmdb_id: i64,
 ) -> Result<LibraryItem, AppError> {
     let details = tmdb.tv(tmdb_id).await?;
     let item = library::upsert(pool, &tv_to_item(&details)).await?;
-    let tree = canonical_tree(tmdb, tmdb_id).await?;
+    let tree = crate::metadata::owned::tree(pool, registry, item.id).await?;
     structure::apply(pool, item.id, &tree).await?;
     Ok(item)
-}
-
-/// The TMDB tree under its own default ordering.
-///
-/// Goes through [`MetadataProvider::tree`] rather than walking the
-/// seasons here: that implementation already does the `/tv/{id}` call
-/// plus one per season, already refuses an answer carrying no episodes
-/// as [`brarr_core::MetadataError::Empty`] instead of as an empty
-/// success, and is the same code path a TheTVDB-owned tree will take.
-/// Three copies of the walk was how `arr_import::sync_tree` came to fetch
-/// `/tv/{id}` twice per series per sweep.
-pub(crate) async fn canonical_tree(
-    tmdb: &TmdbClient,
-    tmdb_id: i64,
-) -> Result<SeriesTree, AppError> {
-    let id = ExternalId::new(MetadataSource::Tmdb, &tmdb_id.to_string())
-        .map_err(brarr_core::MetadataError::BadId)?;
-    Ok(tmdb.tree(&id, &Ordering::Default).await?)
 }
 
 /// What the operator chose in the add dialog.
@@ -302,6 +285,7 @@ pub struct AddOptions {
 pub async fn add_with_options(
     pool: &Pool,
     tmdb: &TmdbClient,
+    registry: &crate::metadata::registry::Registry,
     media_type: MediaType,
     tmdb_id: i64,
     options: &AddOptions,
@@ -325,7 +309,7 @@ pub async fn add_with_options(
     }
 
     if media_type == MediaType::Tv {
-        let tree = canonical_tree(tmdb, tmdb_id).await?;
+        let tree = crate::metadata::owned::tree(pool, registry, item.id).await?;
         structure::apply(pool, item.id, &tree).await?;
     }
 
@@ -607,7 +591,13 @@ mod tests {
         assert_eq!(matrix.imdb_id.as_deref(), Some("tt0133093"));
         assert!(!matrix.title.is_empty());
 
-        let boys = add_series(&pool, &tmdb, 76_479).await.unwrap();
+        // No TheTVDB credential in this test, so the registry offers
+        // only TMDB and the series is born under it — which is exactly
+        // what a deployment with one credential should do.
+        let registry = crate::metadata::registry::Registry::build(&pool)
+            .await
+            .unwrap();
+        let boys = add_series(&pool, &tmdb, &registry, 76_479).await.unwrap();
         assert_eq!(boys.tvdb_id, Some(355_567));
         let seasons = library::seasons(&pool, boys.id).await.unwrap();
         let episodes = library::episodes(&pool, boys.id).await.unwrap();

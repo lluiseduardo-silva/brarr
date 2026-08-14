@@ -1686,9 +1686,11 @@ async fn library_add_submit(
     };
 
     let tmdb = crate::tmdb_sync::client(state.pool()).await?;
+    let registry = Registry::build(state.pool()).await?;
     let item = crate::tmdb_sync::add_with_options(
         state.pool(),
         &tmdb,
+        &registry,
         media_type,
         form.tmdb_id,
         &crate::tmdb_sync::AddOptions {

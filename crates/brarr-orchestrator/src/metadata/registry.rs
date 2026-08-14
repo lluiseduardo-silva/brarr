@@ -76,7 +76,7 @@ impl Registry {
 
         let mut built: Vec<Arc<dyn MetadataProvider>> = Vec::new();
 
-        if let Some(token) = value(settings::KEY_TMDB_TOKEN) {
+        if let Some(token) = tmdb_token(value(settings::KEY_TMDB_TOKEN), env_tmdb_token()) {
             match TmdbClient::new(&token) {
                 Ok(client) => {
                     let client = match value(settings::KEY_TMDB_LANGUAGE) {
@@ -107,6 +107,18 @@ impl Registry {
         }
 
         Ok(Self { built })
+    }
+
+    /// Build from an explicit list.
+    ///
+    /// [`Self::build`] is the only production door, because a registry is
+    /// what the stored credentials say it is. But the decisions this type
+    /// drives — who is asked for a new series' shape, in what order, and
+    /// what a refusal means — are worth exercising against providers that
+    /// answer on command rather than against somebody else's live API.
+    #[cfg(test)]
+    pub(crate) fn from_providers(built: Vec<Arc<dyn MetadataProvider>>) -> Self {
+        Self { built }
     }
 
     /// The provider for one source, when it is configured.
@@ -202,6 +214,37 @@ fn credentials_of(source: MetadataSource) -> &'static [CredentialField] {
     }
 }
 
+/// Which TMDB credential wins.
+///
+/// `settings` replaced `BRARR_TMDB_TOKEN`, but it did not retire it —
+/// `tmdb_sync::load_config` still falls back to it and `CLAUDE.md` still
+/// documents it, so a deployment that sets the variable and never opens
+/// `/settings` is a supported one. Reading it in only one of the two
+/// places is worse than reading it in neither: the client would build and
+/// the registry would be empty, so `/library/add` would work and every
+/// tree fetch would fail naming a credential the operator can see is set.
+///
+/// Stored first, for the same reason every other hot-reloadable value in
+/// brarr is: the screen is what the operator just used, and a variable
+/// baked into a container at deploy time must not silently outrank it.
+fn tmdb_token(stored: Option<String>, environment: Option<String>) -> Option<String> {
+    stored.or(environment)
+}
+
+/// The legacy environment token, normalised the way a stored one is.
+fn env_tmdb_token() -> Option<String> {
+    std::env::var("BRARR_TMDB_TOKEN")
+        .ok()
+        .as_deref()
+        .and_then(non_blank)
+}
+
+/// A value that is only whitespace is unset, not empty.
+fn non_blank(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_owned())
+}
+
 /// What [`Registry::build`] does with a client it cannot construct.
 fn warn_unbuildable(source: MetadataSource, detail: &str) {
     tracing::warn!(
@@ -248,6 +291,11 @@ mod tests {
     #[tokio::test]
     async fn an_unconfigured_deployment_has_an_empty_registry() {
         let pool = open_memory().await.unwrap();
+        // Guard against a token leaking in from the developer's own env,
+        // the same way `client_refuses_to_build_without_a_token` does.
+        if env_tmdb_token().is_some() {
+            return;
+        }
         let registry = Registry::build(&pool).await.unwrap();
         assert_eq!(registry.configured().count(), 0);
         assert!(registry.get(MetadataSource::Tmdb).is_none());
@@ -264,6 +312,9 @@ mod tests {
     #[tokio::test]
     async fn a_stored_credential_builds_its_provider() {
         let pool = open_memory().await.unwrap();
+        if env_tmdb_token().is_some() {
+            return;
+        }
         settings::set(&pool, settings::KEY_TVDB_API_KEY, "a-key")
             .await
             .unwrap();
@@ -283,11 +334,41 @@ mod tests {
     #[tokio::test]
     async fn a_blank_credential_configures_nothing() {
         let pool = open_memory().await.unwrap();
+        if env_tmdb_token().is_some() {
+            return;
+        }
         settings::set(&pool, settings::KEY_TMDB_TOKEN, "   ")
             .await
             .unwrap();
         let registry = Registry::build(&pool).await.unwrap();
         assert_eq!(registry.configured().count(), 0);
+    }
+
+    /// **The two doors read the same credential.** `settings` replaced
+    /// `BRARR_TMDB_TOKEN` without retiring it, and honouring it in the
+    /// client but not in the registry is the worst of the three states:
+    /// adding a title works and building its tree fails, naming a
+    /// credential the operator can see is set.
+    ///
+    /// Asserted on the resolution rather than by setting the variable:
+    /// the crate is `#![forbid(unsafe_code)]` and `std::env::set_var` is
+    /// unsafe as of the 2024 edition, so a test that wrote the
+    /// environment could not compile here.
+    #[test]
+    fn the_environment_token_is_a_fallback_and_the_stored_one_wins() {
+        assert_eq!(
+            tmdb_token(None, Some("from-env".to_owned())).as_deref(),
+            Some("from-env")
+        );
+        assert_eq!(
+            tmdb_token(Some("stored".to_owned()), Some("from-env".to_owned())).as_deref(),
+            Some("stored"),
+            "a variable baked in at deploy time must not outrank the screen"
+        );
+        assert_eq!(tmdb_token(None, None), None);
+        // And whitespace is unset, the contract every other value has.
+        assert_eq!(non_blank("   "), None);
+        assert_eq!(non_blank(" k ").as_deref(), Some("k"));
     }
 
     /// **The filter that keeps `Unsupported` a bug report.** A film has

@@ -250,6 +250,33 @@ impl MetadataError {
     pub const fn is_transient(&self) -> bool {
         matches!(self, Self::Unavailable { .. } | Self::Malformed { .. })
     }
+
+    /// Whether the provider answered and simply does not cover this
+    /// title.
+    ///
+    /// The split a **fallback** needs, and it is deliberately not the
+    /// complement of [`Self::is_transient`]. Falling through to the next
+    /// candidate is only sound when the current one *said no*: it did
+    /// look, and it has nothing. A refused credential and a timeout mean
+    /// nobody looked, and treating those as absence would let a key
+    /// somebody forgot to paste decide who owns a series' shape — a
+    /// decision recorded at birth and only the operator undoes it.
+    ///
+    /// Written as an exhaustive `match` rather than a `matches!`, so a
+    /// new failure mode has to be classified by whoever adds it instead
+    /// of inheriting "keep looking" from a wildcard.
+    #[must_use]
+    pub const fn is_absence(&self) -> bool {
+        match self {
+            Self::NotFound { .. } | Self::Empty { .. } => true,
+            Self::Unauthorized { .. }
+            | Self::UnknownOrdering { .. }
+            | Self::Unavailable { .. }
+            | Self::Malformed { .. }
+            | Self::BadId(_)
+            | Self::Unsupported { .. } => false,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -296,6 +323,51 @@ mod tests {
             },
         ] {
             assert!(!permanent.is_transient(), "{permanent}");
+        }
+    }
+
+    /// **Only a "no" is an absence.** A fallback walks to the next
+    /// source on this predicate, and the owner it lands on is written
+    /// down, so a credential nobody pasted must not be able to answer
+    /// the question "who owns this series' shape?".
+    #[test]
+    fn only_an_answered_no_counts_as_absence() {
+        for absent in [
+            MetadataError::NotFound {
+                origin: MetadataSource::Tvdb,
+                media: MediaType::Tv,
+                id: "295068".to_owned(),
+            },
+            MetadataError::Empty {
+                origin: MetadataSource::Tvdb,
+                id: "295068".to_owned(),
+            },
+        ] {
+            assert!(absent.is_absence(), "{absent}");
+        }
+
+        for asked_nothing in [
+            MetadataError::Unauthorized {
+                origin: MetadataSource::Tvdb,
+            },
+            MetadataError::Unavailable {
+                origin: MetadataSource::Tvdb,
+                detail: "timeout".to_owned(),
+            },
+            MetadataError::Malformed {
+                origin: MetadataSource::Tvdb,
+                detail: "bad json".to_owned(),
+            },
+            MetadataError::Unsupported {
+                origin: MetadataSource::Tvdb,
+                capability: "tree",
+                media: MediaType::Movie,
+            },
+            MetadataError::BadId(ExternalIdError::Empty {
+                origin: MetadataSource::Tvdb,
+            }),
+        ] {
+            assert!(!asked_nothing.is_absence(), "{asked_nothing}");
         }
     }
 
