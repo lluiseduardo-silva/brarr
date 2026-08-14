@@ -1,6 +1,7 @@
 //! The HTTP client.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use reqwest::StatusCode;
 use tokio::sync::Mutex;
@@ -10,9 +11,19 @@ use url::Url;
 use crate::dto;
 use crate::error::TvdbError;
 use crate::model::{Episode, SeasonType, SeriesEpisodes};
+use crate::retry::{RetryConfig, run_with_retry};
 
 /// Default API root.
 pub const DEFAULT_BASE_URL: &str = "https://api4.thetvdb.com/v4/";
+
+/// Ceiling on one request, matching `brarr-tmdb`.
+///
+/// The builder used to configure nothing but a `user_agent`, so a socket
+/// that accepted and never answered held the call for as long as the
+/// process lived. Survivable while this crate was a background sweep on
+/// a 12-hour cadence; not once it owns the episode tree and sits in the
+/// path of `/library/add`, where the wait is a person.
+pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Ceiling on pages walked in one call.
 ///
@@ -20,6 +31,16 @@ pub const DEFAULT_BASE_URL: &str = "https://api4.thetvdb.com/v4/";
 /// against someone else's API. 200 pages at the documented page size is
 /// far past any real series — Yu-Gi-Oh! is 224 episodes, one page.
 const MAX_PAGES: usize = 200;
+
+/// The shared HTTP client shape, so the constructor and
+/// [`TvdbClient::with_timeout`] cannot drift apart.
+fn build_http(timeout: Duration) -> Result<reqwest::Client, TvdbError> {
+    reqwest::Client::builder()
+        .user_agent(concat!("brarr/", env!("CARGO_PKG_VERSION")))
+        .timeout(timeout)
+        .build()
+        .map_err(TvdbError::ClientBuild)
+}
 
 /// Credentials for one project key.
 #[derive(Debug, Clone)]
@@ -49,6 +70,7 @@ pub struct TvdbClient {
     base: Url,
     auth: TvdbAuth,
     token: Arc<Mutex<Option<String>>>,
+    retry: RetryConfig,
 }
 
 impl TvdbClient {
@@ -75,16 +97,36 @@ impl TvdbClient {
         } else {
             format!("{base}/")
         };
-        let http = reqwest::Client::builder()
-            .user_agent(concat!("brarr/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .map_err(TvdbError::ClientBuild)?;
         Ok(Self {
-            http,
+            http: build_http(DEFAULT_TIMEOUT)?,
             base: Url::parse(&normalised)?,
             auth,
             token: Arc::new(Mutex::new(None)),
+            retry: RetryConfig::default(),
         })
+    }
+
+    /// Replace the retry policy.
+    #[must_use]
+    pub const fn with_retry(mut self, retry: RetryConfig) -> Self {
+        self.retry = retry;
+        self
+    }
+
+    /// Replace the per-request timeout.
+    #[must_use]
+    pub fn with_timeout(self, timeout: Duration) -> Self {
+        // A failed rebuild keeps the client it already has rather than
+        // returning `Result` from a builder method: the caller asked for
+        // a shorter ceiling, and refusing the whole client over it would
+        // trade a working default for nothing.
+        match build_http(timeout) {
+            Ok(http) => Self { http, ..self },
+            Err(e) => {
+                debug!(target: "brarr_tvdb", error = %e, "keeping the default timeout");
+                self
+            }
+        }
     }
 
     /// Prove the credentials work, returning nothing useful on success.
@@ -97,7 +139,9 @@ impl TvdbClient {
     /// [`TvdbError::Unauthorized`] when the key (or the missing PIN) is
     /// refused; transport errors otherwise.
     pub async fn verify(&self) -> Result<(), TvdbError> {
-        self.login().await.map(|_| ())
+        run_with_retry(self.retry, "verify", || self.login())
+            .await
+            .map(|_| ())
     }
 
     /// A series' episodes under one season type.
@@ -193,7 +237,18 @@ impl TvdbClient {
     /// A month-long token outlives most processes but not all of them,
     /// and a key revoked upstream looks the same. One retry distinguishes
     /// "the token aged out" from "the key is gone" without a loop.
+    /// Retried **per page**, not per walk: a failure on page three of a
+    /// 224-episode series must not restart the walk, which would both
+    /// re-fetch what already succeeded and re-enter the dedup set.
     async fn get<T: serde::de::DeserializeOwned>(
+        &self,
+        url: Url,
+        what: &str,
+    ) -> Result<T, TvdbError> {
+        run_with_retry(self.retry, "get", || self.get_once(url.clone(), what)).await
+    }
+
+    async fn get_once<T: serde::de::DeserializeOwned>(
         &self,
         url: Url,
         what: &str,

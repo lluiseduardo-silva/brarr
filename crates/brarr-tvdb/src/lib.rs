@@ -48,10 +48,12 @@ mod client;
 mod dto;
 mod error;
 mod model;
+mod retry;
 
-pub use client::{DEFAULT_BASE_URL, TvdbAuth, TvdbClient};
+pub use client::{DEFAULT_BASE_URL, DEFAULT_TIMEOUT, TvdbAuth, TvdbClient};
 pub use error::TvdbError;
 pub use model::{Episode, SeasonType, SeriesEpisodes};
+pub use retry::{RetryConfig, is_transient};
 
 /// What `TheTVDB`'s free tier requires be shown, verbatim.
 ///

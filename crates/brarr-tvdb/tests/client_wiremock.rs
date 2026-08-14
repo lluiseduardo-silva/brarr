@@ -1,10 +1,18 @@
 //! HTTP-level tests for [`TvdbClient`] against a mock `TheTVDB`.
 //!
-//! Fixtures are derived from the documented v4 schema rather than
-//! captured live — see `tests/fixtures/README.md`. The shapes that
-//! matter are pinned here: the `camelCase`/`snake_case` split between
-//! records and `links`, the season-type path segment, and the
-//! pagination cursor.
+//! Two kinds of payload, deliberately:
+//!
+//! - **Hand-built JSON**, for the shapes: the `camelCase`/`snake_case`
+//!   split between records and `links`, the season-type path segment,
+//!   the pagination cursor, the re-login, the retry policy. Pagination in
+//!   particular can only be built by hand — `page_size` is 500 upstream,
+//!   so no series brarr cares about is more than one real page.
+//! - **Responses captured from the live v4 API**, for the *numbers* —
+//!   see `tests/fixtures/README.md`. Those numbers are the reason this
+//!   crate exists, and until now they were asserted only by
+//!   `tests/live_api.rs`, which is `#[ignore]`d behind a key and a
+//!   network. A claim only a skipped test defends is a claim nobody
+//!   checks.
 
 #![allow(
     clippy::unwrap_used,
@@ -13,7 +21,9 @@
     reason = "tests assert on happy paths"
 )]
 
-use brarr_tvdb::{SeasonType, TvdbAuth, TvdbClient, TvdbError};
+use std::time::Duration;
+
+use brarr_tvdb::{RetryConfig, SeasonType, TvdbAuth, TvdbClient, TvdbError};
 use serde_json::json;
 use wiremock::matchers::{body_string_contains, header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -25,8 +35,13 @@ fn auth() -> TvdbAuth {
     }
 }
 
+/// Retry off by default, so a test that asserts on a failure does not
+/// sleep through the backoff — the same contract `brarr-tmdb`'s wiremock
+/// tests use. The three tests about the policy itself opt back in.
 fn client(server: &MockServer) -> TvdbClient {
-    TvdbClient::with_base_url(auth(), &format!("{}/v4", server.uri())).unwrap()
+    TvdbClient::with_base_url(auth(), &format!("{}/v4", server.uri()))
+        .unwrap()
+        .with_retry(RetryConfig::disabled())
 }
 
 async fn mock_login(server: &MockServer) {
@@ -362,5 +377,209 @@ async fn a_remote_id_resolves_to_a_series() {
             .await
             .unwrap(),
         Some(295_068)
+    );
+}
+
+/// **A hung connection has to end.**
+///
+/// The builder configured only a `user_agent`, so a socket that accepts
+/// and never answers held the call forever. Tolerable while this crate
+/// was a 12-hour best-effort sweep; not once it is the source of the
+/// episode tree and sits in the path of `/library/add`, where the wait
+/// is an operator staring at a request that never returns.
+#[tokio::test]
+async fn a_hung_connection_times_out() {
+    let server = MockServer::start().await;
+    mock_login(&server).await;
+    Mock::given(method("GET"))
+        .and(path("/v4/series/1/episodes/official"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(Duration::from_secs(30))
+                .set_body_json(json!({ "data": { "episodes": [] } })),
+        )
+        .mount(&server)
+        .await;
+
+    let client = TvdbClient::with_base_url(auth(), &format!("{}/v4", server.uri()))
+        .unwrap()
+        .with_retry(RetryConfig::disabled())
+        .with_timeout(Duration::from_millis(300));
+
+    let started = std::time::Instant::now();
+    let failed = client.series_episodes(1, SeasonType::Official, None).await;
+
+    match failed {
+        Err(TvdbError::Http(e)) => assert!(e.is_timeout(), "wrong failure: {e}"),
+        other => panic!("a hung connection must time out, got {other:?}"),
+    }
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "the timeout did not fire"
+    );
+}
+
+/// A 5xx is the failure worth another attempt: it heals on its own,
+/// which is the entire difference from a refused key.
+#[tokio::test]
+async fn a_transient_5xx_is_retried_then_succeeds() {
+    let server = MockServer::start().await;
+    mock_login(&server).await;
+    // wiremock serves mounts in order and honours `up_to_n_times`, so the
+    // first attempt gets the 502 and the second the real page.
+    Mock::given(method("GET"))
+        .and(path("/v4/series/1/episodes/official"))
+        .respond_with(ResponseTemplate::new(502))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v4/series/1/episodes/official"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": { "series": { "id": 1, "name": "S" }, "episodes": [episode(9, 1, 1, Some(1))] }
+        })))
+        .mount(&server)
+        .await;
+
+    let client = TvdbClient::with_base_url(auth(), &format!("{}/v4", server.uri()))
+        .unwrap()
+        .with_retry(RetryConfig {
+            max_attempts: 3,
+            base_delay: Duration::from_millis(0),
+        });
+
+    let found = client
+        .series_episodes(1, SeasonType::Official, None)
+        .await
+        .unwrap();
+    assert_eq!(found.episodes.len(), 1);
+}
+
+/// **A refused key must not be multiplied.** It will not heal, and
+/// hammering someone else's free tier three times per title over 180
+/// titles is how a polite client stops being one.
+#[tokio::test]
+async fn a_refused_key_is_not_retried() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v4/login"))
+        .respond_with(ResponseTemplate::new(401))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = TvdbClient::with_base_url(auth(), &format!("{}/v4", server.uri()))
+        .unwrap()
+        .with_retry(RetryConfig {
+            max_attempts: 5,
+            base_delay: Duration::from_millis(0),
+        });
+
+    assert!(matches!(
+        client.verify().await,
+        Err(TvdbError::Unauthorized)
+    ));
+    // `expect(1)` above is asserted when the server drops.
+}
+
+// ---------------------------------------------------------------------
+// Against responses captured from the live API. See fixtures/README.md.
+// ---------------------------------------------------------------------
+
+/// Serve one captured page and walk it through the real client.
+async fn from_fixture(
+    name: &str,
+    series: i64,
+    season_type: SeasonType,
+) -> Vec<brarr_tvdb::Episode> {
+    let body = std::fs::read_to_string(format!(
+        "{}/tests/fixtures/{name}",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap_or_else(|e| panic!("fixture {name}: {e}"));
+
+    let server = MockServer::start().await;
+    mock_login(&server).await;
+    Mock::given(method("GET"))
+        .and(path(format!(
+            "/v4/series/{series}/episodes/{}",
+            season_type.as_str()
+        )))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_raw(body, "application/json")
+                .append_header("content-type", "application/json"),
+        )
+        .mount(&server)
+        .await;
+
+    client(&server)
+        .series_episodes(series, season_type, None)
+        .await
+        .unwrap()
+        .episodes
+}
+
+/// Episodes per season, specials excluded, in season order.
+fn shape(episodes: &[brarr_tvdb::Episode]) -> Vec<usize> {
+    let mut by_season: std::collections::BTreeMap<i32, usize> = std::collections::BTreeMap::new();
+    for e in episodes.iter().filter(|e| e.season_number > 0) {
+        *by_season.entry(e.season_number).or_default() += 1;
+    }
+    by_season.into_values().collect()
+}
+
+/// **The number this crate exists for, in the default suite.**
+///
+/// TMDB models Dragon Ball Super as one season of 131. The disk, Sonarr
+/// and every release call it five seasons of 14/13/19/30/55 — and so does
+/// `TheTVDB`'s `official` season type.
+///
+/// The capture also carries two specials in season 0, so the exclusion is
+/// exercised on real data rather than assumed: 133 records in, 131
+/// counted.
+#[tokio::test]
+async fn dragon_ball_super_official_is_14_13_19_30_55() {
+    let episodes = from_fixture("dbs_official_page0.json", 295_068, SeasonType::Official).await;
+
+    assert_eq!(episodes.len(), 133, "specials are parsed, not dropped");
+    assert_eq!(shape(&episodes), vec![14, 13, 19, 30, 55]);
+
+    // The absolute number is what joins this back to TMDB's flat season:
+    // arc 2 episode 1 is the fifteenth of the series. **Advisory, never a
+    // join key** — a special sitting on the absolute axis is exactly how
+    // Kaiju No. 8 shifted a whole season by one.
+    let arc2e1 = episodes
+        .iter()
+        .find(|e| e.season_number == 2 && e.number == 1)
+        .expect("S02E01 exists");
+    assert_eq!(arc2e1.absolute_number, Some(15));
+    assert!(arc2e1.aired.is_some(), "the air date is what arbitrates");
+}
+
+/// One season of 25 on TMDB, two of 12 and 13 here, and every release
+/// follows this one. TMDB is not wrong — whoever publishes cuts
+/// somewhere else.
+#[tokio::test]
+async fn solo_leveling_official_is_12_13() {
+    let episodes = from_fixture(
+        "solo_leveling_official_page0.json",
+        389_597,
+        SeasonType::Official,
+    )
+    .await;
+    assert_eq!(shape(&episodes), vec![12, 13]);
+}
+
+/// The absolute axis is one run of numbers straight through — the same
+/// 131 episodes, no season 0 at all, which is why a special can shift the
+/// official axis without appearing on this one.
+#[tokio::test]
+async fn the_absolute_axis_is_one_run_of_131() {
+    let episodes = from_fixture("dbs_absolute_page0.json", 295_068, SeasonType::Absolute).await;
+    assert_eq!(shape(&episodes), vec![131]);
+    assert!(
+        episodes.iter().all(|e| e.season_number > 0),
+        "the absolute axis carries no specials"
     );
 }
