@@ -1,33 +1,34 @@
-//! Async client for `TheTVDB` v4 API — **a numbering source, not a
+//! Async client for `TheTVDB` v4 API — **the shape of a series, not the
 //! catalogue**.
 //!
-//! brarr's catalogue is TMDB's and stays that way. `library_items` is
-//! keyed on the TMDB id, `library_episodes` holds TMDB's numbering, and
-//! those two columns are simultaneously the row's identity, the file
-//! name on disk and the pairing key with Sonarr — the reasoning
-//! `migrations/20260808130000_episode_numbering.sql` sets out at length.
-//! Making `TheTVDB` the source of truth for series would renumber all of
-//! that, which is the exact damage the v0.14.0 release repaired.
+//! brarr's catalogue is TMDB's: title, synopsis, artwork and the ids the
+//! library is indexed by all come from there. What `TheTVDB` supplies is
+//! the one thing TMDB genuinely does not have — **the split the scene
+//! actually uses**. Dragon Ball Super is one season of 131 on TMDB and
+//! five of 14/13/19/30/55 here; Solo Leveling is one of 25 there and two
+//! of 12 and 13 here. Every release names the second.
 //!
-//! What `TheTVDB` is for is the one thing TMDB genuinely does not have:
-//! **the split the scene actually uses**. Dragon Ball Super is one
-//! season of 131 on TMDB and five of 14/13/19/30/55 here; Solo Leveling
-//! is one of 25 there and two of 12 and 13 here. Releases follow this
-//! one. So the data lands in `library_episode_numbering` — the same
-//! translation table an operator-picked TMDB episode group writes to —
-//! and nothing else moves.
+//! That difference used to be recorded beside a TMDB-built tree, in a
+//! translation table read at eight points in two opposite directions.
+//! It is not any more: a series is **born** with the tree its declared
+//! structure owner builds, so the coordinate brarr stores is at once the
+//! row identity, the query an indexer is sent, the marker matched in a
+//! release name and the name written to disk. One value instead of two,
+//! and nothing to keep in step.
 //!
-//! It also removes a circular dependency. brarr derives that numbering
-//! from Sonarr today, which works only for as long as the \*arr brarr
-//! means to replace is still installed to be read.
+//! It also removes a circular dependency. brarr used to derive that
+//! numbering from Sonarr, which works only for as long as the \*arr
+//! brarr means to replace is still installed to be read.
 //!
 //! # Season types
 //!
 //! [`SeasonType`] is the whole point: the same episodes come back under
-//! different coordinates. `Official` is the broadcast split, `Absolute`
-//! is one run of numbers straight through, and each episode carries its
-//! own stable [`Episode::id`] — so two calls join into a translation
-//! table rather than being guessed at.
+//! different coordinates. `Official` is the broadcast split and what
+//! [`MetadataProvider::tree`](brarr_core::MetadataProvider::tree) builds
+//! for `Ordering::Default`; `Absolute` is one run of numbers straight
+//! through. Each episode carries its own stable [`Episode::id`] under
+//! **every** season type, so two orderings of one series join by
+//! identity and no heuristic is reached.
 //!
 //! # Auth
 //!
