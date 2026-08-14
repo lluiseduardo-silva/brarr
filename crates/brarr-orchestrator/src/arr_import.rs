@@ -810,6 +810,21 @@ async fn run_instance(
             Err(e) => report.fail(&title.title, &e.to_string()),
         }
     }
+    // **Say why, not just how many.** The reasons were collected into
+    // `failures` and logged nowhere, so a title that fails every pass
+    // reads as `failed=2` forever with the cause reachable only by
+    // reproducing the run against a copy of the database. That is how a
+    // provider repeating a coordinate stayed invisible through two
+    // sweeps.
+    if !report.failures.is_empty() {
+        warn!(
+            target: "brarr_orchestrator::arr_import",
+            instance = %row.name,
+            failed = report.failed,
+            reasons = %report.failures.join(" | "),
+            "titles the import could not take"
+        );
+    }
     info!(
         target: "brarr_orchestrator::arr_import",
         instance = %row.name,
@@ -1475,6 +1490,11 @@ pub async fn sync_all(state: &AppState) -> Result<ImportReport, AppError> {
                 total.refreshed += report.refreshed;
                 total.blocked += report.blocked;
                 total.failed += report.failed;
+                for why in report.failures {
+                    if total.failures.len() < MAX_FAILURES_KEPT {
+                        total.failures.push(why);
+                    }
+                }
                 total.files.merge(report.files);
             }
             Err(e) => {

@@ -53,7 +53,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use brarr_core::{Block, MetadataSource, Ordering, OrderingFamily, SeriesTree, TreeEpisode};
+use brarr_core::{
+    Block, MetadataSource, Ordering, OrderingFamily, SeriesTree, TreeEpisode, TreeSeason,
+};
 use time::Date;
 use uuid::Uuid;
 
@@ -172,6 +174,9 @@ pub struct StructurePlan {
     pub air_date_coverage: (f32, f32),
     /// Season packs whose meaning changes.
     pub packs_affected: Vec<PackImpact>,
+    /// Incoming episodes dropped because another already claimed their
+    /// coordinate. See [`dedupe_coordinates`].
+    pub duplicates: usize,
 }
 
 impl StructurePlan {
@@ -572,6 +577,59 @@ pub enum Intent {
     },
 }
 
+/// One episode per coordinate, because that is what a row is.
+///
+/// A provider may legitimately publish two episodes at the same
+/// `(season, number)` — TheTVDB's `official` ordering gives Better Call
+/// Saul two distinct entries at `S0E265`, among 244 behind-the-scenes
+/// items in its specials bucket. brarr may not: the coordinate is the
+/// row identity, `UNIQUE(item_id, season_number, episode_number)` says
+/// so, and `write_tree` is one transaction — so the second insert used to
+/// roll back the whole 307-episode tree and leave the title with none.
+///
+/// **First at a coordinate wins**, in the provider's own order, and the
+/// rest are counted rather than dropped in silence. Choosing between two
+/// entries that claim the same slot is a guess whichever way it goes; the
+/// only decision worth defending is that it costs the duplicate and not
+/// the title.
+///
+/// Applied identically by [`plan`] and [`apply_with`] so a preview and a
+/// write can never disagree, and idempotent, so running it twice is a
+/// no-op.
+fn dedupe_coordinates(incoming: &SeriesTree) -> (SeriesTree, usize) {
+    let mut seen: HashSet<(i32, i32)> = HashSet::new();
+    let mut dropped = 0_usize;
+    let seasons = incoming
+        .seasons
+        .iter()
+        .map(|season| TreeSeason {
+            number: season.number,
+            air_date: season.air_date,
+            episodes: season
+                .episodes
+                .iter()
+                .filter(|episode| {
+                    let fresh = seen.insert((season.number, episode.number));
+                    if !fresh {
+                        dropped += 1;
+                    }
+                    fresh
+                })
+                .cloned()
+                .collect(),
+        })
+        .collect();
+
+    (
+        SeriesTree {
+            source: incoming.source,
+            ordering: incoming.ordering.clone(),
+            seasons,
+        },
+        dropped,
+    )
+}
+
 /// Work out what a tree write would do, writing nothing.
 ///
 /// # Errors
@@ -582,6 +640,8 @@ pub async fn plan(
     item_id: Uuid,
     incoming: &SeriesTree,
 ) -> Result<StructurePlan, AppError> {
+    let (incoming, duplicates) = dedupe_coordinates(incoming);
+    let incoming = &incoming;
     let stored = library::episodes(pool, item_id).await?;
     let paired = pair(&stored, incoming);
 
@@ -621,6 +681,7 @@ pub async fn plan(
             coverage(incoming_total, incoming_dated),
         ),
         packs_affected: pack_impacts(&stored, incoming, &grabs::pack_counts(pool, item_id).await?),
+        duplicates,
     })
 }
 
@@ -699,6 +760,18 @@ pub async fn apply_with(
             "recusado: {} devolveu uma árvore sem episódios para este título",
             incoming.source.display_name()
         )));
+    }
+
+    // Normalised before anything is built from it, so the rows written
+    // and the plan that authorised them are the same list.
+    let (deduped, duplicates) = dedupe_coordinates(incoming);
+    let incoming = &deduped;
+    if duplicates > 0 {
+        tracing::info!(
+            target: "brarr_orchestrator::structure",
+            item = %item_id, source = %incoming.source, duplicates,
+            "the provider repeated a coordinate; keeping the first at each"
+        );
     }
 
     let plan = plan(pool, item_id, incoming).await?;
@@ -786,6 +859,7 @@ pub async fn apply_with(
         reused: plan.pairs.len(),
         added: plan.added,
         packs_affected: plan.packs_affected,
+        duplicates,
     })
 }
 
@@ -800,6 +874,8 @@ pub struct Applied {
     /// it is the correction, but it has to be said rather than
     /// discovered.
     pub packs_affected: Vec<PackImpact>,
+    /// Incoming episodes dropped for repeating a coordinate.
+    pub duplicates: usize,
 }
 
 /// Refuse a tree the item does not own.
@@ -1628,6 +1704,60 @@ mod tests {
             .unwrap()
             .try_get::<i64, _>("n")
             .unwrap()
+    }
+
+    /// **A provider may number two episodes the same; brarr may not.**
+    ///
+    /// Measured live on 2026-08-14: TheTVDB's `official` ordering hands
+    /// Better Call Saul 244 behind-the-scenes entries in season 0, two of
+    /// them — distinct ids — both numbered `S0E265`. Yellowstone has the
+    /// same shape at `S0E70`. A coordinate is brarr's row identity, so
+    /// the second insert hit `UNIQUE(item_id, season_number,
+    /// episode_number)`; `write_tree` is one transaction, and **the whole
+    /// 307-episode tree rolled back**. Both titles sat in the catalogue
+    /// with zero episodes and the sweep reported `failed=2` with the
+    /// reason recorded nowhere.
+    ///
+    /// Dropping a repeated special costs a duplicate nobody asked for.
+    /// Refusing the write costs the title.
+    #[tokio::test]
+    async fn a_repeated_coordinate_costs_the_duplicate_and_not_the_tree() {
+        let pool = open_memory().await.unwrap();
+        let item = library::upsert(&pool, &Seed::series(273_181, "Better Call Saul").build())
+            .await
+            .unwrap();
+
+        let shape = tree(
+            MetadataSource::Tvdb,
+            vec![
+                incoming(
+                    0,
+                    vec![ep(265, "tvdb-a"), ep(265, "tvdb-b"), ep(266, "tvdb-c")],
+                ),
+                incoming(1, vec![ep(1, "tvdb-1"), ep(2, "tvdb-2")]),
+            ],
+        );
+
+        let done = apply(&pool, item.id, &shape).await.unwrap();
+        assert_eq!(done.duplicates, 1, "the repeat is counted, not silent");
+
+        let written = library::episodes(&pool, item.id).await.unwrap();
+        assert_eq!(written.len(), 4, "the tree survives minus the duplicate");
+        assert!(
+            written
+                .iter()
+                .any(|e| e.season_number == 1 && e.episode_number == 2),
+            "a real episode must not be lost to a special's collision"
+        );
+        let kept = written
+            .iter()
+            .find(|e| e.season_number == 0 && e.episode_number == 265)
+            .unwrap();
+        assert_eq!(
+            kept.external_id.as_deref(),
+            Some("tvdb-a"),
+            "first at the coordinate wins, in the provider's own order"
+        );
     }
 
     /// **The most important test of the block.** A tree that re-cuts a
