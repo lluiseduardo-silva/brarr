@@ -1036,6 +1036,12 @@ pub async fn commit(
     forced_item: Option<Uuid>,
     picks: &[Pick],
 ) -> Result<Report, AppError> {
+    // The one write path the pause never reached, while the banner
+    // promised "nada é … vinculado". Not a worker with a loop to guard —
+    // a button, reached straight from the route. `plan` above stays open
+    // deliberately: it writes nothing, and a paused brarr the operator
+    // cannot even look at is a worse tool.
+    crate::db::settings::refuse_if_paused(state.pool(), "adotar arquivos").await?;
     let fresh = plan(state, folder, forced_item).await?;
     let mut report = Report::default();
 
@@ -1550,5 +1556,67 @@ mod tests {
         assert_eq!(scan.over_cap, 0);
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// **Adoption is the one write path the pause never reached.**
+    ///
+    /// The banner promises "Nada é buscado, baixado, importado ou
+    /// **vinculado**", and this is the function that vincula: it reserves
+    /// a grab and writes a hardlink. Every background worker asks
+    /// `is_paused` before its loop, and this one is not a worker — it is a
+    /// button, reached straight from the route, so it never asked.
+    ///
+    /// The cost is not hypothetical during the numbering refactor: a
+    /// hardlink and a grab written under the coordinates brarr is about to
+    /// change is precisely the state the pause exists to freeze.
+    ///
+    /// `plan` is deliberately still allowed — it writes nothing, and a
+    /// paused brarr the operator cannot even look at is a worse tool.
+    #[tokio::test]
+    async fn adopting_while_paused_is_refused() {
+        let base = std::env::temp_dir().join(format!("brarr-paused-{}", uuid::Uuid::new_v4()));
+        let root = base.join("midias");
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("Matrix.1999.1080p.BluRay.mkv");
+        std::fs::write(&file, b"video").unwrap();
+
+        let state = state_with_root(&root, MediaType::Movie).await;
+        let item = library::upsert(
+            state.pool(),
+            &library::NewLibraryItem {
+                media_type: Some(MediaType::Movie),
+                tmdb_id: 603,
+                title: "Matrix".to_owned(),
+                year: Some(1999),
+                ..library::NewLibraryItem::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let preview = plan(&state, &root, None).await.unwrap();
+        let pick = Pick::decode(preview.files[0].token.as_ref().unwrap()).unwrap();
+
+        crate::db::settings::set(state.pool(), crate::db::settings::KEY_PAUSED, "1")
+            .await
+            .unwrap();
+
+        // The preview still works: it writes nothing.
+        assert_eq!(plan(&state, &root, None).await.unwrap().ready(), 1);
+
+        let refused = commit(&state, &root, None, &[pick]).await;
+        assert!(
+            matches!(refused, Err(AppError::Paused { .. })),
+            "commit adopted while paused: {refused:?}"
+        );
+        assert!(
+            grabs::for_item(state.pool(), item.id)
+                .await
+                .unwrap()
+                .is_empty(),
+            "a paused brarr must not reserve a grab"
+        );
+
+        std::fs::remove_dir_all(&base).unwrap();
     }
 }

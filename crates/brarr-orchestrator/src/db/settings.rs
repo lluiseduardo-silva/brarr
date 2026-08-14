@@ -184,6 +184,26 @@ pub async fn is_paused(pool: &Pool) -> bool {
     }
 }
 
+/// [`is_paused`], as a guard for the paths that answer a person.
+///
+/// A background worker returns early and logs nothing; a button has to
+/// say why it did nothing, so it needs the error rather than the bool.
+/// Having it here — one call, one named action — is what keeps a new
+/// write path from being covered by "somebody remembered", which is how
+/// `adopt::commit` and the five numbering writers went uncovered while
+/// the banner promised they were.
+///
+/// # Errors
+///
+/// [`AppError::Paused`] when the switch is on. Fails closed, inheriting
+/// [`is_paused`]'s behaviour on an unreadable database.
+pub async fn refuse_if_paused(pool: &Pool, action: &'static str) -> Result<(), AppError> {
+    if is_paused(pool).await {
+        return Err(AppError::Paused { action });
+    }
+    Ok(())
+}
+
 fn row_to_setting(row: &SqliteRow) -> Result<SettingRow, AppError> {
     let updated_unix: i64 = row.try_get("updated_at")?;
     let updated_at = OffsetDateTime::from_unix_timestamp(updated_unix)

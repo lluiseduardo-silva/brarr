@@ -50,6 +50,25 @@ pub enum AppError {
     #[error("not found: {0}")]
     NotFound(String),
 
+    /// Refused because the global pause is on.
+    ///
+    /// Its own variant rather than an [`Self::InvalidInput`] because the
+    /// request was not invalid — brarr is switched off, and telling the
+    /// operator they sent something wrong is a different sentence with a
+    /// different fix. `action` names what was refused: this repository
+    /// has twice paid for one message covering several conditions (the
+    /// scan badge's "nada encontrado", the numbering panel's sentence
+    /// joined by "ou"), and a pause the operator has forgotten is the
+    /// worst kind of defect precisely because nothing errors.
+    ///
+    /// The string is Portuguese because it reaches the screen verbatim
+    /// through [`IntoResponse`].
+    #[error("o brarr está pausado — retome em Configurações para {action}")]
+    Paused {
+        /// What was refused, in the infinitive: `"adotar arquivos"`.
+        action: &'static str,
+    },
+
     /// Generic I/O.
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
@@ -62,6 +81,10 @@ impl AppError {
         match self {
             Self::NotFound(_) => StatusCode::NOT_FOUND,
             Self::InvalidInput(_) => StatusCode::BAD_REQUEST,
+            // Conflict, not 503: the state is deliberate and the operator
+            // is the one who clears it. 503 reads as "try again shortly",
+            // which is the opposite of what a pause means.
+            Self::Paused { .. } => StatusCode::CONFLICT,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -81,6 +104,9 @@ impl From<AppError> for tonic::Status {
         let code = match err {
             AppError::NotFound(_) => tonic::Code::NotFound,
             AppError::InvalidInput(_) => tonic::Code::InvalidArgument,
+            // Not `Unavailable`: that one tells a client to retry, and a
+            // pause is cleared by a person, not by waiting.
+            AppError::Paused { .. } => tonic::Code::FailedPrecondition,
             _ => tonic::Code::Internal,
         };
         Self::new(code, err.to_string())

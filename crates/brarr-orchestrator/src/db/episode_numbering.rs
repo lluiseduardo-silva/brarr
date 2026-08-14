@@ -17,7 +17,17 @@ use brarr_tmdb::EpisodeGroup;
 use sqlx::Row;
 use uuid::Uuid;
 
-use crate::{AppError, db::Pool};
+use crate::{
+    AppError,
+    db::{Pool, settings},
+};
+
+/// What the pause refuses here, for [`settings::refuse_if_paused`].
+///
+/// One constant rather than five literals: the five writers below are
+/// one decision, and a sixth that phrases it differently would be a
+/// sixth sentence for the same condition.
+const NUMBERING_ACTION: &str = "mudar a numeração de busca";
 
 /// Where one episode sits under the alternate ordering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,6 +116,7 @@ pub async fn apply(
     group_name: Option<&str>,
     rows: &[NumberingRow],
 ) -> Result<u64, AppError> {
+    settings::refuse_if_paused(pool, NUMBERING_ACTION).await?;
     let mut tx = pool.begin().await?;
     sqlx::query("DELETE FROM library_episode_numbering WHERE item_id = ?")
         .bind(item_id.to_string())
@@ -310,6 +321,7 @@ pub async fn apply_derived(
     from: Source,
     rows: &[NumberingRow],
 ) -> Result<bool, AppError> {
+    settings::refuse_if_paused(pool, NUMBERING_ACTION).await?;
     let current = source(pool, item_id).await?;
     if !from.may_replace(current) {
         return Ok(false);
@@ -515,6 +527,9 @@ pub const MANUAL_NUMBERING_NAME: &str = "blocos definidos por você";
 ///
 /// Returns [`AppError::Database`] on SQL failure.
 pub async fn apply_manual(pool: &Pool, item_id: Uuid, blocks: &[Block]) -> Result<u64, AppError> {
+    // Asked here as well as inside `apply`, because the empty-blocks
+    // branch below goes to `clear` and never reaches it.
+    settings::refuse_if_paused(pool, NUMBERING_ACTION).await?;
     let rows = rows_from_blocks(blocks);
     if rows.is_empty() {
         clear(pool, item_id).await?;
@@ -553,6 +568,7 @@ pub async fn apply_manual(pool: &Pool, item_id: Uuid, blocks: &[Block]) -> Resul
 ///
 /// Returns [`AppError::Database`] on SQL failure.
 pub async fn reset_to_automatic(pool: &Pool, item_id: Uuid) -> Result<(), AppError> {
+    settings::refuse_if_paused(pool, NUMBERING_ACTION).await?;
     let mut tx = pool.begin().await?;
     sqlx::query("DELETE FROM library_episode_numbering WHERE item_id = ?")
         .bind(item_id.to_string())
@@ -579,6 +595,7 @@ pub async fn reset_to_automatic(pool: &Pool, item_id: Uuid) -> Result<(), AppErr
 ///
 /// Returns [`AppError::Database`] on SQL failure.
 pub async fn clear(pool: &Pool, item_id: Uuid) -> Result<(), AppError> {
+    settings::refuse_if_paused(pool, NUMBERING_ACTION).await?;
     let mut tx = pool.begin().await?;
     sqlx::query("DELETE FROM library_episode_numbering WHERE item_id = ?")
         .bind(item_id.to_string())
@@ -1263,5 +1280,98 @@ mod tests {
 
         let written = apply(&pool, item.id, "g", None, &rows).await.unwrap();
         assert_eq!(written, 59, "the duplicate is skipped, not fatal");
+    }
+
+    /// **The pause has to reach the writers, not only the sweeps.**
+    ///
+    /// The banner says "Nada é buscado, baixado, importado ou
+    /// **vinculado**", and the numbering is what decides which episode a
+    /// file is. `tvdb_sync::sync_all` and `arr_import` ask before their
+    /// loop, so the automatic path was covered — but every writer here is
+    /// also reachable straight from a button on the panel, and none of
+    /// them asked. A numbering applied by hand while brarr is switched
+    /// off moves the search coordinate of a live title, which is exactly
+    /// the state the pause exists to freeze.
+    ///
+    /// Walks the five writers rather than picking one, so a sixth cannot
+    /// be added without a decision: the same reason
+    /// `every_source_can_be_persisted` walks the enum.
+    #[tokio::test]
+    async fn a_paused_brarr_writes_no_numbering() {
+        use crate::db::library::{MediaType, NewLibraryItem, upsert};
+        use crate::db::{open_memory, settings};
+
+        let pool = open_memory().await.unwrap();
+        let item = upsert(
+            &pool,
+            &NewLibraryItem {
+                media_type: Some(MediaType::Tv),
+                tmdb_id: 95_479,
+                title: "Jujutsu Kaisen".to_owned(),
+                ..NewLibraryItem::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        // Something to walk back, so a refusal is distinguishable from a
+        // no-op over an empty table.
+        let rows = rows_from_group(&jujutsu());
+        apply(&pool, item.id, "g", Some("季"), &rows).await.unwrap();
+        let before = for_item(&pool, item.id).await.unwrap();
+        assert!(!before.is_empty());
+
+        settings::set(&pool, settings::KEY_PAUSED, "1")
+            .await
+            .unwrap();
+
+        let refusals: Vec<(&str, Result<(), AppError>)> = vec![
+            (
+                "apply",
+                apply(&pool, item.id, "other", None, &rows)
+                    .await
+                    .map(|_| ()),
+            ),
+            (
+                "apply_derived",
+                apply_derived(&pool, item.id, Source::Tvdb, &rows)
+                    .await
+                    .map(|_| ()),
+            ),
+            (
+                "apply_manual",
+                apply_manual(
+                    &pool,
+                    item.id,
+                    &[Block {
+                        canonical_season: 1,
+                        first_episode: 1,
+                        last_episode: 24,
+                        season: 1,
+                    }],
+                )
+                .await
+                .map(|_| ()),
+            ),
+            ("clear", clear(&pool, item.id).await),
+            (
+                "reset_to_automatic",
+                reset_to_automatic(&pool, item.id).await,
+            ),
+        ];
+
+        for (name, outcome) in refusals {
+            assert!(
+                matches!(outcome, Err(AppError::Paused { .. })),
+                "{name} wrote while paused"
+            );
+        }
+
+        let after = for_item(&pool, item.id).await.unwrap();
+        assert_eq!(
+            before.len(),
+            after.len(),
+            "a paused brarr must not move a single translation row"
+        );
     }
 }
