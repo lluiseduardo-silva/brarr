@@ -634,6 +634,70 @@ async fn the_interactive_search_left_the_header_for_the_rows() {
     assert!(page.contains(r##"hx-target="#modal-target""##));
 }
 
+/// A film had no door to the interactive search at all.
+///
+/// The magnifier lives per season and per episode, which is where the
+/// question "what exists for this" is asked — and a film has neither. So
+/// the only way to pick a release for a film by hand was not to have one.
+#[tokio::test]
+async fn a_film_gets_the_interactive_search_in_its_control_row() {
+    let (addr, state) = spawn().await;
+    let film = library::upsert(
+        state.pool(),
+        &support::Seed::movie(603, "The Matrix").year(1999).build(),
+    )
+    .await
+    .unwrap();
+
+    let page = get(addr, &format!("/library/{}", film.id)).await;
+    assert!(
+        page.contains(&format!(r#"hx-get="/library/{}/interactive""#, film.id)),
+        "with no season, which is what the handler reads as the film axis: {page}"
+    );
+    assert!(
+        page.contains(r##"hx-target="#modal-target""##),
+        "and it opens the house modal slot like every other dialog"
+    );
+
+    // The lightning bolt is the automatic sweep, and it is the assertion
+    // that the icons still mean one thing each: the control row used the
+    // magnifier for "buscar agora", so adding the interactive magnifier
+    // beside it would have put two of them in one row meaning different
+    // things. Before this change a film page carried no bolt at all —
+    // the glyph only existed on season headers, which a film has none of.
+    assert!(
+        page.contains("M13 2 4.5 13H11l-1 9 8.5-11H12z"),
+        "the automatic search has to be the bolt, not a second magnifier: {page}"
+    );
+
+    // And the endpoint answers for a film, on the film axis.
+    let results = get(addr, &format!("/library/{}/interactive", film.id)).await;
+    assert!(
+        results.contains(r#"id="interactive-dialog""#),
+        "got: {results}"
+    );
+}
+
+/// A series keeps its magnifiers where they belong and gains no second
+/// one in the header. A coordinate-less interactive search on a series
+/// is not the same question, and offering it beside the per-season ones
+/// would make the row ambiguous again.
+#[tokio::test]
+async fn a_series_does_not_get_the_control_row_magnifier() {
+    let (addr, state) = spawn().await;
+    let item = seed_series(&state).await;
+
+    let page = get(addr, &format!("/library/{item}")).await;
+    assert!(
+        !page.contains(&format!(r#"hx-get="/library/{item}/interactive""#)),
+        "no coordinate-less search on a series: {page}"
+    );
+    assert!(
+        page.contains(&format!("/library/{item}/interactive?season=1")),
+        "the season magnifier is still the door: {page}"
+    );
+}
+
 /// The results open in a dialog the operator can actually dismiss.
 ///
 /// They used to land in a loose `<div>` under the hero, and once filled

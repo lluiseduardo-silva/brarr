@@ -97,9 +97,18 @@
                quadrados de 36px quebra o alinhamento, e "onde e como"
                é configuração, não ação do dia a dia.
 
-               A busca interativa saiu daqui inteira — virou lupa por
-               temporada e por episódio, lá embaixo, onde o operador já
-               está olhando quando decide buscar. #}
+               A busca interativa saiu daqui **para séries** — virou lupa
+               por temporada e por episódio, lá embaixo, onde o operador
+               já está olhando quando decide buscar. Um filme não tem
+               onde pendurá-la: ele é um alvo só, e a fileira é o lugar.
+               Por isso ela volta aqui, e só para filme.
+
+               O raio e a lupa são irmãos, não substitutos: o raio decide
+               (varre, aplica o perfil, entrega), a lupa mostra e deixa o
+               operador escolher. Esse par já era o vocabulário da linha
+               de temporada; o "buscar agora" daqui usava a lupa e agora
+               usa o raio, porque duas lupas na mesma fileira querendo
+               dizer coisas diferentes é pior que qualquer ícone. #}
             <div class="flex items-center gap-2 flex-wrap mt-4">
                 <button hx-post="/library/{{ item.id }}/monitor"
                         title="{% if item.monitored %}Monitorando — clique para pausar o título inteiro{% else %}Pausado — clique para voltar a monitorar{% endif %}"
@@ -122,9 +131,33 @@
                         aria-label="Buscar agora"
                         class="btn btn-md btn-icon btn-primary">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M13 2 4.5 13H11l-1 9 8.5-11H12z"/>
+                    </svg>
+                </button>
+
+                {# Só para filme, e por ausência de lugar melhor: a série
+                   tem a lupa na temporada e no episódio, que é onde a
+                   pergunta "o que existe pra isto" nasce. Um filme não
+                   tem sub-alvo, então a fileira é o único lugar — e sem
+                   ela o operador não tinha nenhuma porta para escolher
+                   uma release de filme à mão.
+
+                   Sem `season`: `library_interactive` já cai nos eixos de
+                   filme (TMDB/IMDb) quando não recebe temporada, e
+                   `library_grab` grava um grab de escopo `item`. Nada no
+                   handler precisou mudar. #}
+                {% if !item.is_series %}
+                <button hx-get="/library/{{ item.id }}/interactive"
+                        hx-target="#modal-target"
+                        hx-swap="innerHTML"
+                        title="Ver o que existe para este filme — mostra tudo, inclusive o que o perfil rejeitaria"
+                        aria-label="Busca interativa"
+                        class="btn btn-md btn-icon btn-secondary">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                         <circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/>
                     </svg>
                 </button>
+                {% endif %}
 
                 <button hx-get="/library/import?item={{ item.id }}"
                         hx-target="#modal-target"
