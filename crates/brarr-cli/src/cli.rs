@@ -37,10 +37,6 @@ pub enum Command {
     /// Dispara a manutenção do banco no `brarr-orchestrator` via `gRPC`:
     /// poda o histórico além da janela de retenção e recupera espaço.
     Maintenance(MaintenanceArgs),
-    /// Relata o que trocar o dono da estrutura faria com cada título,
-    /// sem escrever nada. O número que decide se a troca é viável tem
-    /// que ser legível antes de qualquer escrita.
-    Structure(StructureArgs),
 }
 
 /// Argumentos do subcomando `search`.
@@ -112,40 +108,6 @@ pub struct MaintenanceArgs {
     /// disco. Caro (trava o banco) — use só quando precisar compactar.
     #[arg(long, default_value_t = false)]
     pub vacuum: bool,
-}
-
-/// Argumentos do subcomando `structure`.
-#[derive(Debug, Args)]
-pub struct StructureArgs {
-    /// Endereço do orchestrator (default `127.0.0.1:50051`). Aceita
-    /// `host:port` ou URL completa com `http://`/`https://`.
-    #[arg(long, default_value = "127.0.0.1:50051")]
-    pub addr: String,
-
-    /// Token de autenticação (`BRARR_AUTH_TOKEN` no orchestrator).
-    /// Omita quando o orchestrator estiver em modo dev (auth desabilitado).
-    #[arg(long)]
-    pub token: Option<String>,
-
-    /// Relata sem escrever nada. **Obrigatório**, e é a única coisa que
-    /// este comando faz hoje.
-    ///
-    /// Uma flag exigida com um único valor legal parece cerimônia, e
-    /// aqui não é: a diferença entre "me diga" e "escreva na minha
-    /// biblioteca" é a que precisa estar escrita na linha de comando, e
-    /// não herdada de um default. Quando existir um `--apply`, nenhuma
-    /// invocação já digitada muda de significado.
-    #[arg(long, default_value_t = false)]
-    pub dry_run: bool,
-
-    /// Restringe a um título (UUID de `library_items`). Sem isto,
-    /// percorre o catálogo inteiro.
-    #[arg(long)]
-    pub item: Option<String>,
-
-    /// Formato da saída.
-    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
-    pub format: OutputFormat,
 }
 
 /// Formato escolhido para `brarr search`.

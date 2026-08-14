@@ -30,7 +30,7 @@ use brarr_core::{
 };
 use brarr_decision_service::DecisionOutcome;
 use proto::brarr_client::BrarrClient;
-use proto::{MaintenanceRequest, ReleaseOutcome, SearchRequest, StructureDryRunRequest};
+use proto::{MaintenanceRequest, ReleaseOutcome, SearchRequest};
 use tonic::metadata::MetadataValue;
 use tonic::transport::Channel;
 use tonic::transport::Endpoint;
@@ -159,114 +159,6 @@ pub async fn run_remote_maintenance(
         searches_deleted: reply.searches_deleted,
         retention_days: reply.retention_days,
     })
-}
-
-/// One title's verdict in a structure dry run.
-///
-/// A plain owned mirror of the reply message, so `main.rs` and the
-/// formatter never see a proto type — the same shape
-/// [`RemoteMaintenance`] set for a non-search RPC.
-#[derive(Debug, Clone)]
-pub struct RemoteStructureTitle {
-    /// `library_items.id`.
-    pub item_id: String,
-    /// The title, so the report names something recognisable.
-    pub title: String,
-    /// `"untouched"` | `"blocked"` | `"ready"`.
-    pub outcome: String,
-    /// Why it is blocked, when it is.
-    pub reason: String,
-    /// Where it would go: source label, brarr's ordering family, and the
-    /// provider's own handle when it has one.
-    pub destination: Option<(String, String, String)>,
-    /// Whether the destination freezes the choice.
-    pub pinned: bool,
-    /// Stored episodes that keep their row.
-    pub paired: u32,
-    /// Stored episodes nothing claims. **Non-zero blocks the write.**
-    pub orphans: u32,
-    /// Episodes the tree gains.
-    pub added: u32,
-    /// Acquisitions those orphans carry.
-    pub grabs_at_risk: i64,
-    /// Air-date coverage, `(stored, incoming)`.
-    pub air_date_coverage: (f32, f32),
-    /// Whether the write would be accepted as it stands.
-    pub would_commit: bool,
-    /// Season packs whose meaning changes: `(season, was, now, grabs)`.
-    pub packs: Vec<(i32, u32, u32, i64)>,
-}
-
-/// Ask the orchestrator at `addr` what changing each title's structure
-/// owner would do. Writes nothing on either side.
-///
-/// # Errors
-///
-/// See [`RemoteError`].
-pub async fn run_remote_structure(
-    addr: &str,
-    token: Option<&str>,
-    item: Option<&str>,
-) -> Result<Vec<RemoteStructureTitle>, RemoteError> {
-    let uri = if addr.starts_with("http://") || addr.starts_with("https://") {
-        addr.to_string()
-    } else {
-        format!("http://{addr}")
-    };
-    // A whole-catalogue run is one provider call per title that has a
-    // destination, in sequence. Generous, because the alternative is a
-    // report that times out halfway and tells the operator nothing.
-    let endpoint = Endpoint::from_shared(uri.clone())?
-        .connect_timeout(Duration::from_secs(5))
-        .timeout(Duration::from_secs(900));
-    let channel: Channel = endpoint.connect().await?;
-    info!(target: "brarr_cli::remote", %uri, "dispatching remote structure dry run");
-
-    let mut client = BrarrClient::new(channel);
-    let mut request = tonic::Request::new(StructureDryRunRequest {
-        item_id: item.unwrap_or_default().to_string(),
-    });
-    if let Some(t) = token {
-        let v = MetadataValue::try_from(format!("Bearer {t}"))
-            .map_err(|_| RemoteError::InvalidToken)?;
-        request.metadata_mut().insert("authorization", v);
-    }
-    let reply = client.structure_dry_run(request).await?.into_inner();
-
-    Ok(reply
-        .titles
-        .into_iter()
-        .map(|t| RemoteStructureTitle {
-            // An empty source is proto3's "unset", which for a title
-            // nobody could work a destination out for is the honest
-            // reading — not a source named by the empty string.
-            destination: if t.destination_source.is_empty() {
-                None
-            } else {
-                Some((
-                    t.destination_source,
-                    t.destination_family,
-                    t.destination_handle,
-                ))
-            },
-            item_id: t.item_id,
-            title: t.title,
-            outcome: t.outcome,
-            reason: t.reason,
-            pinned: t.pinned,
-            paired: t.paired,
-            orphans: t.orphans,
-            added: t.added,
-            grabs_at_risk: t.grabs_at_risk,
-            air_date_coverage: (t.stored_air_date_coverage, t.incoming_air_date_coverage),
-            would_commit: t.would_commit,
-            packs: t
-                .packs
-                .into_iter()
-                .map(|p| (p.season, p.was, p.now, p.grabs))
-                .collect(),
-        })
-        .collect())
 }
 
 /// Convert a server-side [`ReleaseOutcome`] back to a local

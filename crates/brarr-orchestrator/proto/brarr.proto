@@ -23,13 +23,6 @@ service Brarr {
   // space. Optionally runs a full VACUUM. Same operation the admin UI's
   // maintenance buttons trigger.
   rpc RunMaintenance(MaintenanceRequest) returns (MaintenanceReply);
-
-  // Report what changing each title's structure owner would do, writing
-  // nothing. The number that decides whether a flip is viable has to be
-  // readable before any of it happens, and per title — a batch that is
-  // safe in aggregate can still be the one title with a season pack and
-  // no air dates.
-  rpc StructureDryRun(StructureDryRunRequest) returns (StructureDryRunReply);
 }
 
 message SearchRequest {
@@ -122,50 +115,4 @@ message MaintenanceReply {
   uint64 searches_deleted = 2;
   // The retention window (days) the prune used, echoed for the caller.
   uint32 retention_days = 3;
-}
-
-message StructureDryRunRequest {
-  // Restrict to one title. Empty runs the whole catalogue.
-  string item_id = 1;
-}
-message StructureDryRunReply {
-  repeated StructureTitle titles = 1;
-}
-
-// One title's verdict.
-message StructureTitle {
-  string item_id = 1;
-  string title = 2;
-  // "untouched" | "blocked" | "ready". Untouched titles cost no
-  // provider call and are reported anyway, so the count in the report
-  // adds up to the catalogue.
-  string outcome = 3;
-  // Only for "blocked": what stopped it, in the operator's language.
-  string reason = 4;
-
-  // Where it would go. Present for "ready", and for "blocked" whenever
-  // the destination was worked out before the block.
-  string destination_source = 5;    // "tmdb" | "tvdb"
-  string destination_family = 6;    // brarr's word for the ordering
-  string destination_handle = 7;    // the provider's own, when it has one
-  bool pinned = 8;
-
-  // Only for "ready", all computed against the real tree.
-  uint32 paired = 9;
-  uint32 orphans = 10;
-  uint32 added = 11;
-  int64 grabs_at_risk = 12;
-  float stored_air_date_coverage = 13;
-  float incoming_air_date_coverage = 14;
-  // Whether the write would be accepted as it stands.
-  bool would_commit = 15;
-  repeated StructurePack packs = 16;
-}
-
-// A season pack whose meaning changes because its season did.
-message StructurePack {
-  int32 season = 1;
-  uint32 was = 2;
-  uint32 now = 3;
-  int64 grabs = 4;
 }

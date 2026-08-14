@@ -58,7 +58,7 @@ use time::Date;
 use uuid::Uuid;
 
 use crate::db::library::{self, Episode};
-use crate::db::{Pool, episode_numbering, grabs};
+use crate::db::{Pool, grabs};
 use crate::error::AppError;
 
 /// Share of episodes that must carry an air date on **both** sides before
@@ -92,19 +92,6 @@ pub enum LinkMethod {
     /// numeric collision between two providers' episode ids means
     /// nothing.
     ExternalId,
-    /// The translation the operator already verified: a row in
-    /// `library_episode_numbering` naming which stored coordinate this
-    /// incoming one is.
-    ///
-    /// Above every heuristic and below both identity tiers, and each half
-    /// of that is deliberate. It outranks the calendar because it is
-    /// evidence rather than inference — 833 rows a human checked against
-    /// the release names their own trackers carry, where an air date is a
-    /// guess that a uniform shift satisfies just as well as the truth. It
-    /// stays under [`LinkMethod::ExternalId`] because a provider's own
-    /// episode id *is* the thing the translation was derived from, and a
-    /// derived map can never be better evidence than what derived it.
-    Operator,
     /// Same `(season, episode)` as before. Not identity — it is exactly
     /// the key a renumbering changes — but it is what keeps a tree whose
     /// rows have no stored id from being deleted and reinserted.
@@ -214,21 +201,6 @@ impl StructurePlan {
     }
 }
 
-/// What the operator already established about this series' numbering,
-/// as a map **from** a coordinate in the incoming tree **to** the
-/// coordinate the stored tree uses for the same episode.
-///
-/// That direction is the one a pairing needs: the question is always
-/// "which stored row is this incoming episode", never the reverse. It is
-/// the shape [`crate::db::episode_numbering::reverse_for_item`] already
-/// returns, converted at the [`plan`] boundary so this module never names
-/// a type the contraction deletes.
-///
-/// An empty map is how "no translation" is spelled, matching the
-/// encoding the translation table has always used — there is no
-/// enabled/disabled flag, only rows or no rows.
-pub type Translation = HashMap<(i32, i32), (i32, i32)>;
-
 /// The cut an operator declared, in the form they declared it.
 ///
 /// Stored as JSON in `library_items.structure_recipe`, and stored at all
@@ -320,17 +292,8 @@ pub struct Paired {
 /// The tiers run one at a time over the whole payload, rather than
 /// best-tier-per-episode, so a weak match can never take a row that a
 /// stronger match for another episode still needs.
-///
-/// `translation` carries the operator's own numbering and is empty for an
-/// ordinary refresh. **Handing it in rather than reading it here is the
-/// safety argument**: a translation is only about the numbering it was
-/// written for, and a map keyed on one ordering's coordinates, consulted
-/// while the incoming tree speaks another, answers confidently and
-/// wrongly. [`plan`] supplies it only when the ordering is actually
-/// changing; a caller with nothing to translate passes an empty map and
-/// the tier is inert.
 #[must_use]
-pub fn pair(stored: &[Episode], incoming: &SeriesTree, translation: &Translation) -> Paired {
+pub fn pair(stored: &[Episode], incoming: &SeriesTree) -> Paired {
     let flat: Vec<(i32, &TreeEpisode)> = incoming
         .seasons
         .iter()
@@ -343,12 +306,11 @@ pub fn pair(stored: &[Episode], incoming: &SeriesTree, translation: &Translation
     for tier in [
         LinkMethod::Owner,
         LinkMethod::ExternalId,
-        LinkMethod::Operator,
         LinkMethod::Coordinates,
         LinkMethod::AirDate,
         LinkMethod::Absolute,
     ] {
-        let index = build_index(tier, stored, &flat, incoming.source, translation);
+        let index = build_index(tier, stored, &flat, incoming.source);
         for (season, episode) in &flat {
             let coord = (*season, episode.number);
             if out.contains_key(&coord) {
@@ -405,9 +367,7 @@ impl<'a> Index<'a> {
             LinkMethod::Owner | LinkMethod::ExternalId => {
                 self.by_identity.get(&episode.external_id).copied()
             }
-            LinkMethod::Operator | LinkMethod::Coordinates => {
-                self.by_coordinate.get(&coord).copied()
-            }
+            LinkMethod::Coordinates => self.by_coordinate.get(&coord).copied(),
             LinkMethod::AirDate => episode
                 .air_date
                 .and_then(|d| self.by_day.get(&d.date()))
@@ -425,7 +385,6 @@ fn build_index<'a>(
     stored: &'a [Episode],
     incoming: &[(i32, &TreeEpisode)],
     source: MetadataSource,
-    translation: &Translation,
 ) -> Index<'a> {
     let mut index = Index {
         by_identity: HashMap::new(),
@@ -454,26 +413,6 @@ fn build_index<'a>(
                     if let Some(id) = row.tmdb_episode_id {
                         index.by_identity.insert(id.to_string(), row);
                     }
-                }
-            }
-        }
-        LinkMethod::Operator => {
-            // Keyed on the *incoming* coordinate, so the lookup is the
-            // same one `Coordinates` does — the translation hop happens
-            // here, once, rather than per episode.
-            //
-            // A translated coordinate naming no stored row contributes
-            // nothing: the map covers what the operator verified, which
-            // for Jujutsu Kaisen's story-arc group is 48 of 59, and an
-            // episode outside it has to reach a lower tier rather than
-            // vanish.
-            let by_stored: HashMap<(i32, i32), &Episode> = stored
-                .iter()
-                .map(|row| ((row.season_number, row.episode_number), row))
-                .collect();
-            for (incoming_coord, stored_coord) in translation {
-                if let Some(row) = by_stored.get(stored_coord) {
-                    index.by_coordinate.insert(*incoming_coord, row);
                 }
             }
         }
@@ -665,9 +604,7 @@ pub async fn plan(
     incoming: &SeriesTree,
 ) -> Result<StructurePlan, AppError> {
     let stored = library::episodes(pool, item_id).await?;
-    let owner = library::structure_owner(pool, item_id).await?;
-    let translation = translation_for(pool, item_id, &owner, incoming).await?;
-    let paired = pair(&stored, incoming, &translation);
+    let paired = pair(&stored, incoming);
 
     let grabs_per_episode = grabs::episode_grab_counts(pool, item_id).await?;
     let by_id: HashMap<Uuid, &Episode> = stored.iter().map(|e| (e.id, e)).collect();
@@ -706,43 +643,6 @@ pub async fn plan(
         ),
         packs_affected: pack_impacts(&stored, incoming, &grabs::pack_counts(pool, item_id).await?),
     })
-}
-
-/// Whether an incoming tree is a *change* of ordering rather than a
-/// refresh of the one in force.
-///
-/// This is the whole gate on [`LinkMethod::Operator`]. A translation
-/// describes the distance between two numberings; consulted while the
-/// incoming tree already speaks the stored one, it is a map keyed on
-/// coordinates that mean something else, and a hit is a confident wrong
-/// answer rather than a miss. An unclaimed item (`source` is `None`)
-/// counts as changing, which costs nothing — a title nobody has claimed
-/// has no translation rows either.
-fn is_a_change(owner: &StructureOwner, incoming: &SeriesTree) -> bool {
-    owner.source != Some(incoming.source)
-        || owner.family != Some(incoming.ordering.family())
-        || owner.handle.as_deref() != incoming.ordering.handle()
-}
-
-/// Read the operator's numbering, but only when it has something to say.
-///
-/// Returns an empty map for an ordinary refresh, so the tier is inert on
-/// the path that runs every half hour and only arms on the one that
-/// changes what the coordinates mean.
-async fn translation_for(
-    pool: &Pool,
-    item_id: Uuid,
-    owner: &StructureOwner,
-    incoming: &SeriesTree,
-) -> Result<Translation, AppError> {
-    if !is_a_change(owner, incoming) {
-        return Ok(Translation::new());
-    }
-    let rows = episode_numbering::reverse_for_item(pool, item_id).await?;
-    Ok(rows
-        .into_iter()
-        .map(|(group, canonical)| (group, (canonical.season, canonical.episode)))
-        .collect())
 }
 
 /// Seasons whose pack grabs would come to mean something different.
@@ -907,15 +807,6 @@ pub async fn apply_with(
                 *pinned,
             )
             .await?;
-
-            // The tree now *is* the numbering releases carry, so the
-            // translation that used to bridge the two describes a
-            // distance that no longer exists. Left in place it is
-            // applied a second time, and a title that has just been
-            // corrected starts asking for coordinates further wrong than
-            // before anyone touched it. Retiring it is part of the
-            // choice, not a follow-up an operator could forget.
-            episode_numbering::retire(pool, item_id).await?;
         }
     }
 
@@ -1074,14 +965,6 @@ mod tests {
         }
     }
 
-    /// The tiers with nothing declared, which is what every test about
-    /// the heuristics wants: an empty translation leaves
-    /// [`LinkMethod::Operator`] inert, so the tier below it is reached
-    /// exactly as it was before the tier existed.
-    fn pair_alone(stored: &[Episode], incoming: &SeriesTree) -> Paired {
-        pair(stored, incoming, &Translation::new())
-    }
-
     /// The tier order IS the safety argument. The Simpsons pair 801 of
     /// 801 on identity, so the absolute axis — which would map 1..801
     /// onto a season that does not exist — is never reached.
@@ -1107,7 +990,7 @@ mod tests {
             })
             .collect();
 
-        let paired = pair_alone(
+        let paired = pair(
             &stored_rows,
             &tree(MetadataSource::Tmdb, vec![incoming(1, incoming_eps)]),
         );
@@ -1155,7 +1038,7 @@ mod tests {
             },
         ];
 
-        let paired = pair_alone(
+        let paired = pair(
             &stored_rows,
             &tree(MetadataSource::Tvdb, vec![incoming(1, incoming_eps)]),
         );
@@ -1185,7 +1068,7 @@ mod tests {
             },
         ];
 
-        let paired = pair_alone(
+        let paired = pair(
             &stored_rows,
             &tree(MetadataSource::Tvdb, vec![incoming(9, incoming_eps)]),
         );
@@ -1215,7 +1098,7 @@ mod tests {
             },
         ];
 
-        let paired = pair_alone(
+        let paired = pair(
             &stored_rows,
             &tree(MetadataSource::Tvdb, vec![incoming(2, incoming_eps)]),
         );
@@ -1247,7 +1130,7 @@ mod tests {
             ep(2, "dup"),
         ];
 
-        let paired = pair_alone(
+        let paired = pair(
             &stored_rows,
             &tree(MetadataSource::Tmdb, vec![incoming(1, incoming_eps)]),
         );
@@ -1273,7 +1156,7 @@ mod tests {
         }];
         let incoming_eps = vec![ep(4, "5345648")];
 
-        let paired = pair_alone(
+        let paired = pair(
             &stored_rows,
             &tree(MetadataSource::Tvdb, vec![incoming(1, incoming_eps)]),
         );
@@ -1294,7 +1177,7 @@ mod tests {
         }];
         let incoming_eps = vec![ep(4, "5345648")];
 
-        let paired = pair_alone(
+        let paired = pair(
             &stored_rows,
             &tree(MetadataSource::Tmdb, vec![incoming(1, incoming_eps)]),
         );
@@ -1302,93 +1185,6 @@ mod tests {
         let matched = paired.by_coordinate.get(&(1, 4)).expect("id tier matches");
         assert_eq!(matched.method, LinkMethod::ExternalId);
         assert!(matched.moved, "1x01 becoming 1x04 is a move");
-    }
-
-    /// Jujutsu Kaisen: the TMDB tree is one flat season of 59, every
-    /// release the operator's own trackers carry is cut 24 / 23 / 12, and
-    /// the operator has already written down which is which.
-    ///
-    /// The air dates here are shifted by exactly one day, which is the
-    /// shape of the failure this tier exists to beat: a uniform shift
-    /// consumes every row on both sides, so the calendar answers for
-    /// every episode and answers wrong, and no orphan is left behind to
-    /// give it away. The second half of the test is the load-bearing
-    /// half — with the translation withdrawn, the same fixture pairs
-    /// `S02E01` to the episode *after* the right one.
-    #[test]
-    fn the_stored_translation_beats_air_date() {
-        const BLOCKS: [i32; 3] = [24, 23, 12];
-
-        let stored_rows: Vec<Episode> = (1..=59)
-            .map(|n| Episode {
-                air_date: Some(day(i64::from(n))),
-                ..owned(1, n, &format!("tmdb-{n}"))
-            })
-            .collect();
-
-        // The tree as TheTVDB cuts it, every date one day late.
-        let mut flat = 0_i64;
-        let seasons: Vec<TreeSeason> = BLOCKS
-            .iter()
-            .enumerate()
-            .map(|(index, count)| {
-                let episodes = (1..=*count)
-                    .map(|n| {
-                        flat += 1;
-                        TreeEpisode {
-                            air_date: Some(day(flat + 1)),
-                            ..ep(n, &format!("tvdb-{flat}"))
-                        }
-                    })
-                    .collect();
-                incoming(i32::try_from(index).unwrap() + 1, episodes)
-            })
-            .collect();
-        let incoming_tree = tree(MetadataSource::Tvdb, seasons);
-
-        // What the operator verified: the first two blocks, 47 of 59.
-        // The third is deliberately left out — a group covers what it
-        // covers, and an episode outside it has to reach a lower tier
-        // rather than vanish.
-        let mut translation = Translation::new();
-        for n in 1..=BLOCKS[0] {
-            translation.insert((1, n), (1, n));
-        }
-        for n in 1..=BLOCKS[1] {
-            translation.insert((2, n), (1, BLOCKS[0] + n));
-        }
-
-        let by_coord: HashMap<(i32, i32), Uuid> = stored_rows
-            .iter()
-            .map(|e| ((e.season_number, e.episode_number), e.id))
-            .collect();
-
-        let paired = pair(&stored_rows, &incoming_tree, &translation);
-
-        for (incoming_coord, stored_coord) in &translation {
-            let got = paired
-                .by_coordinate
-                .get(incoming_coord)
-                .expect("every translated coordinate pairs with something");
-            assert_eq!(
-                got.method,
-                LinkMethod::Operator,
-                "{incoming_coord:?} should link on what the operator declared"
-            );
-            assert_eq!(
-                got.stored_id, by_coord[stored_coord],
-                "{incoming_coord:?} should be stored {stored_coord:?}"
-            );
-        }
-
-        // And the same fixture without it: the calendar takes S02E01 to
-        // the episode after the right one, which is the whole reason the
-        // 833 rows outrank it.
-        let alone = pair_alone(&stored_rows, &incoming_tree);
-        let drifted = alone.by_coordinate[&(2, 1)];
-        assert_eq!(drifted.method, LinkMethod::AirDate);
-        assert_eq!(drifted.stored_id, by_coord[&(1, 26)]);
-        assert_ne!(drifted.stored_id, by_coord[&(1, 25)]);
     }
 
     // ------------------------------------------------------------------
@@ -1469,96 +1265,6 @@ mod tests {
         .await
         .unwrap()
         .expect("the barrier lets a first reservation through");
-    }
-
-    /// One row of a translation: the search coordinate and the catalogue
-    /// coordinate it names.
-    type Rewrite = ((i32, i32), (i32, i32));
-
-    /// Write a translation the way the sweeps do, so the test exercises
-    /// the real writer rather than an INSERT of its own.
-    async fn translate(pool: &DbPool, item: Uuid, pairs: &[Rewrite]) {
-        let rows: Vec<episode_numbering::NumberingRow> = pairs
-            .iter()
-            .map(|((gs, ge), (cs, ce))| episode_numbering::NumberingRow {
-                part_order: *gs,
-                part_name: None,
-                group: episode_numbering::Numbering {
-                    season: *gs,
-                    episode: *ge,
-                },
-                canonical: episode_numbering::Numbering {
-                    season: *cs,
-                    episode: *ce,
-                },
-                tmdb_episode_id: None,
-            })
-            .collect();
-        episode_numbering::apply_derived(pool, item, episode_numbering::Source::Tvdb, &rows)
-            .await
-            .unwrap();
-    }
-
-    /// The gate under [`LinkMethod::Operator`], asserted where it lives.
-    ///
-    /// A translation says how far apart two numberings are. Read while
-    /// the incoming tree already speaks the stored one, its keys mean
-    /// something else and a hit is a confident wrong answer — so the
-    /// refresh that runs every half hour must never see it, and only a
-    /// change of owner or of ordering may.
-    #[tokio::test]
-    async fn a_refresh_in_the_same_ordering_never_reads_the_translation() {
-        let pool = open_memory().await.unwrap();
-        let item = series_with(&pool, &[20], true).await;
-
-        // Deliberately wrong: every episode one to the left. If this is
-        // ever read on a refresh, it drifts the whole season.
-        let pairs: Vec<Rewrite> = (1..=20).map(|n| ((1, n), (1, n % 20 + 1))).collect();
-        translate(&pool, item, &pairs).await;
-
-        let owner = library::structure_owner(&pool, item).await.unwrap();
-        let seasons = vec![incoming(
-            1,
-            (1..=20).map(|n| ep(n, &format!("x-{n}"))).collect(),
-        )];
-
-        let refresh = tree(MetadataSource::Tmdb, seasons.clone());
-        assert!(
-            translation_for(&pool, item, &owner, &refresh)
-                .await
-                .unwrap()
-                .is_empty(),
-            "a TMDB refresh of a TMDB-owned tree must not consult the translation"
-        );
-
-        // A different owner is a change.
-        let to_tvdb = tree(MetadataSource::Tvdb, seasons.clone());
-        assert_eq!(
-            translation_for(&pool, item, &owner, &to_tvdb)
-                .await
-                .unwrap()
-                .len(),
-            20
-        );
-
-        // So is the same owner under a different ordering — which is the
-        // `'tmdb'` legacy destination, an episode group on the same
-        // provider.
-        let to_group = SeriesTree {
-            source: MetadataSource::Tmdb,
-            ordering: Ordering::Named {
-                family: brarr_core::OrderingFamily::Alternate,
-                handle: "1a2b3c".into(),
-            },
-            seasons,
-        };
-        assert_eq!(
-            translation_for(&pool, item, &owner, &to_group)
-                .await
-                .unwrap()
-                .len(),
-            20
-        );
     }
 
     /// A series of 20 in one season, cut 12 / 8 by the operator.
@@ -1801,54 +1507,50 @@ mod tests {
     /// owner would otherwise refuse — while every gate that protects a
     /// *file* still runs, which is why the assertion on `links` is the
     /// real one.
-    /// TMDB's shape for Dragon Ball Super: one flat season, numeric
-    /// external ids because that is what TMDB's episode ids are — and
-    /// what makes `tmdb_episode_id` land, which is what the return trip
-    /// pairs on.
-    fn dbs_flat(episodes: i32) -> SeriesTree {
-        tree(
-            MetadataSource::Tmdb,
-            vec![incoming(
-                1,
-                (1..=episodes)
-                    .map(|n| TreeEpisode {
-                        air_date: Some(day(i64::from(n))),
-                        ..ep(n, &(5_000_000 + n).to_string())
-                    })
-                    .collect(),
-            )],
-        )
-    }
-
-    /// TheTVDB's cut of the same series, and the translation that says
-    /// which of its coordinates is which of TMDB's.
-    fn dbs_cut(shape: &[i32]) -> (SeriesTree, Vec<Rewrite>) {
+    /// One TheTVDB tree, under a named ordering, with stable episode ids.
+    ///
+    /// The ids do not change with the ordering, which is the property the
+    /// whole design rests on: TheTVDB returns the *same* episodes under
+    /// every season type, so two orderings of one series join on identity
+    /// rather than on a guess.
+    fn tvdb_tree(shape: &[i32], ordering: Ordering) -> SeriesTree {
         let mut flat = 0_i64;
-        let mut translation: Vec<Rewrite> = Vec::new();
         let seasons = shape
             .iter()
             .enumerate()
             .map(|(index, count)| {
-                let season = i32::try_from(index).unwrap() + 1;
                 let episodes = (1..=*count)
                     .map(|n| {
                         flat += 1;
-                        translation.push(((season, n), (1, i32::try_from(flat).unwrap())));
                         TreeEpisode {
                             air_date: Some(day(flat)),
                             ..ep(n, &format!("tvdb-{flat}"))
                         }
                     })
                     .collect();
-                incoming(season, episodes)
+                incoming(i32::try_from(index).unwrap() + 1, episodes)
             })
             .collect();
-        (tree(MetadataSource::Tvdb, seasons), translation)
+        SeriesTree {
+            source: MetadataSource::Tvdb,
+            ordering,
+            seasons,
+        }
     }
 
+    /// **The test that says an ordering is safe to change.** Dragon Ball
+    /// Super goes from TheTVDB's broadcast cut to a flat one and back,
+    /// and every row and every acquisition survives both trips.
+    ///
+    /// This is the shape the whole refactor exists to reach: one owner,
+    /// two of its own orderings, and a join on the provider's own episode
+    /// ids. No air date is consulted, no absolute axis, nothing is
+    /// compared across catalogues — the tier that carries it is
+    /// [`LinkMethod::Owner`], and the test asserts that rather than
+    /// hoping for it.
     #[tokio::test]
-    async fn a_flip_is_reversible() {
-        const SHAPE: [i32; 5] = [14, 13, 19, 30, 55];
+    async fn changing_ordering_under_one_owner_is_reversible() {
+        const BROADCAST: [i32; 5] = [14, 13, 19, 30, 55];
 
         let pool = open_memory().await.unwrap();
         let provider_id = provider(&pool).await;
@@ -1856,41 +1558,12 @@ mod tests {
             .await
             .unwrap()
             .id;
-        let canonical = dbs_flat(131);
-        apply(&pool, item, &canonical).await.unwrap();
 
-        // Hang acquisitions off episodes spread across what will become
-        // four different seasons.
-        let stored = library::episodes(&pool, item).await.unwrap();
-        for n in [1_usize, 20, 60, 130] {
-            grab_on(&pool, item, provider_id, stored[n].id, &format!("dbs-{n}")).await;
-        }
-
-        let before = fingerprint(&pool, item).await;
-        let links_before = links(&pool, item).await;
-        assert_eq!(before.len(), 131);
-
-        // Out: TheTVDB's cut. The stored rows are TMDB-owned, so the
-        // pairing reaches neither identity tier and rests on the
-        // translation the operator verified — the flip as it really
-        // happens.
-        let (out, translation) = dbs_cut(&SHAPE);
-        translate(&pool, item, &translation).await;
-        let outbound = plan(&pool, item, &out).await.unwrap();
-        assert!(
-            outbound
-                .pairs
-                .iter()
-                .all(|p| p.method == LinkMethod::Operator),
-            "the trip out is the flip as it really happens: neither identity tier \
-             can reach a TheTVDB tree from TMDB-owned rows, so it rests on what the \
-             operator verified"
-        );
-
+        let broadcast = tvdb_tree(&BROADCAST, Ordering::Default);
         apply_with(
             &pool,
             item,
-            &out,
+            &broadcast,
             &Intent::Choice {
                 pinned: false,
                 recipe: None,
@@ -1899,38 +1572,58 @@ mod tests {
         .await
         .unwrap();
 
-        let moved = fingerprint(&pool, item).await;
-        assert_eq!(moved.len(), 131, "no row was added or pruned");
-        assert_eq!(
-            moved.iter().map(|(id, ..)| *id).collect::<HashSet<_>>(),
-            before.iter().map(|(id, ..)| *id).collect::<HashSet<_>>(),
-            "every UUID survived the trip out"
-        );
-        assert_eq!(library::seasons(&pool, item).await.unwrap().len(), 5);
-        assert_eq!(
-            links(&pool, item).await,
-            links_before,
-            "no acquisition changed episode on the way out"
-        );
+        // Acquisitions spread across four of the five seasons.
+        let stored = library::episodes(&pool, item).await.unwrap();
+        for n in [1_usize, 20, 60, 130] {
+            grab_on(&pool, item, provider_id, stored[n].id, &format!("dbs-{n}")).await;
+        }
+        let before = fingerprint(&pool, item).await;
+        let links_before = links(&pool, item).await;
+        assert_eq!(before.len(), 131);
 
-        // Back: TMDB's flat season. The translation does not apply in
-        // this direction and does not need to — `tmdb_episode_id` is
-        // `COALESCE`d and so survived the trip out, which is what makes
-        // the return exact rather than a guess.
-        let back = canonical;
-        let inbound = plan(&pool, item, &back).await.unwrap();
+        // Out: the same 131 episodes, numbered straight through.
+        let flat = tvdb_tree(
+            &[131],
+            Ordering::Named {
+                family: OrderingFamily::Absolute,
+                handle: "absolute".into(),
+            },
+        );
+        let outbound = plan(&pool, item, &flat).await.unwrap();
         assert!(
-            inbound
-                .pairs
-                .iter()
-                .all(|p| p.method == LinkMethod::ExternalId),
-            "an id can be set but never cleared, so the way home is identity"
+            outbound.pairs.iter().all(|p| p.method == LinkMethod::Owner),
+            "one owner's two orderings join on its own episode ids, never on a heuristic"
         );
 
         apply_with(
             &pool,
             item,
-            &back,
+            &flat,
+            &Intent::Choice {
+                pinned: true,
+                recipe: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(library::seasons(&pool, item).await.unwrap().len(), 1);
+        assert_eq!(
+            fingerprint(&pool, item)
+                .await
+                .iter()
+                .map(|(id, ..)| *id)
+                .collect::<HashSet<_>>(),
+            before.iter().map(|(id, ..)| *id).collect::<HashSet<_>>(),
+            "every UUID survived the trip out"
+        );
+        assert_eq!(links(&pool, item).await, links_before);
+
+        // Back.
+        apply_with(
+            &pool,
+            item,
+            &broadcast,
             &Intent::Choice {
                 pinned: false,
                 recipe: None,
@@ -1950,68 +1643,6 @@ mod tests {
             "and every acquisition still names the episode it always did"
         );
         assert_eq!(orphan_count(&pool).await, 0);
-    }
-
-    /// The translation and the new tree cannot both be in force.
-    ///
-    /// A translation is a *distance* between two numberings. Once the
-    /// tree is rebuilt in the release numbering the distance is zero,
-    /// and applying the stored one anyway sends the sweep further from
-    /// the target than it was before the title was corrected — a
-    /// regression that looks exactly like the defect the flip exists to
-    /// fix, which is the worst way for it to present.
-    #[tokio::test]
-    async fn a_choice_retires_the_translation_it_replaces() {
-        let pool = open_memory().await.unwrap();
-        let item = series_with(&pool, &[20], true).await;
-
-        let pairs: Vec<Rewrite> = (1..=20).map(|n| ((2, n), (1, n))).collect();
-        translate(&pool, item, &pairs).await;
-        assert_eq!(
-            episode_numbering::for_item(&pool, item)
-                .await
-                .unwrap()
-                .len(),
-            20
-        );
-
-        let declared = tree(
-            MetadataSource::Tmdb,
-            vec![incoming(
-                1,
-                (1..=20)
-                    .map(|n| TreeEpisode {
-                        air_date: Some(day(i64::from(n))),
-                        ..ep(n, &format!("tmdb-{n}"))
-                    })
-                    .collect(),
-            )],
-        );
-        apply_with(
-            &pool,
-            item,
-            &declared,
-            &Intent::Choice {
-                pinned: true,
-                recipe: None,
-            },
-        )
-        .await
-        .unwrap();
-
-        assert!(
-            episode_numbering::for_item(&pool, item)
-                .await
-                .unwrap()
-                .is_empty(),
-            "the tree is the numbering now; translating again applies the distance twice"
-        );
-        // `'off'` and not NULL, or the \*arr sweep re-derives one within
-        // the half hour over a tree that no longer needs it.
-        assert_eq!(
-            episode_numbering::source(&pool, item).await.unwrap(),
-            Some(episode_numbering::Source::Off)
-        );
     }
 
     async fn orphan_count(pool: &DbPool) -> i64 {
