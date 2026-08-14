@@ -84,6 +84,12 @@ impl Seed {
         self
     }
 
+    /// The TheTVDB id.
+    pub(crate) fn tvdb(mut self, tvdb: i64) -> Self {
+        self.new.tvdb_id = Some(tvdb);
+        self
+    }
+
     /// The value, unsaved.
     ///
     /// Every caller hands it straight to `library::upsert`, so the

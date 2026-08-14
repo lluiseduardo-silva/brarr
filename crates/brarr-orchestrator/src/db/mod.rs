@@ -14,6 +14,7 @@ pub mod download_clients;
 pub mod episode_numbering;
 pub mod grabs;
 pub mod ignored_paths;
+pub mod item_ids;
 pub mod library;
 pub mod maintenance;
 pub mod metrics;
@@ -26,6 +27,7 @@ pub mod searches;
 #[cfg(test)]
 pub(crate) mod seed;
 pub mod settings;
+pub mod sources;
 pub mod webhook_events;
 
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
@@ -63,6 +65,11 @@ pub async fn open(path: &str) -> Result<SqlitePool, AppError> {
         .await?;
 
     sqlx::migrate!("./migrations").run(&pool).await?;
+    // After the migrations and before anything can reference a source.
+    // The seed lives in a migration; this reconciles it with the enum, so
+    // a provider added in Rust after that migration shipped has its row
+    // by the time the first write points a foreign key at it.
+    sources::ensure(&pool).await?;
 
     Ok(pool)
 }
@@ -82,6 +89,7 @@ pub async fn open_memory() -> Result<SqlitePool, AppError> {
         .connect_with(opts)
         .await?;
     sqlx::migrate!("./migrations").run(&pool).await?;
+    sources::ensure(&pool).await?;
     Ok(pool)
 }
 

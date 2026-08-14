@@ -48,9 +48,9 @@ impl fmt::Display for MediaType {
 /// What a source *is*, which decides what may be asked of it.
 ///
 /// Mirrors the `metadata_sources.kind` column. The distinction is not
-/// decoration: it is what makes [`ExternalId::new`] able to refuse an
-/// identity for a source that does not issue identities, instead of
-/// storing a row nothing can ever resolve.
+/// decoration: the registry builds a client for one kind and must never
+/// try for the other, while both are legitimate keys in
+/// `library_item_ids`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceKind {
     /// A crate talks to it, and it answers questions.
@@ -58,8 +58,6 @@ pub enum SourceKind {
     /// It issues ids brarr stores and passes to trackers, but brarr
     /// never queries it. IMDb is the whole category.
     Namespace,
-    /// The operator is the source. Carries decisions, never identities.
-    Operator,
 }
 
 /// Every catalogue brarr knows a title by.
@@ -83,9 +81,14 @@ pub enum MetadataSource {
     Tvdb,
     /// IMDb — an id namespace brarr stores and never queries.
     Imdb,
-    /// The operator, speaking for themselves.
-    Manual,
 }
+
+// There is deliberately no `Manual`. The old numbering column had one and
+// nothing in this schema can carry it: blocks the operator declares are
+// `structure_family = 'manual'` with the provider still owning
+// `structure_source`, and an id the operator types by hand is that
+// namespace's id with `verified_at` left NULL. A variant nothing can
+// write is one every `match` has to answer for anyway.
 
 impl MetadataSource {
     /// Iteration order, defined by an exhaustive `match` rather than by
@@ -101,8 +104,7 @@ impl MetadataSource {
         match self {
             Self::Tmdb => Some(Self::Tvdb),
             Self::Tvdb => Some(Self::Imdb),
-            Self::Imdb => Some(Self::Manual),
-            Self::Manual => None,
+            Self::Imdb => None,
         }
     }
 
@@ -118,7 +120,6 @@ impl MetadataSource {
             Self::Tmdb => "tmdb",
             Self::Tvdb => "tvdb",
             Self::Imdb => "imdb",
-            Self::Manual => "manual",
         }
     }
 
@@ -129,7 +130,6 @@ impl MetadataSource {
             Self::Tmdb => "TMDB",
             Self::Tvdb => "TheTVDB",
             Self::Imdb => "IMDb",
-            Self::Manual => "Manual",
         }
     }
 
@@ -139,7 +139,6 @@ impl MetadataSource {
         match self {
             Self::Tmdb | Self::Tvdb => SourceKind::Provider,
             Self::Imdb => SourceKind::Namespace,
-            Self::Manual => SourceKind::Operator,
         }
     }
 
@@ -184,14 +183,10 @@ impl ExternalId {
     ///
     /// # Errors
     ///
-    /// [`ExternalIdError::NotAnIdentity`] for a source that issues no
-    /// identities, [`ExternalIdError::Empty`] for a blank value, and
-    /// [`ExternalIdError::Malformed`] for anything not shaped the way
-    /// the source shapes it.
+    /// [`ExternalIdError::Empty`] for a blank value, and
+    /// [`ExternalIdError::Malformed`] for anything not shaped the way the
+    /// source shapes it.
     pub fn new(source: MetadataSource, raw: &str) -> Result<Self, ExternalIdError> {
-        if source.kind() == SourceKind::Operator {
-            return Err(ExternalIdError::NotAnIdentity { origin: source });
-        }
         let trimmed = raw.trim();
         if trimmed.is_empty() {
             return Err(ExternalIdError::Empty { origin: source });
@@ -199,12 +194,6 @@ impl ExternalId {
         let value = match source {
             MetadataSource::Imdb => canonical_imdb(trimmed)?,
             MetadataSource::Tmdb | MetadataSource::Tvdb => canonical_numeric(source, trimmed)?,
-            // Unreachable via the guard above, and spelled out rather
-            // than wildcarded so a new operator-kind source has to be
-            // placed here deliberately.
-            MetadataSource::Manual => {
-                return Err(ExternalIdError::NotAnIdentity { origin: source });
-            }
         };
         Ok(Self {
             source,
@@ -288,12 +277,6 @@ fn canonical_numeric(source: MetadataSource, raw: &str) -> Result<String, Extern
 /// Why a value could not become an [`ExternalId`].
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ExternalIdError {
-    /// The source issues decisions, not identities.
-    #[error("{origin} is not an id namespace")]
-    NotAnIdentity {
-        /// The source that was asked.
-        origin: MetadataSource,
-    },
     /// Nothing but whitespace.
     #[error("{origin} id cannot be empty")]
     Empty {
@@ -324,7 +307,7 @@ mod tests {
     #[test]
     fn all_lists_every_variant() {
         let listed: Vec<_> = MetadataSource::all().collect();
-        assert_eq!(listed.len(), 4, "a variant is missing from next()");
+        assert_eq!(listed.len(), 3, "a variant is missing from next()");
         for source in MetadataSource::all() {
             assert!(!source.label().is_empty());
             assert!(!source.display_name().is_empty());
@@ -394,18 +377,6 @@ mod tests {
         assert!(ExternalId::new(MetadataSource::Imdb, "tt0000000").is_err());
     }
 
-    /// The operator is a source of decisions, not of identities, and a
-    /// row saying otherwise is one nothing can ever resolve.
-    #[test]
-    fn an_operator_source_issues_no_identity() {
-        assert_eq!(
-            ExternalId::new(MetadataSource::Manual, "whatever"),
-            Err(ExternalIdError::NotAnIdentity {
-                origin: MetadataSource::Manual
-            })
-        );
-    }
-
     /// Every source is classified, so a new one cannot inherit a default.
     #[test]
     fn every_source_declares_what_it_is() {
@@ -417,14 +388,12 @@ mod tests {
             vec![MetadataSource::Tmdb, MetadataSource::Tvdb],
             "the providers are the two with a client crate"
         );
-        // And identity construction follows the classification, rather
-        // than being decided a second time somewhere else.
+        // Every source can key an item; the kind decides whether brarr
+        // ever *asks* one anything, not whether it can be keyed on.
         for source in MetadataSource::all() {
-            let issues = ExternalId::new(source, "1").is_ok();
-            assert_eq!(
-                issues,
-                source.kind() != SourceKind::Operator,
-                "{source} disagrees with its own kind"
+            assert!(
+                ExternalId::new(source, "1").is_ok(),
+                "{source} cannot key an item"
             );
         }
     }

@@ -72,10 +72,10 @@ impl MetadataProvider for TmdbClient {
                     let numeric = i64::from(known.as_u32().map_err(MetadataError::BadId)?);
                     self.find_by_tvdb(numeric).await
                 }
-                // `Manual` cannot construct an `ExternalId` at all, and
-                // `Tmdb` returned above. Spelled out so a new source has
-                // to be placed here rather than silently finding nothing.
-                MetadataSource::Manual | MetadataSource::Tmdb => {
+                // `Tmdb` returned above. Spelled out rather than
+                // wildcarded so a new source has to be placed here
+                // deliberately instead of silently finding nothing.
+                MetadataSource::Tmdb => {
                     return Err(MetadataError::Unsupported {
                         origin: MetadataSource::Tmdb,
                         capability: "find",

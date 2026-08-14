@@ -13,6 +13,9 @@ use sqlx::{Row, sqlite::SqliteRow};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
+use brarr_core::{ExternalId, MetadataSource};
+
+use crate::db::item_ids;
 use crate::{AppError, db::Pool};
 
 /// Movie or series. Persisted as the short label in `media_type`.
@@ -426,7 +429,51 @@ pub async fn upsert(pool: &Pool, new: &NewLibraryItem) -> Result<LibraryItem, Ap
     .bind(now)
     .execute(pool)
     .await?;
-    get_by_tmdb(pool, media_type, new.tmdb_id).await
+    let stored = get_by_tmdb(pool, media_type, new.tmdb_id).await?;
+    write_identity(pool, &stored).await?;
+    Ok(stored)
+}
+
+/// Mirror the three identity columns into `library_item_ids`.
+///
+/// The double write exists for one phase only. Two sources of truth is
+/// where this repository's defects hide, so it comes with a date to
+/// close: the readers move next, the columns come out with the wipe that
+/// precedes the re-import, and this function goes with them.
+///
+/// Deliberately **not** transactional with the row above. A failure here
+/// would otherwise roll back a catalogue write over a table nothing reads
+/// yet; the reconciliation is a `SELECT` away for as long as both forms
+/// exist, and after that the new form is the only one.
+async fn write_identity(pool: &Pool, item: &LibraryItem) -> Result<(), AppError> {
+    let mut ids = Vec::with_capacity(3);
+    if let Ok(id) = ExternalId::new(MetadataSource::Tmdb, &item.tmdb_id.to_string()) {
+        ids.push(id);
+    }
+    if let Some(raw) = item.imdb_id.as_deref()
+        && let Ok(id) = ExternalId::new(MetadataSource::Imdb, raw)
+    {
+        ids.push(id);
+    }
+    if let Some(raw) = item.tvdb_id
+        && let Ok(id) = ExternalId::new(MetadataSource::Tvdb, &raw.to_string())
+    {
+        ids.push(id);
+    }
+    for id in &ids {
+        // Asserted, never vouched: these came off a column that records
+        // only the value, not who confirmed it. Claiming otherwise would
+        // stop a sweep from ever checking a pairing nobody checked.
+        item_ids::put(
+            pool,
+            item.id,
+            item.media_type,
+            id,
+            item_ids::Verification::Asserted,
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 /// Fetch one entry by primary key.
@@ -1319,8 +1366,14 @@ mod tests {
     use crate::db::open_memory;
     use crate::db::seed::{self, Seed};
 
+    /// The IMDb id is derived from the TMDB one rather than fixed:
+    /// `library_item_ids` is UNIQUE on `(source, media_type, external_id)`,
+    /// and a constant here gave every film in a fixture the same IMDb
+    /// identity — two different movies claiming to be The Matrix.
     fn movie(tmdb_id: i64, title: &str) -> NewLibraryItem {
-        Seed::movie(tmdb_id, title).imdb("tt0133093").build()
+        Seed::movie(tmdb_id, title)
+            .imdb(&format!("tt{tmdb_id:07}"))
+            .build()
     }
 
     #[tokio::test]
