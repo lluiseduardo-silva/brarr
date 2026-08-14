@@ -71,6 +71,11 @@ pub struct TvdbClient {
     auth: TvdbAuth,
     token: Arc<Mutex<Option<String>>>,
     retry: RetryConfig,
+    /// Languages to try for episode names, in order, before falling back
+    /// to the original. Empty means "ask for no language", which is what
+    /// this client did before [`Self::with_languages`] existed and what
+    /// made every Frieren episode read `冒険の終わり`.
+    languages: Vec<String>,
 }
 
 impl TvdbClient {
@@ -103,7 +108,29 @@ impl TvdbClient {
             auth,
             token: Arc::new(Mutex::new(None)),
             retry: RetryConfig::default(),
+            languages: Vec::new(),
         })
+    }
+
+    /// The languages episode names are asked for, in order.
+    ///
+    /// The original is always the last resort and is never listed here —
+    /// it is what the untranslated request returns, and it is a fallback
+    /// rather than a preference. See [`Self::series_episodes_in`].
+    #[must_use]
+    pub fn with_languages<I, S>(mut self, languages: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.languages = languages.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// The configured chain, for the impl that dispatches on it.
+    #[must_use]
+    pub fn languages(&self) -> Vec<&str> {
+        self.languages.iter().map(String::as_str).collect()
     }
 
     /// Replace the retry policy.
@@ -159,7 +186,95 @@ impl TvdbClient {
         season_type: SeasonType,
         season: Option<i32>,
     ) -> Result<SeriesEpisodes, TvdbError> {
-        let path = format!("series/{series_id}/episodes/{}", season_type.as_str());
+        self.walk_episodes(series_id, season_type, season, None)
+            .await
+    }
+
+    /// A series' episodes, named in the first language that has a name
+    /// for each one.
+    ///
+    /// **The fallback is per episode, and it has to be.** Measured live
+    /// on 2026-08-14: Frieren has 0 of 66 episodes translated into
+    /// Portuguese and 65 of 66 into English, while Doctor Who has 154 of
+    /// 322 in Portuguese — so a series-level "does it have Portuguese?"
+    /// would either leave half of Doctor Who in English or all of
+    /// Frieren in Japanese. Without any of this brarr stored the raw
+    /// `name`, which is the **original** language: `冒険の終わり`.
+    ///
+    /// The join key is [`Episode::id`], stable across season types and
+    /// therefore across languages — the same property that lets two
+    /// orderings of one series be joined by identity.
+    ///
+    /// `languages` is tried in order and the untranslated request is
+    /// always last, because the original is a fallback and never a
+    /// preference. **A walk is skipped the moment no gap is left**: a
+    /// fully translated series costs one request, not three, which over
+    /// 180 series is the difference between a refresh and a rate limit.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::series_episodes`]. A language the series has no
+    /// translation for is not an error — it answers with null names.
+    pub async fn series_episodes_in(
+        &self,
+        series_id: i64,
+        season_type: SeasonType,
+        season: Option<i32>,
+        languages: &[&str],
+    ) -> Result<SeriesEpisodes, TvdbError> {
+        let mut out: Option<SeriesEpisodes> = None;
+
+        for language in languages.iter().map(Some).chain(std::iter::once(None)) {
+            // Nothing left to name: stop before spending the request.
+            if out
+                .as_ref()
+                .is_some_and(|found| found.episodes.iter().all(|e| e.name.is_some()))
+            {
+                break;
+            }
+            let page = self
+                .walk_episodes(series_id, season_type, season, language.copied())
+                .await?;
+            match out.as_mut() {
+                // The first walk establishes the set — coordinates, air
+                // dates, ids. Later ones only supply names, so a
+                // language that answers with a shorter list cannot drop
+                // an episode from the tree.
+                None => out = Some(page),
+                Some(found) => {
+                    let named: std::collections::HashMap<i64, String> = page
+                        .episodes
+                        .into_iter()
+                        .filter_map(|e| e.name.map(|n| (e.id, n)))
+                        .collect();
+                    for episode in &mut found.episodes {
+                        if episode.name.is_none()
+                            && let Some(name) = named.get(&episode.id)
+                        {
+                            episode.name = Some(name.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        out.ok_or(TvdbError::RunawayPagination(0))
+    }
+
+    async fn walk_episodes(
+        &self,
+        series_id: i64,
+        season_type: SeasonType,
+        season: Option<i32>,
+        language: Option<&str>,
+    ) -> Result<SeriesEpisodes, TvdbError> {
+        let path = match language {
+            Some(lang) => format!(
+                "series/{series_id}/episodes/{}/{lang}",
+                season_type.as_str()
+            ),
+            None => format!("series/{series_id}/episodes/{}", season_type.as_str()),
+        };
         let mut out = SeriesEpisodes::default();
         let mut seen: std::collections::HashSet<i64> = std::collections::HashSet::new();
 

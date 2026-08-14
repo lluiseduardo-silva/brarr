@@ -583,3 +583,133 @@ async fn the_absolute_axis_is_one_run_of_131() {
         "the absolute axis carries no specials"
     );
 }
+
+/// One episode with an explicit name, so a test can say "untranslated"
+/// by passing `None` — which is exactly what the API sends.
+fn named(id: i64, season: i64, number: i64, name: Option<&str>) -> serde_json::Value {
+    json!({
+        "id": id,
+        "name": name,
+        "seasonNumber": season,
+        "number": number,
+        "absoluteNumber": null,
+        "aired": "2023-09-29",
+    })
+}
+
+fn page(episodes: &[serde_json::Value]) -> serde_json::Value {
+    json!({
+        "status": "success",
+        "data": {
+            "series": { "id": 424_536, "name": "Sōsō no Frieren" },
+            "episodes": episodes,
+        },
+        "links": { "next": null, "total_items": episodes.len(), "page_size": 500 }
+    })
+}
+
+/// **The names brarr stored were the original language, because it never
+/// asked for one.** Measured live on 2026-08-14: Frieren's episodes come
+/// back as `冒険の終わり`, Portuguese has 0 of 66 translated and English
+/// 65 of 66. Doctor Who has 154 of 322 in Portuguese — so the fallback is
+/// **per episode**, never per series.
+///
+/// The join key is `TheTVDB`'s episode id, which is stable across season
+/// types and therefore across languages too.
+#[tokio::test]
+async fn an_untranslated_episode_falls_back_through_the_chain() {
+    let server = MockServer::start().await;
+    mock_login(&server).await;
+
+    // Portuguese: one of the three, the way Doctor Who looks.
+    Mock::given(method("GET"))
+        .and(path("/v4/series/424536/episodes/official/por"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(page(&[
+            named(1, 1, 1, Some("O Fim da Jornada")),
+            named(2, 1, 2, None),
+            named(3, 1, 3, None),
+        ])))
+        .mount(&server)
+        .await;
+    // English fills the second; the third is the one only the original
+    // has, which is Frieren's shape.
+    Mock::given(method("GET"))
+        .and(path("/v4/series/424536/episodes/official/eng"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(page(&[
+            named(1, 1, 1, Some("The Journey's End")),
+            named(2, 1, 2, Some("It Didn't Have to Be Magic")),
+            named(3, 1, 3, None),
+        ])))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v4/series/424536/episodes/official"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(page(&[
+            named(1, 1, 1, Some("冒険の終わり")),
+            named(2, 1, 2, Some("別に魔法じゃなくたって…")),
+            named(3, 1, 3, Some("人を殺す魔法")),
+        ])))
+        .mount(&server)
+        .await;
+
+    let found = client(&server)
+        .series_episodes_in(424_536, SeasonType::Official, None, &["por", "eng"])
+        .await
+        .unwrap();
+
+    let name = |id: i64| {
+        found
+            .episodes
+            .iter()
+            .find(|e| e.id == id)
+            .and_then(|e| e.name.clone())
+    };
+    assert_eq!(
+        name(1).as_deref(),
+        Some("O Fim da Jornada"),
+        "português vence"
+    );
+    assert_eq!(
+        name(2).as_deref(),
+        Some("It Didn't Have to Be Magic"),
+        "inglês preenche o que o português não tem"
+    );
+    assert_eq!(
+        name(3).as_deref(),
+        Some("人を殺す魔法"),
+        "e o original é o último recurso, nunca o primeiro"
+    );
+    assert_eq!(found.episodes.len(), 3, "o conjunto não muda com o idioma");
+}
+
+/// A series fully translated costs **one** request, not three. The walk
+/// is skipped the moment nothing is left to fill — over 180 series that
+/// is the difference between a refresh and a rate limit.
+#[tokio::test]
+async fn a_fully_translated_series_asks_once() {
+    let server = MockServer::start().await;
+    mock_login(&server).await;
+    Mock::given(method("GET"))
+        .and(path("/v4/series/424536/episodes/official/por"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(page(&[
+            named(1, 1, 1, Some("O Fim da Jornada")),
+            named(2, 1, 2, Some("Não Precisava Ser Magia")),
+        ])))
+        .expect(1)
+        .mount(&server)
+        .await;
+    // Mounted with `expect(0)`: reaching English would mean the walk
+    // does not stop when the gap closes.
+    Mock::given(method("GET"))
+        .and(path("/v4/series/424536/episodes/official/eng"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(page(&[])))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let found = client(&server)
+        .series_episodes_in(424_536, SeasonType::Official, None, &["por", "eng"])
+        .await
+        .unwrap();
+    assert_eq!(found.episodes.len(), 2);
+}

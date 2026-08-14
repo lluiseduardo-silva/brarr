@@ -101,7 +101,9 @@ impl Registry {
                 // is a refused login rather than the same thing.
                 pin: value(settings::KEY_TVDB_PIN),
             }) {
-                Ok(client) => built.push(Arc::new(client)),
+                Ok(client) => built.push(Arc::new(client.with_languages(episode_languages(
+                    value(settings::KEY_TMDB_LANGUAGE).as_deref(),
+                )))),
                 Err(e) => warn_unbuildable(MetadataSource::Tvdb, &e.to_string()),
             }
         }
@@ -211,6 +213,50 @@ fn credentials_of(source: MetadataSource) -> &'static [CredentialField] {
         // No client, no credential. brarr stores IMDb ids and never calls
         // IMDb, so there is nothing to configure.
         MetadataSource::Imdb => &[],
+    }
+}
+
+/// The languages TheTVDB episode names are asked for, in order.
+///
+/// **English is always in the chain and always after the operator's
+/// language.** Measured on this catalogue: Frieren has 0 of 66 episodes
+/// in Portuguese and 65 of 66 in English, so a chain of one would leave
+/// the whole series in Japanese; Doctor Who has 154 of 322 in
+/// Portuguese, so dropping English would leave half of it untitled. The
+/// original is not listed because it is not a preference — it is what
+/// the untranslated request returns when both have nothing.
+///
+/// Derived from the metadata language already configured rather than
+/// from a setting of its own: an operator who set `pt-BR` for TMDB has
+/// said what language they read. TheTVDB speaks ISO 639-3, so the tag is
+/// mapped; **an unmapped tag yields English alone**, which is a worse
+/// answer than their language and a much better one than Japanese.
+fn episode_languages(tag: Option<&str>) -> Vec<&'static str> {
+    let preferred = tag
+        .map(|t| t.trim().to_ascii_lowercase())
+        .and_then(|t| tvdb_language(t.split(['-', '_']).next().unwrap_or_default()));
+    match preferred {
+        Some("eng") | None => vec!["eng"],
+        Some(other) => vec![other, "eng"],
+    }
+}
+
+/// An ISO 639-1 subtag as TheTVDB spells it.
+///
+/// Deliberately short: these are the languages a deployment of this app
+/// plausibly reads, and a tag that is not here falls through to English
+/// rather than being guessed at — a three-letter code invented from a
+/// two-letter one is a 404 per series.
+fn tvdb_language(subtag: &str) -> Option<&'static str> {
+    match subtag {
+        "pt" => Some("por"),
+        "en" => Some("eng"),
+        "es" => Some("spa"),
+        "fr" => Some("fra"),
+        "de" => Some("deu"),
+        "it" => Some("ita"),
+        "ja" => Some("jpn"),
+        _ => None,
     }
 }
 
@@ -342,6 +388,21 @@ mod tests {
             .unwrap();
         let registry = Registry::build(&pool).await.unwrap();
         assert_eq!(registry.configured().count(), 0);
+    }
+
+    /// **The chain is the operator's language, then English, never the
+    /// original.** A chain of one leaves Frieren in Japanese (0 of 66
+    /// translated into Portuguese); dropping English leaves half of
+    /// Doctor Who untitled.
+    #[test]
+    fn the_episode_language_chain_always_ends_in_english() {
+        assert_eq!(episode_languages(Some("pt-BR")), vec!["por", "eng"]);
+        assert_eq!(episode_languages(Some("pt")), vec!["por", "eng"]);
+        // Already English: asking twice would be a wasted request.
+        assert_eq!(episode_languages(Some("en-US")), vec!["eng"]);
+        // Unset, or a tag TheTVDB's three-letter codes do not cover.
+        assert_eq!(episode_languages(None), vec!["eng"]);
+        assert_eq!(episode_languages(Some("tlh")), vec!["eng"]);
     }
 
     /// **The two doors read the same credential.** `settings` replaced

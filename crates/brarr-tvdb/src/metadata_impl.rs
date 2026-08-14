@@ -149,8 +149,12 @@ impl MetadataProvider for TvdbClient {
                 }
             };
 
+            // Named in the configured chain, falling back per episode to
+            // the original. An empty chain is the untranslated request,
+            // which is what this returned before and why every Frieren
+            // episode read `冒険の終わり`.
             let found = self
-                .series_episodes(numeric, season_type, None)
+                .series_episodes_in(numeric, season_type, None, &self.languages())
                 .await
                 .map_err(translate)?;
             if found.episodes.is_empty() {
