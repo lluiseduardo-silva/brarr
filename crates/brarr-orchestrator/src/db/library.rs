@@ -545,6 +545,49 @@ pub async fn get_by_tmdb(
     }
 }
 
+/// The entry a given external id names, whichever source issued it.
+///
+/// **This is what "already in the library?" becomes.** [`get_by_tmdb`]
+/// can only answer on one axis, so a series added through TMDB and then
+/// met again on the \*arr's TVDB axis reads as absent and is catalogued a
+/// second time. Asking by any known id makes the two one row.
+///
+/// The join goes through `library_item_ids`, so a title carries as many
+/// answers as it has ids and every one of them finds it.
+///
+/// # Errors
+///
+/// Returns [`AppError::NotFound`] when no item carries that id, and
+/// [`AppError::Database`] on SQL failure.
+pub async fn get_by_external(
+    pool: &Pool,
+    media_type: MediaType,
+    id: &ExternalId,
+) -> Result<LibraryItem, AppError> {
+    let row = sqlx::query(&format!(
+        "SELECT {} FROM library_items i \
+         JOIN library_item_ids x ON x.item_id = i.id \
+         WHERE x.source = ? AND x.media_type = ? AND x.external_id = ?",
+        ITEM_COLUMNS
+            .split(", ")
+            .map(|c| format!("i.{c}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    ))
+    .bind(id.source().label())
+    .bind(media_type.label())
+    .bind(id.value())
+    .fetch_optional(pool)
+    .await?;
+    match row {
+        Some(r) => row_to_item(&r),
+        None => Err(AppError::NotFound(format!(
+            "library_item {}/{id}",
+            media_type.label()
+        ))),
+    }
+}
+
 /// Every entry, newest first.
 ///
 /// # Errors
@@ -1711,6 +1754,57 @@ mod tests {
 
         assert!(seasons(&pool, item.id).await.unwrap().is_empty());
         assert!(episodes(&pool, item.id).await.unwrap().is_empty());
+    }
+
+    /// **The double-catalogue bug, as a test.**
+    ///
+    /// `get_by_tmdb` can only answer on one axis, so a series added
+    /// through TMDB and met again on the \*arr's TVDB axis read as absent
+    /// and was catalogued a second time. Every id a title carries has to
+    /// find the same row.
+    #[tokio::test]
+    async fn a_title_is_found_by_every_id_it_carries() {
+        use brarr_core::{ExternalId, MetadataSource};
+
+        let pool = open_memory().await.unwrap();
+        let stored = upsert(
+            &pool,
+            &Seed::series(76_479, "The Boys")
+                .imdb("tt1190634")
+                .tvdb(355_567)
+                .build(),
+        )
+        .await
+        .unwrap();
+
+        for (source, raw) in [
+            (MetadataSource::Tmdb, "76479"),
+            (MetadataSource::Imdb, "tt1190634"),
+            (MetadataSource::Tvdb, "355567"),
+        ] {
+            let id = ExternalId::new(source, raw).unwrap();
+            let found = get_by_external(&pool, MediaType::Tv, &id).await;
+            assert!(found.is_ok(), "{source} did not find the title");
+            assert_eq!(found.map(|f| f.id).ok(), Some(stored.id));
+        }
+
+        // Whichever IMDb convention the caller holds, since the id
+        // canonicalises before it reaches the query.
+        let loose = ExternalId::new(MetadataSource::Imdb, "1190634").unwrap();
+        assert_eq!(
+            get_by_external(&pool, MediaType::Tv, &loose)
+                .await
+                .unwrap()
+                .id,
+            stored.id
+        );
+
+        // And a film sharing the number is a different title.
+        let tmdb = ExternalId::new(MetadataSource::Tmdb, "76479").unwrap();
+        assert!(matches!(
+            get_by_external(&pool, MediaType::Movie, &tmdb).await,
+            Err(AppError::NotFound(_))
+        ));
     }
 
     #[tokio::test]

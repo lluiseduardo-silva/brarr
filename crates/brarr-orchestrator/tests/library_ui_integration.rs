@@ -396,6 +396,36 @@ async fn every_page_carries_the_metadata_attributions() {
     }
 }
 
+/// **The hero renders whatever the title is known by.**
+///
+/// It was three blocks with a literal prefix each, so a fourth source
+/// meant editing markup — and one of them encoded a rule the catalogue
+/// should answer ("a movie never carries a tvdb one"). The fixture holds
+/// all three ids, so the assertion is that every one of them reaches the
+/// screen without the template naming any.
+#[tokio::test]
+async fn the_hero_renders_every_id_the_catalogue_holds() {
+    let (addr, state) = spawn().await;
+    let item = seed_series(&state).await;
+
+    let html = get(addr, &format!("/library/{item}")).await;
+    assert!(html.contains("tmdb 76479"), "{html}");
+    assert!(html.contains("tvdb 355567"), "{html}");
+
+    // A film has no TVDB id, and that is the catalogue saying so rather
+    // than the markup: the same template renders both.
+    let movie = support::Seed::movie(603, "Matrix")
+        .year(1999)
+        .imdb("tt0133093")
+        .save(state.pool())
+        .await;
+    let html = get(addr, &format!("/library/{}", movie.id)).await;
+    assert!(html.contains("tmdb 603"), "{html}");
+    // The IMDb chip carries its own prefix and needs no label.
+    assert!(html.contains("tt0133093"), "{html}");
+    assert!(!html.contains("tvdb "), "a film must show no tvdb chip");
+}
+
 /// The operator's own question: with everything monitored and one aired
 /// episode absent, the card says 4/5 and paints red — not "4 of whatever
 /// the series has".

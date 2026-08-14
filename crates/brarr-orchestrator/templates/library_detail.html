@@ -84,15 +84,16 @@
             <p class="text-sm italic text-fg-muted mt-3">Sem sinopse no TMDB — nem em pt-BR, nem em en-US.</p>
             {% endif %}
 
-            {# External ids. A movie never carries a tvdb one. #}
+            {# External ids, whatever the catalogue holds.
+
+               Was three blocks with a literal prefix each, so a fourth
+               source meant editing markup. Which ids a title has is the
+               catalogue's answer — including "a movie has no tvdb one",
+               which used to be encoded here as a rule. #}
             <div class="flex items-center gap-1.5 flex-wrap mt-3">
-                <span class="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-mono bg-bg-muted text-fg-secondary">tmdb {{ item.tmdb_id }}</span>
-                {% if let Some(imdb) = item.imdb_id %}
-                <span class="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-mono bg-bg-muted text-fg-secondary">{{ imdb }}</span>
-                {% endif %}
-                {% if let Some(tvdb) = item.tvdb_id %}
-                <span class="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-mono bg-bg-muted text-fg-secondary">tvdb {{ tvdb }}</span>
-                {% endif %}
+                {% for chip in item.ids %}
+                <span class="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-mono bg-bg-muted text-fg-secondary">{{ chip.text }}</span>
+                {% endfor %}
             </div>
 
             {# Controls — uma fileira de ícones, com o rótulo no `title`.

@@ -59,6 +59,8 @@ use tokio::time::sleep;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
+use brarr_core::{ExternalId, MetadataSource};
+
 use crate::db::arr_instances::{self, ArrInstanceRow};
 use crate::db::arr_root_mappings::{self, ArrRootMapping};
 use crate::db::library::{self, LibraryItem, MediaType, MonitorScope};
@@ -567,10 +569,10 @@ async fn status_of(pool: &Pool, title: &ArrTitle) -> Result<TitleStatus, AppErro
         // request per title, and it says so.
         return Ok(TitleStatus::New);
     }
-    match library::get_by_tmdb(pool, title.media_type, title.tmdb_id).await {
-        Ok(_) => Ok(TitleStatus::Known),
-        Err(AppError::NotFound(_)) => Ok(TitleStatus::New),
-        Err(e) => Err(e),
+    if known_by_any_id(pool, title.media_type, title.tmdb_id, title.tvdb_id).await? {
+        Ok(TitleStatus::Known)
+    } else {
+        Ok(TitleStatus::New)
     }
 }
 
@@ -912,9 +914,10 @@ async fn import_title(
     let Some(tmdb_id) = resolve_tmdb_id(ctx, title).await? else {
         return Ok(TitleOutcome::Blocked);
     };
-    let created = library::get_by_tmdb(pool, title.media_type, tmdb_id)
-        .await
-        .is_err();
+    // Asked on every id the \*arr reports, not only TMDB's. A series
+    // added through TMDB and met again here on the TVDB axis used to read
+    // as absent and be catalogued a second time.
+    let created = !known_by_any_id(pool, title.media_type, tmdb_id, title.tvdb_id).await?;
 
     // The scope has to be stored before the tree is built, and the row
     // has to exist before it can carry a scope — so the first upsert
@@ -954,6 +957,38 @@ async fn import_title(
         created,
         files: adopt_files(pool, &item, files, ctx.rules).await?,
     })
+}
+
+/// Whether the catalogue already holds this title under **any** id the
+/// \*arr knows it by.
+///
+/// `get_by_tmdb` could only answer on one axis, and the \*arr reports two.
+/// A title whose TMDB id brarr never resolved but whose TVDB id it has is
+/// exactly the row that would be created twice.
+async fn known_by_any_id(
+    pool: &Pool,
+    media_type: MediaType,
+    from_tmdb: i64,
+    from_thetvdb: i64,
+) -> Result<bool, AppError> {
+    let candidates = [
+        (MetadataSource::Tmdb, from_tmdb),
+        (MetadataSource::Tvdb, from_thetvdb),
+    ];
+    for (source, value) in candidates {
+        if value <= 0 {
+            continue;
+        }
+        let Ok(id) = ExternalId::new(source, &value.to_string()) else {
+            continue;
+        };
+        match library::get_by_external(pool, media_type, &id).await {
+            Ok(_) => return Ok(true),
+            Err(AppError::NotFound(_)) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(false)
 }
 
 /// The TMDB id to catalogue under.

@@ -1785,6 +1785,10 @@ async fn library_detail(
     let progress = crate::coverage::progress_of(&item, &series_progress, &coverage, now);
     let status = crate::coverage::ItemStatus::of(item.monitored, progress);
 
+    // Whatever the catalogue knows this title as. One query, because the
+    // hero renders one item — the index reads them in bulk.
+    let stored_ids = crate::db::item_ids::for_item(state.pool(), uuid).await?;
+
     // The translation in force. Every coordinate the page shows is the
     // one brarr searches for; the catalogue's own number rides beside it.
     let numbering = episode_numbering::for_item(state.pool(), uuid).await?;
@@ -1841,9 +1845,10 @@ async fn library_detail(
                 art::ImageSize::Hero,
             ),
             overview: item.overview,
-            tmdb_id: item.tmdb_id,
-            imdb_id: item.imdb_id,
-            tvdb_id: item.tvdb_id,
+            ids: stored_ids
+                .iter()
+                .map(|stored| crate::web::templates::IdChipView::of(&stored.id))
+                .collect(),
             numbering: numbering_label.clone(),
             monitored: item.monitored,
             profile_id: item.profile_id.map(|p| p.to_string()).unwrap_or_default(),

@@ -1441,6 +1441,33 @@ pub struct LibraryDetailTemplate {
     pub root_folder: String,
 }
 
+/// One external id, ready to render.
+///
+/// The text is built in Rust rather than in the template because the
+/// sources do not spell themselves the same way: an IMDb id carries its
+/// own `tt` prefix and needs no label, while a bare `603` means nothing
+/// without one.
+#[derive(Debug)]
+pub struct IdChipView {
+    /// What the chip reads.
+    pub text: String,
+}
+
+impl IdChipView {
+    /// Build from a stored identity.
+    #[must_use]
+    pub fn of(id: &brarr_core::ExternalId) -> Self {
+        let value = id.value();
+        Self {
+            text: if value.starts_with("tt") {
+                value.to_owned()
+            } else {
+                format!("{} {value}", id.source().label())
+            },
+        }
+    }
+}
+
 /// Hero data for the detail page.
 #[derive(Debug)]
 pub struct LibraryDetailView {
@@ -1460,12 +1487,13 @@ pub struct LibraryDetailView {
     pub poster_url: Option<String>,
     /// Synopsis.
     pub overview: Option<String>,
-    /// TMDB id.
-    pub tmdb_id: i64,
-    /// Canonical `ttNNNNNNN`.
-    pub imdb_id: Option<String>,
-    /// TVDB id — series only.
-    pub tvdb_id: Option<i64>,
+    /// Every external id the catalogue holds, as chips.
+    ///
+    /// A list rather than three named fields: the hero renders whatever
+    /// the title is known by, so a fourth source costs no markup. It also
+    /// stops the template deciding that a movie has no TVDB id — that is
+    /// the catalogue's answer, not a rule the markup should encode.
+    pub ids: Vec<IdChipView>,
     /// Which numbering the searches use, when it is not TMDB's.
     ///
     /// Prominent on purpose. It lived only as muted text inside a dialog
