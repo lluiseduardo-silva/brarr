@@ -186,16 +186,20 @@
                     </svg>
                 </button>
 
-                {# Só para séries, e só leitura: pergunta ao TMDB quais
-                   numerações ele conhece para este título. Um filme não
-                   tem numeração alternativa, então o botão não existe
-                   lá em vez de existir desabilitado. #}
+                {# Só para séries: de quem é a forma desta árvore, e o
+                   que trocar faria. Um filme não tem temporadas, então o
+                   botão não existe lá em vez de existir desabilitado.
+
+                   Abrir não escreve nada, e escolher também não — a
+                   primeira postagem calcula o plano contra a árvore de
+                   verdade, e só um plano que os portões aceitariam ganha
+                   botão. #}
                 {% if item.is_series %}
-                <button hx-get="/library/{{ item.id }}/groups"
+                <button hx-get="/library/{{ item.id }}/sources"
                         hx-target="#modal-target"
                         hx-swap="innerHTML"
-                        title="Numerações que o TMDB conhece para esta série (arco, absoluta, DVD)"
-                        aria-label="Ver numerações conhecidas"
+                        title="De onde vem a estrutura de temporadas, e o que trocar faria"
+                        aria-label="Estrutura da série"
                         class="btn btn-md btn-icon btn-ghost">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                         <line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/>

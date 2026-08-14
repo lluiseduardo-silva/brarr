@@ -228,14 +228,19 @@ pub struct Ready {
 impl Ready {
     /// Whether the write would be accepted as it stands.
     ///
-    /// The same two questions `guard_plan` asks, asked here so the
-    /// report can rank a batch without attempting one. It is deliberately
-    /// **not** a copy of the gate — it calls nothing and writes nothing,
-    /// and the gate remains the thing that actually refuses.
+    /// Asks the gate itself rather than re-deriving its reasoning, so a
+    /// report can never say "pronto" about a title the write would
+    /// refuse. That drift is the ordinary way a preview goes wrong: the
+    /// second copy is written later and stops tracking the first.
     #[must_use]
     pub fn would_commit(&self) -> bool {
-        self.plan.orphans.is_empty()
-            && !(self.plan.moves_anything() && self.plan.air_dates_are_thin())
+        structure::refusal(&self.plan).is_none()
+    }
+
+    /// Why it would be refused, when it would.
+    #[must_use]
+    pub fn refusal(&self) -> Option<String> {
+        structure::refusal(&self.plan)
     }
 }
 

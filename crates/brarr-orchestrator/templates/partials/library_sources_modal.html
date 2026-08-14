@@ -1,0 +1,208 @@
+{# De quem é a forma desta série.
+
+   Este painel substitui o de numeração, e a diferença entre os dois é a
+   frase que não pode mais ser dita. O antigo prometia "nada é renumerado
+   na biblioteca": ele guardava uma tradução ao lado da árvore e mexia só
+   na coordenada que ia ao indexador. Este **reconstrói a árvore** na
+   numeração da fonte escolhida — que é o que faz a tradução deixar de
+   ter assunto, e o que obriga a tela a mostrar o que a escrita faria
+   antes de fazê-la.
+
+   Nenhum episódio é apagado e nenhum arquivo é renomeado por causa
+   disto: cada linha reusa o UUID que já tinha, então toda aquisição
+   continua ligada ao episódio de sempre. É exatamente isso que os
+   números da prévia afirmam — e um plano que deixaria alguém órfão não
+   ganha botão. #}
+<dialog id="sources-dialog" class="w-[760px] max-w-full rounded-xl bg-bg-surface border border-border-default p-0">
+    <div class="px-6 py-5 border-b border-border-default">
+        <h2 class="text-lg font-semibold text-fg-primary">Estrutura da série</h2>
+        <p class="text-sm text-fg-secondary mt-1 truncate" title="{{ item_title }}">{{ item_title }}</p>
+    </div>
+
+    <div class="px-6 py-5 max-h-[70vh] overflow-y-auto">
+        {% match current_source %}
+        {% when Some with (source) %}
+        <p class="text-sm text-fg-primary mb-4">
+            A árvore vem do <strong>{{ source }}</strong>, em
+            <strong>{{ current_ordering }}</strong> ({{ episodes }} episódios no catálogo).
+            {% if pinned %}
+            <span class="badge bg-info-soft text-info-soft-fg">fixada</span>
+            Nenhuma varredura vai movê-la enquanto estiver assim.
+            {% endif %}
+        </p>
+        {% when None %}
+        <p class="text-sm text-fg-secondary mb-4">
+            Ninguém reivindicou a forma desta série ({{ episodes }} episódios no catálogo).
+            A primeira escrita de árvore adota o título.
+        </p>
+        {% endmatch %}
+
+        {% match error %}
+        {% when Some with (msg) %}
+        <p class="text-sm text-danger-soft-fg bg-danger-soft rounded-md px-3 py-2 mb-4">{{ msg }}</p>
+        {% when None %}
+        {% endmatch %}
+
+        {# A prévia. Todo caminho que escreve passa por aqui primeiro: a
+           escolha é postada, a árvore é buscada de verdade, o plano é
+           calculado contra as linhas que existem, e só então aparece um
+           botão — se aparecer. #}
+        {% match preview %}
+        {% when Some with (p) %}
+        <div class="border border-border-default rounded-lg px-4 py-4 mb-6">
+            <p class="text-sm text-fg-primary mb-2">
+                <strong>{{ p.source_name }}</strong> · {{ p.ordering_name }}
+            </p>
+            <p class="text-sm text-fg-secondary">
+                {{ p.paired }} episódio(s) mantêm a linha · {{ p.orphans }} ficariam de fora ·
+                {{ p.added }} novo(s) · datas de exibição {{ p.stored_coverage }}% / {{ p.incoming_coverage }}%
+            </p>
+            {% if p.grabs_at_risk > 0 %}
+            <p class="text-sm text-danger-soft-fg bg-danger-soft rounded-md px-3 py-2 mt-2">
+                {{ p.grabs_at_risk }} aquisição(ões) perderiam o episódio a que estão ligadas.
+            </p>
+            {% endif %}
+            {% for pack in p.packs %}
+            <p class="text-sm text-warning-soft-fg mt-2">
+                O pacote da temporada {{ pack.season }} passa a cobrir {{ pack.now }} episódio(s)
+                em vez de {{ pack.was }} ({{ pack.grabs }} aquisição/ões). É a correção, não uma
+                perda — mas o resto da temporada volta a aparecer como faltando.
+            </p>
+            {% endfor %}
+
+            {% match p.refusal %}
+            {% when Some with (why) %}
+            <p class="text-sm text-danger-soft-fg bg-danger-soft rounded-md px-3 py-2 mt-3">{{ why }}</p>
+            {% when None %}
+            {% endmatch %}
+
+            {% if p.would_commit %}
+            <form class="mt-4" hx-post="/library/{{ item_id }}/structure"
+                  hx-target="#modal-target" hx-swap="innerHTML">
+                <input type="hidden" name="source" value="{{ p.source }}">
+                <input type="hidden" name="family" value="{{ p.family }}">
+                <input type="hidden" name="handle" value="{{ p.handle }}">
+                {% if p.pinned %}<input type="hidden" name="pinned" value="on">{% endif %}
+                {% for s in seasons %}
+                <input type="hidden" name="sizes_{{ s.season }}" value="{{ s.sizes }}">
+                {% endfor %}
+                <input type="hidden" name="confirm" value="1">
+                <button type="submit" class="btn btn-sm btn-primary">Aplicar esta estrutura</button>
+                <span class="text-xs text-fg-muted">
+                    Reconstrói a árvore reusando cada linha que já existe.
+                </span>
+            </form>
+            {% endif %}
+        </div>
+        {% when None %}
+        {% endmatch %}
+
+        {% if options.is_empty() %}
+        <p class="text-sm text-fg-secondary">
+            Nenhuma fonte de metadados está configurada com credencial para séries.
+        </p>
+        {% else %}
+        <div class="overflow-x-auto">
+            <table class="w-full text-sm">
+                <thead>
+                    <tr class="text-xs uppercase tracking-[0.06em] text-fg-muted">
+                        <th class="text-left font-medium px-3 py-2">Fonte</th>
+                        <th class="text-left font-medium px-3 py-2">Ordenação</th>
+                        <th class="text-right font-medium px-3 py-2">Episódios</th>
+                        <th class="text-right font-medium px-3 py-2"></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for o in options %}
+                    <tr class="border-t border-border-default {% if o.active %}bg-accent-soft{% endif %}">
+                        <td class="px-3 py-2 text-fg-primary">{{ o.source_name }}</td>
+                        <td class="px-3 py-2">
+                            {{ o.name }}
+                            {% if o.renumbers %}
+                            <span class="badge bg-info-soft text-info-soft-fg">renumera</span>
+                            {% endif %}
+                        </td>
+                        <td class="px-3 py-2 text-right text-fg-secondary">
+                            {% match o.coverage %}
+                            {% when Some with (n) %}{{ n }}{% when None %}—{% endmatch %}
+                        </td>
+                        <td class="px-3 py-2 text-right">
+                            <form hx-post="/library/{{ item_id }}/structure"
+                                  hx-target="#modal-target" hx-swap="innerHTML">
+                                <input type="hidden" name="source" value="{{ o.source }}">
+                                <input type="hidden" name="family" value="{{ o.family }}">
+                                <input type="hidden" name="handle" value="{{ o.handle }}">
+                                <input type="hidden" name="pinned" value="on">
+                                <button type="submit" class="btn btn-sm btn-secondary">
+                                    {% if o.active %}Prever de novo{% else %}Prever{% endif %}
+                                </button>
+                            </form>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% endif %}
+
+        {% for note in unavailable %}
+        <p class="text-xs text-fg-muted mt-2">{{ note }}</p>
+        {% endfor %}
+
+        {% if !seasons.is_empty() %}
+        {# Blocos declarados à mão.
+
+           A saída para quando nem o TMDB nem a TheTVDB têm o corte que a
+           cena usa. Tamanhos, não intervalos, porque é assim que o corte
+           é descrito por quem o faz: dois blocos, de 12 e 13. Eles
+           precisam somar todos os episódios da temporada — uma lista
+           curta deixaria a cauda numerada de um jeito e a cabeça de
+           outro, pior que qualquer um dos dois. #}
+        <details class="mt-6 border border-border-default rounded-lg">
+            <summary class="cursor-pointer px-4 py-3 text-sm font-medium text-fg-primary">
+                Declarar os blocos à mão
+            </summary>
+            <form class="px-4 pb-4" hx-post="/library/{{ item_id }}/structure"
+                  hx-target="#modal-target" hx-swap="innerHTML">
+                <input type="hidden" name="source" value="tmdb">
+                <input type="hidden" name="family" value="manual">
+                <input type="hidden" name="handle" value="">
+                <input type="hidden" name="pinned" value="on">
+                <p class="text-sm text-fg-secondary mb-3">
+                    Informe o tamanho de cada bloco, na ordem. Deixe em branco para não cortar a
+                    temporada.
+                </p>
+                {% for s in seasons %}
+                <div class="flex items-end gap-3 mb-3">
+                    <div class="w-28">
+                        <span class="block text-xs text-fg-muted mb-1">Temporada {{ s.season }}</span>
+                        <span class="text-sm text-fg-secondary">{{ s.episodes }} episódios</span>
+                    </div>
+                    <label class="flex-1">
+                        <span class="block text-xs text-fg-muted mb-1">Tamanhos dos blocos</span>
+                        <input type="text" name="sizes_{{ s.season }}" value="{{ s.sizes }}"
+                               placeholder="ex.: 12, 13"
+                               class="w-full px-3 h-10 rounded-md bg-bg-canvas border border-border-strong text-sm text-fg-primary focus:outline-none focus:border-accent-solid">
+                    </label>
+                </div>
+                {% endfor %}
+                <button type="submit" class="btn btn-sm btn-secondary">Prever com estes blocos</button>
+            </form>
+        </details>
+        {% endif %}
+
+        <p class="text-xs text-fg-muted mt-4">
+            Trocar a fonte reconstrói a árvore reusando cada linha que já existe, então nenhuma
+            aquisição perde o episódio a que está ligada. Uma escolha feita aqui é fixada: as
+            varreduras respeitam, e voltar atrás é escolher a estrutura anterior nesta mesma tela.
+        </p>
+    </div>
+
+    <div class="h-px bg-border-default"></div>
+    <footer class="flex items-center justify-end gap-2 px-6 py-4">
+        <button type="button" class="btn btn-md btn-secondary"
+                onclick="this.closest('dialog').close()">
+            Fechar
+        </button>
+    </footer>
+</dialog>

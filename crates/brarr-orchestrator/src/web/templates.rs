@@ -1682,60 +1682,103 @@ pub struct EpisodeView {
     pub percent: Option<u8>,
 }
 
-/// One ordering, as the panel renders it.
+/// One ordering an operator may choose, from one provider.
 #[derive(Debug, Clone)]
-pub struct GroupRow {
-    /// TMDB group id — a hex string, and what the apply route takes.
-    pub id: String,
-    /// Whether the title is currently searched under this ordering.
-    pub active: bool,
-    /// Name the TMDB contributor gave it.
+pub struct SourceOption {
+    /// `MetadataSource::label`, posted back as the choice.
+    pub source: String,
+    /// What to call the provider on screen.
+    pub source_name: String,
+    /// `OrderingFamily::label`, posted back as the choice.
+    pub family: String,
+    /// The provider's own handle. Empty for its default ordering.
+    pub handle: String,
+    /// What the provider calls it.
     pub name: String,
-    /// Kind, in Portuguese.
-    pub kind: String,
-    /// Whether it renumbers away from the canonical `(season, episode)`.
-    pub alternate: bool,
-    /// How many buckets.
-    pub group_count: i32,
-    /// How many episodes it covers.
-    pub episode_count: i32,
+    /// Episodes the ordering covers, when the provider reports it.
+    pub coverage: Option<i32>,
+    /// Whether this is the ordering in force.
+    pub active: bool,
+    /// Whether it renumbers, or is the provider's own shape.
+    pub renumbers: bool,
 }
 
-/// `/library/{id}/groups` — read-only discovery of the alternate
-/// orderings TMDB knows for a series.
+/// What a chosen ordering would do to the tree, computed and not written.
+#[derive(Debug, Clone)]
+pub struct StructurePreview {
+    /// Provider, for the sentence above the numbers.
+    pub source_name: String,
+    /// Human name of the ordering.
+    pub ordering_name: String,
+    /// Stored episodes that keep their row, and so their files.
+    pub paired: usize,
+    /// Stored episodes nothing claims. **Non-zero refuses the write.**
+    pub orphans: usize,
+    /// Episodes the tree would gain.
+    pub added: usize,
+    /// Acquisitions those orphans carry.
+    pub grabs_at_risk: i64,
+    /// Stored air-date coverage, as a whole percentage.
+    pub stored_coverage: i32,
+    /// Incoming half of the same.
+    pub incoming_coverage: i32,
+    /// Season packs whose meaning would change.
+    pub packs: Vec<StructurePreviewPack>,
+    /// Whether the gates would accept it.
+    pub would_commit: bool,
+    /// Why they would not, when they would not.
+    pub refusal: Option<String>,
+    /// The choice, echoed so the confirm button reposts it verbatim
+    /// rather than the screen rebuilding it from what it rendered.
+    pub source: String,
+    /// Family half of the same echo.
+    pub family: String,
+    /// Handle half of the same echo.
+    pub handle: String,
+    /// Whether the choice would be pinned.
+    pub pinned: bool,
+}
+
+/// A season pack whose meaning changes because its season did.
+#[derive(Debug, Clone, Copy)]
+pub struct StructurePreviewPack {
+    /// The season it was recorded against.
+    pub season: i32,
+    /// Episodes that season holds today.
+    pub was: usize,
+    /// Episodes it would hold.
+    pub now: usize,
+    /// Packs recorded against it.
+    pub grabs: i64,
+}
+
+/// The structure panel: who owns a series' shape, and what changing it
+/// would do.
 #[derive(Debug, Template)]
-#[template(path = "partials/library_groups_modal.html")]
-pub struct LibraryGroupsModalPartial {
-    /// Stringified item UUID, for the apply and clear actions.
+#[template(path = "partials/library_sources_modal.html")]
+pub struct LibrarySourcesModalPartial {
+    /// `library_items.id`.
     pub item_id: String,
-    /// Series being asked about.
+    /// For the header.
     pub item_title: String,
-    /// Name of the ordering in force, when one is.
-    pub active_name: Option<String>,
-    /// Episodes the catalogue holds, so a group's coverage can be
-    /// compared against it before the operator applies it.
+    /// Episodes the catalogue holds today.
     pub episodes: i32,
-    /// Orderings, alternates first.
-    pub rows: Vec<GroupRow>,
-    /// How many of them renumber. Zero is the common answer.
-    pub alternates: usize,
-    /// Who set the numbering in force — derived, picked, hand-declared,
-    /// or turned off.
-    pub source: Option<String>,
-    /// One row per canonical season, for declaring blocks by hand.
+    /// Who owns the shape, or `None` while nobody has claimed it.
+    pub current_source: Option<String>,
+    /// The ordering in force, in words.
+    pub current_ordering: String,
+    /// Whether the operator froze the choice.
+    pub pinned: bool,
+    /// Everything on offer, across every configured provider.
+    pub options: Vec<SourceOption>,
+    /// Providers that could not be offered, and why.
+    pub unavailable: Vec<String>,
+    /// One row per canonical season for the hand-declared cut.
     pub seasons: Vec<NumberingSeasonRow>,
-    /// What went wrong with the last hand-declared blocks, if anything.
+    /// What the chosen ordering would do, once one has been chosen.
+    pub preview: Option<StructurePreview>,
+    /// A form error, in the operator's language.
     pub error: Option<String>,
-    /// Whether a `TheTVDB` key is configured, so the button is offered
-    /// only when pressing it could do something.
-    pub tvdb_available: bool,
-    /// Whether the operator settled this title, as opposed to a sweep.
-    ///
-    /// Drives both the wording and the way out. Without it, `off` — "I
-    /// want the canonical numbering and I mean it" — renders exactly
-    /// like "nobody has decided yet", and the two behave as opposites:
-    /// one is refused by every sweep, the other invites them.
-    pub settled_by_operator: bool,
 }
 
 /// One canonical season, and the blocks the operator has cut it into.

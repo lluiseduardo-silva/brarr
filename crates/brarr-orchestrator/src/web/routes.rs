@@ -43,16 +43,18 @@ use crate::auth::{BypassConfig, TrustedPeers};
 use crate::db::quality_profiles;
 use crate::db::settings;
 use crate::db::{
-    arr_instances, decisions, download_clients, episode_numbering, grabs, library, path_mappings,
-    providers, push_history, root_folders, searches,
+    arr_instances, decisions, download_clients, episode_numbering, grabs, item_ids, library,
+    path_mappings, providers, push_history, root_folders, searches,
 };
 use crate::metadata::art;
+use crate::metadata::registry::Registry;
 use crate::scan::ScanProgress;
 #[allow(
     unused_imports,
     reason = "re-exported for downstream tests that still call it"
 )]
 use crate::search::run_tmdb_search;
+use crate::structure;
 use crate::web::render::html;
 use crate::web::templates::{
     AddOptionFolder, AddOptionProfile, ArrImportBodyPartial, ArrImportReportPartial,
@@ -76,7 +78,7 @@ use crate::web::templates::{
     WebhookEventView, WebhooksTemplate,
 };
 use crate::{AppError, AppState};
-use brarr_core::{MetadataSource, TmdbId};
+use brarr_core::{Block, MediaType, MetadataSource, Ordering, OrderingFamily, TmdbId};
 
 /// Build the Axum router with `state` as shared state.
 pub fn router(state: AppState, static_dir: &std::path::Path) -> Router {
@@ -120,15 +122,8 @@ pub fn router(state: AppState, static_dir: &std::path::Path) -> Router {
         .route("/library/{id}/monitor", post(library_toggle_monitor))
         .route("/library/{id}/profile", post(library_set_profile))
         .route("/library/{id}/placement", get(library_placement))
-        .route("/library/{id}/groups", get(library_groups))
-        .route(
-            "/library/{id}/groups/{group_id}/apply",
-            post(library_groups_apply),
-        )
-        .route("/library/{id}/groups/clear", post(library_groups_clear))
-        .route("/library/{id}/numbering", post(library_numbering))
-        .route("/library/{id}/numbering/tvdb", post(library_numbering_tvdb))
-        .route("/library/{id}/numbering/auto", post(library_numbering_auto))
+        .route("/library/{id}/sources", get(library_sources))
+        .route("/library/{id}/structure", post(library_structure))
         .route("/pause-banner", get(pause_banner))
         .route("/library/{id}/refresh", post(library_refresh))
         .route("/library/{id}/scan", post(library_scan_now))
@@ -2911,172 +2906,6 @@ async fn library_placement(
     })
 }
 
-/// `GET /library/{id}/groups` — what alternate orderings TMDB knows for
-/// this series.
-///
-/// **Read-only, and deliberately so.** It writes nothing, changes no
-/// numbering, and costs one TMDB call: the question it answers is
-/// "which of my titles even have an arc or an absolute order defined",
-/// which has to be answerable *before* anything is decided about
-/// re-numbering. The mapping between the two numberings comes back
-/// inside the same response, so the panel can show it rather than
-/// promise it.
-async fn library_groups(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Result<Response, AppError> {
-    let uuid = Uuid::parse_str(&id)
-        .map_err(|e| AppError::InvalidInput(format!("invalid library id: {e}")))?;
-    let item = library::get_by_id(state.pool(), uuid).await?;
-    if item.media_type != library::MediaType::Tv {
-        return Err(AppError::InvalidInput(
-            "agrupamentos só existem para séries".to_owned(),
-        ));
-    }
-    let active = episode_numbering::active_group(state.pool(), uuid).await?;
-    let episodes = i32::try_from(library::episodes(state.pool(), uuid).await?.len()).unwrap_or(0);
-    let rows = group_rows(&state, &item, active.as_ref()).await?;
-
-    groups_panel(&state, &item, rows, episodes, active, None).await
-}
-
-/// Render the numbering panel. Shared by the read route and by every
-/// action that answers with the panel again, so a form error and a fresh
-/// open cannot drift apart.
-async fn groups_panel(
-    state: &AppState,
-    item: &library::LibraryItem,
-    rows: Vec<crate::web::templates::GroupRow>,
-    episodes: i32,
-    active: Option<(String, Option<String>)>,
-    error: Option<String>,
-) -> Result<Response, AppError> {
-    let source = episode_numbering::source(state.pool(), item.id).await?;
-    let stored = episode_numbering::for_item(state.pool(), item.id).await?;
-    let tree = library::episodes(state.pool(), item.id).await?;
-
-    // One row per canonical season, carrying the block sizes already in
-    // force so the operator edits what is there instead of retyping it.
-    let mut counts: BTreeMap<i32, i32> = BTreeMap::new();
-    for e in &tree {
-        if e.season_number > 0 {
-            *counts.entry(e.season_number).or_default() += 1;
-        }
-    }
-    let seasons = counts
-        .into_iter()
-        .map(|(season, episodes)| {
-            let mut sizes: BTreeMap<i32, i32> = BTreeMap::new();
-            for ((cs, _), n) in &stored {
-                if *cs == season {
-                    *sizes.entry(n.season).or_default() += 1;
-                }
-            }
-            let first_season = sizes.keys().next().copied().unwrap_or(season);
-            crate::web::templates::NumberingSeasonRow {
-                season,
-                episodes,
-                sizes: sizes
-                    .values()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(", "),
-                first_season,
-            }
-        })
-        .collect();
-
-    html(&crate::web::templates::LibraryGroupsModalPartial {
-        item_id: item.id.to_string(),
-        item_title: item.title.clone(),
-        alternates: rows.iter().filter(|r| r.alternate).count(),
-        active_name: active.and_then(|(_, name)| name),
-        source: source.map(|s| s.description().to_owned()),
-        settled_by_operator: source.is_some_and(episode_numbering::Source::is_operator),
-        seasons,
-        error,
-        tvdb_available: crate::tvdb_sync::is_configured(state.pool())
-            .await
-            .unwrap_or(false),
-        episodes,
-        rows,
-    })
-}
-
-/// `POST /library/{id}/numbering` — declare the block cuts by hand.
-///
-/// The escape hatch for when neither TMDB nor the \*arr has the split
-/// the scene uses. TMDB is not wrong about Solo Leveling being one
-/// season of 25; the people publishing it cut at 13, and that is a
-/// peculiarity rather than an error — so it is declared, not corrected.
-///
-/// `Form<Vec<(String, String)>>` because the form carries one pair of
-/// fields per season and `serde_urlencoded` collapses repeated keys —
-/// the same reason `/library/bulk` takes its selection this way.
-async fn library_numbering(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    axum::extract::Form(fields): axum::extract::Form<Vec<(String, String)>>,
-) -> Result<Response, AppError> {
-    let uuid = Uuid::parse_str(&id)
-        .map_err(|e| AppError::InvalidInput(format!("invalid library id: {e}")))?;
-    let item = library::get_by_id(state.pool(), uuid).await?;
-
-    let mut counts: BTreeMap<i32, i32> = BTreeMap::new();
-    for e in library::episodes(state.pool(), uuid).await? {
-        if e.season_number > 0 {
-            *counts.entry(e.season_number).or_default() += 1;
-        }
-    }
-
-    let value = |prefix: &str, season: i32| {
-        fields
-            .iter()
-            .find(|(k, _)| k == &format!("{prefix}_{season}"))
-            .map(|(_, v)| v.trim().to_owned())
-            .unwrap_or_default()
-    };
-
-    let mut blocks = Vec::new();
-    let mut failure = None;
-    for (&season, &episodes) in &counts {
-        let sizes = match episode_numbering::parse_block_sizes(&value("sizes", season)) {
-            Ok(sizes) => sizes,
-            Err(e) => {
-                failure = Some(e);
-                break;
-            }
-        };
-        let first = value("first", season)
-            .parse::<i32>()
-            .unwrap_or(season)
-            .max(0);
-        match episode_numbering::blocks_for_season(season, episodes, &sizes, first) {
-            Ok(mut found) => blocks.append(&mut found),
-            Err(e) => {
-                failure = Some(e);
-                break;
-            }
-        }
-    }
-
-    // Nothing is written when anything failed: a half-applied numbering
-    // is the one outcome worse than a rejected form.
-    if failure.is_none() {
-        episode_numbering::apply_manual(state.pool(), uuid, &blocks).await?;
-    }
-
-    let active = episode_numbering::active_group(state.pool(), uuid).await?;
-    let episodes = i32::try_from(library::episodes(state.pool(), uuid).await?.len()).unwrap_or(0);
-    // Best-effort: the TMDB list is context for the panel, not the point
-    // of this request, and a metadata hiccup must not swallow a numbering
-    // the operator just declared.
-    let rows = group_rows(&state, &item, active.as_ref())
-        .await
-        .unwrap_or_default();
-    groups_panel(&state, &item, rows, episodes, active, failure).await
-}
-
 /// `GET /pause-banner` — the strip that says brarr is switched off.
 ///
 /// **A forgotten pause is the worst shape a defect can take**: every
@@ -3111,160 +2940,353 @@ async fn pause_banner(State(state): State<AppState>) -> Response {
     )
 }
 
-/// `POST /library/{id}/numbering/auto` — hand this title back to the
-/// sweeps.
+/// `GET /library/{id}/sources` — who owns this series' shape, and what
+/// else is on offer.
 ///
-/// **The way out, and it did not exist.** Every operator action here
-/// writes a decision the sweeps must respect, including "voltar ao
-/// original", which stores `off`. The only button that undid anything
-/// was attached to the active group's row — and `clear` nulls the group
-/// id, so after one click there was no row and no button. A title was
-/// stuck on the operator's last word forever.
-async fn library_numbering_auto(
+/// Replaces the numbering panel, and the difference is the sentence that
+/// can no longer be said. That screen promised "nada é renumerado na
+/// biblioteca" and kept its word: it stored a translation beside the
+/// tree and moved only the coordinate that went to the indexer. This one
+/// **rebuilds the tree** in the chosen source's numbering — which is
+/// what makes the translation stop having a subject, and what obliges
+/// the screen to show what the write would do before doing it.
+async fn library_sources(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Response, AppError> {
-    let uuid = Uuid::parse_str(&id)
-        .map_err(|e| AppError::InvalidInput(format!("invalid library id: {e}")))?;
-    let item = library::get_by_id(state.pool(), uuid).await?;
-    episode_numbering::reset_to_automatic(state.pool(), uuid).await?;
-
-    let episodes = i32::try_from(library::episodes(state.pool(), uuid).await?.len()).unwrap_or(0);
-    let rows = group_rows(&state, &item, None).await.unwrap_or_default();
-    groups_panel(&state, &item, rows, episodes, None, None).await
+    let item = series_for_structure(&state, &id).await?;
+    sources_panel(&state, &item, None, None).await
 }
 
-/// `POST /library/{id}/numbering/tvdb` — derive it from `TheTVDB` now.
+/// Read the item and refuse anything that is not a series.
 ///
-/// The sweep runs every twelve hours because a numbering changes when a
-/// contributor edits it, which is rare. This is the button for when the
-/// operator is looking at the title *because* it is wrong.
-///
-/// It writes as [`episode_numbering::Source::Tvdb`], so it deliberately
-/// **cannot** overrule hand-declared blocks or a picked TMDB group. The
-/// way to prefer it over those is to clear them first, which is the same
-/// one click it always was.
-async fn library_numbering_tvdb(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Result<Response, AppError> {
-    let uuid = Uuid::parse_str(&id)
-        .map_err(|e| AppError::InvalidInput(format!("invalid library id: {e}")))?;
-    let item = library::get_by_id(state.pool(), uuid).await?;
-
-    let outcome = match crate::tvdb_sync::client(state.pool()).await {
-        Ok(tvdb) => crate::tvdb_sync::sync_item(state.pool(), &tvdb, &item).await,
-        Err(e) => Err(e),
-    };
-    // The panel answers either way — a failure here is a sentence in the
-    // dialog, not a page the operator has to navigate back from. Every
-    // outcome gets its own sentence: the first version said "igual ao
-    // TMDB, ou outra fonte já foi escolhida" for four different
-    // conditions, which told the operator nothing about which one.
-    let error = match outcome {
-        // Success is not an error, and rendering it as one is how a
-        // working feature reads as broken.
-        Ok(o) if o.wrote() => None,
-        Ok(o) => Some(o.message()),
-        Err(e) => Some(e.to_string()),
-    };
-
-    let active = episode_numbering::active_group(state.pool(), uuid).await?;
-    let episodes = i32::try_from(library::episodes(state.pool(), uuid).await?.len()).unwrap_or(0);
-    let rows = group_rows(&state, &item, active.as_ref())
-        .await
-        .unwrap_or_default();
-    groups_panel(&state, &item, rows, episodes, active, error).await
-}
-
-/// The TMDB orderings for one series, alternates first.
-async fn group_rows(
+/// A film has no tree, and a structure source recorded for one is a
+/// claim nothing can honour.
+async fn series_for_structure(
     state: &AppState,
-    item: &library::LibraryItem,
-    active: Option<&(String, Option<String>)>,
-) -> Result<Vec<crate::web::templates::GroupRow>, AppError> {
-    let tmdb = crate::tmdb_sync::client(state.pool()).await?;
-    let mut rows: Vec<crate::web::templates::GroupRow> = tmdb
-        .episode_groups(item.tmdb_id)
-        .await?
-        .into_iter()
-        .map(|g| crate::web::templates::GroupRow {
-            active: active.is_some_and(|(id, _)| *id == g.id),
-            id: g.id,
-            name: g.name.unwrap_or_else(|| "sem nome".to_owned()),
-            kind: group_kind_label(g.kind).to_owned(),
-            alternate: g.kind.is_alternate_ordering(),
-            group_count: g.group_count,
-            episode_count: g.episode_count,
-        })
-        .collect();
-    // Alternates first: they are the reason anyone opened this.
-    rows.sort_by_key(|r| !r.alternate);
-    Ok(rows)
-}
-
-/// `POST /library/{id}/groups/{group_id}/apply` — search this title
-/// under that ordering.
-///
-/// **Writes nothing to `library_episodes` and touches no grab.** The
-/// catalogue keeps TMDB's numbering; only the coordinates the scanner
-/// sends to the indexer, and the marker it requires in a release title,
-/// come from the group. That separation is the whole design — see the
-/// migration — and an integration test pins it.
-async fn library_groups_apply(
-    State(state): State<AppState>,
-    Path((id, group_id)): Path<(String, String)>,
-) -> Result<Response, AppError> {
-    let uuid = Uuid::parse_str(&id)
+    id: &str,
+) -> Result<library::LibraryItem, AppError> {
+    let uuid = Uuid::parse_str(id)
         .map_err(|e| AppError::InvalidInput(format!("invalid library id: {e}")))?;
     let item = library::get_by_id(state.pool(), uuid).await?;
-    let tmdb = crate::tmdb_sync::client(state.pool()).await?;
-    let group = tmdb.episode_group(&group_id).await?;
-
-    let rows = episode_numbering::rows_from_group(&group);
-    if rows.is_empty() {
+    if item.media_type != library::MediaType::Tv {
         return Err(AppError::InvalidInput(
-            "essa ordenação não lista episódio nenhum".to_owned(),
+            "só séries têm estrutura de temporadas".to_owned(),
         ));
     }
-    let name = group.name.clone();
-    episode_numbering::apply(state.pool(), uuid, &group_id, name.as_deref(), &rows).await?;
-    info!(
-        target: "brarr_orchestrator::web",
-        item = %item.title, group = %group_id, episodes = rows.len(),
-        "applied an alternate numbering for search"
-    );
-    library_groups(State(state), Path(id)).await
+    Ok(item)
 }
 
-/// `POST /library/{id}/groups/clear` — back to TMDB's numbering.
-async fn library_groups_clear(
+/// Render the structure panel. Shared by the read route and by every
+/// answer that shows it again, so a form error and a fresh open cannot
+/// drift apart — the same discipline the numbering panel had.
+async fn sources_panel(
+    state: &AppState,
+    item: &library::LibraryItem,
+    preview: Option<crate::web::templates::StructurePreview>,
+    error: Option<String>,
+) -> Result<Response, AppError> {
+    let pool = state.pool();
+    let owner = structure::owner(pool, item.id).await?;
+    let registry = Registry::build(pool).await?;
+    let ids = item_ids::for_item(pool, item.id).await?;
+    let stored = library::episodes(pool, item.id).await?;
+
+    let mut options: Vec<crate::web::templates::SourceOption> = Vec::new();
+    let mut unavailable: Vec<String> = Vec::new();
+
+    for provider in registry.for_structure(MediaType::Tv) {
+        let source = provider.source();
+        let Some(known) = ids.iter().find(|s| s.id.source() == source) else {
+            // Never guessed. A series brarr holds only under TMDB has no
+            // TheTVDB id to search with either, and saying so is more
+            // use than an option that fails when clicked.
+            unavailable.push(format!(
+                "{} não aparece aqui: o título não guarda um id dela.",
+                source.display_name()
+            ));
+            continue;
+        };
+
+        options.push(source_option(
+            &owner,
+            source,
+            OrderingFamily::Default,
+            "",
+            "ordenação própria",
+            None,
+        ));
+
+        match provider.variants(&known.id).await {
+            Ok(found) => {
+                for v in found {
+                    options.push(source_option(
+                        &owner,
+                        source,
+                        v.family,
+                        &v.handle,
+                        &v.name,
+                        v.coverage
+                            .and_then(|(covered, _)| i32::try_from(covered).ok()),
+                    ));
+                }
+            }
+            // Reported, never swallowed: a provider that could not be
+            // asked is different from one with nothing to offer, and the
+            // panel must not spell them the same way.
+            Err(e) => unavailable.push(format!("{}: {e}", source.display_name())),
+        }
+    }
+
+    let mut counts: BTreeMap<i32, i32> = BTreeMap::new();
+    for e in &stored {
+        if e.season_number > 0 {
+            *counts.entry(e.season_number).or_default() += 1;
+        }
+    }
+    let declared = structure::ordering_of(&owner);
+    let sizes_in_force: BTreeMap<i32, String> = match &declared {
+        Ordering::Manual { blocks } => {
+            let mut per: BTreeMap<i32, Vec<String>> = BTreeMap::new();
+            for b in blocks {
+                per.entry(b.season).or_default().push(b.size.to_string());
+            }
+            per.into_iter().map(|(k, v)| (k, v.join(", "))).collect()
+        }
+        _ => BTreeMap::new(),
+    };
+    let seasons = counts
+        .into_iter()
+        .map(
+            |(season, episodes)| crate::web::templates::NumberingSeasonRow {
+                season,
+                episodes,
+                sizes: sizes_in_force.get(&season).cloned().unwrap_or_default(),
+                first_season: season,
+            },
+        )
+        .collect();
+
+    html(&crate::web::templates::LibrarySourcesModalPartial {
+        item_id: item.id.to_string(),
+        item_title: item.title.clone(),
+        episodes: i32::try_from(stored.len()).unwrap_or(0),
+        current_source: owner.source.map(|s| s.display_name().to_owned()),
+        current_ordering: ordering_label(&declared, owner.handle.as_deref()),
+        pinned: owner.pinned,
+        options,
+        unavailable,
+        seasons,
+        preview,
+        error,
+    })
+}
+
+/// One offered ordering, marked active when it is the one in force.
+fn source_option(
+    owner: &library::StructureOwner,
+    source: MetadataSource,
+    family: OrderingFamily,
+    handle: &str,
+    name: &str,
+    coverage: Option<i32>,
+) -> crate::web::templates::SourceOption {
+    let handle_matches = if handle.is_empty() {
+        owner.handle.is_none()
+    } else {
+        owner.handle.as_deref() == Some(handle)
+    };
+    crate::web::templates::SourceOption {
+        source: source.label().to_owned(),
+        source_name: source.display_name().to_owned(),
+        family: family.label().to_owned(),
+        handle: handle.to_owned(),
+        name: name.to_owned(),
+        coverage,
+        active: owner.source == Some(source) && owner.family == Some(family) && handle_matches,
+        renumbers: family.renumbers(),
+    }
+}
+
+/// An ordering in words, for the sentence at the top of the panel.
+fn ordering_label(ordering: &Ordering, handle: Option<&str>) -> String {
+    match ordering {
+        Ordering::Default => "ordenação própria da fonte".to_owned(),
+        Ordering::Manual { blocks } => {
+            format!("blocos declarados por você ({} no total)", blocks.len())
+        }
+        Ordering::Named { family, .. } => match handle {
+            Some(h) => format!("{} ({h})", family.label()),
+            None => family.label().to_owned(),
+        },
+    }
+}
+
+/// `POST /library/{id}/structure` — preview a choice, then commit it.
+///
+/// **Two passes through the same handler, and the first one writes
+/// nothing.** A tree write re-points every acquisition hanging off the
+/// item and every way it can go wrong is invisible on screen, so the
+/// operator sees the real plan — computed against the real tree, fetched
+/// from the real provider — before there is a button. A plan the gates
+/// would refuse never grows one.
+///
+/// `Form<Vec<(String, String)>>` because the hand-declared cut carries
+/// one field per season and `serde_urlencoded` collapses repeated keys,
+/// the same reason `/library/bulk` takes its selection this way.
+async fn library_structure(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    axum::extract::Form(fields): axum::extract::Form<Vec<(String, String)>>,
 ) -> Result<Response, AppError> {
-    let uuid = Uuid::parse_str(&id)
-        .map_err(|e| AppError::InvalidInput(format!("invalid library id: {e}")))?;
-    episode_numbering::clear(state.pool(), uuid).await?;
-    library_groups(State(state), Path(id)).await
+    let item = series_for_structure(&state, &id).await?;
+    let value = |key: &str| {
+        fields
+            .iter()
+            .find(|(name, _)| name == key)
+            .map_or("", |(_, v)| v.trim())
+    };
+
+    let Some(source) = MetadataSource::parse(value("source")) else {
+        return sources_panel(
+            &state,
+            &item,
+            None,
+            Some("fonte desconhecida — recarregue o painel".to_owned()),
+        )
+        .await;
+    };
+    let family = OrderingFamily::parse(value("family")).unwrap_or(OrderingFamily::Default);
+    let handle = value("handle").to_owned();
+    let pinned = !value("pinned").is_empty();
+    let confirm = value("confirm") == "1";
+
+    let (ordering, recipe) = match family {
+        OrderingFamily::Manual => match declared_cut(&fields) {
+            Ok(recipe) => (
+                Ordering::Manual {
+                    blocks: recipe.blocks(),
+                },
+                Some(recipe),
+            ),
+            Err(why) => return sources_panel(&state, &item, None, Some(why)).await,
+        },
+        OrderingFamily::Default => (Ordering::Default, None),
+        other => (
+            Ordering::Named {
+                family: other,
+                handle: handle.as_str().into(),
+            },
+            None,
+        ),
+    };
+
+    let pool = state.pool();
+    let ids = item_ids::for_item(pool, item.id).await?;
+    let Some(known) = ids.iter().find(|s| s.id.source() == source) else {
+        let why = format!(
+            "o título não guarda um id da {} — resolva o id antes de trocar a fonte",
+            source.display_name()
+        );
+        return sources_panel(&state, &item, None, Some(why)).await;
+    };
+
+    let registry = Registry::build(pool).await?;
+    let provider = match registry.require(source) {
+        Ok(p) => p,
+        Err(e) => return sources_panel(&state, &item, None, Some(e.to_string())).await,
+    };
+    // The real tree, not a description of one. A cut that does not add
+    // up surfaces here, from `recut`, which is the only place that can
+    // know the provider's own episode counts.
+    let incoming = match provider.tree(&known.id, &ordering).await {
+        Ok(tree) => tree,
+        Err(e) => return sources_panel(&state, &item, None, Some(e.to_string())).await,
+    };
+
+    if confirm {
+        let intent = structure::Intent::Choice { pinned, recipe };
+        return match structure::apply_with(pool, item.id, &incoming, &intent).await {
+            // The whole page: the tree behind the season accordion, the
+            // coverage chips and the episode rows all just changed, and
+            // a fragment would leave every one of them stale.
+            Ok(_) => Ok(hx_refresh()),
+            Err(e) => sources_panel(&state, &item, None, Some(e.to_string())).await,
+        };
+    }
+
+    let plan = structure::plan(pool, item.id, &incoming).await?;
+    let refusal = structure::refusal(&plan);
+    let preview = crate::web::templates::StructurePreview {
+        source_name: source.display_name().to_owned(),
+        ordering_name: ordering_label(&ordering, ordering.handle()),
+        paired: plan.pairs.len(),
+        orphans: plan.orphans.len(),
+        added: plan.added,
+        grabs_at_risk: plan.grabs_at_risk(),
+        stored_coverage: percent(plan.air_date_coverage.0),
+        incoming_coverage: percent(plan.air_date_coverage.1),
+        packs: plan
+            .packs_affected
+            .iter()
+            .map(|p| crate::web::templates::StructurePreviewPack {
+                season: p.season,
+                was: p.was,
+                now: p.now,
+                grabs: p.grabs,
+            })
+            .collect(),
+        would_commit: refusal.is_none(),
+        refusal,
+        source: source.label().to_owned(),
+        family: family.label().to_owned(),
+        handle,
+        pinned,
+    };
+    sources_panel(&state, &item, Some(preview), None).await
 }
 
-/// Portuguese for [`brarr_tmdb::EpisodeGroupKind`].
+/// A 0.0..=1.0 ratio as a whole percentage, for the screen.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "a ratio of episode counts, rendered as a percentage"
+)]
+fn percent(ratio: f32) -> i32 {
+    (ratio * 100.0).round() as i32
+}
+
+/// Read the hand-declared cut out of the form.
 ///
-/// The label lives here rather than on the enum because `brarr-tmdb` is
-/// a plain API client and has no business carrying this app's
-/// user-facing language.
-fn group_kind_label(kind: brarr_tmdb::EpisodeGroupKind) -> &'static str {
-    use brarr_tmdb::EpisodeGroupKind as K;
-    match kind {
-        K::OriginalAirDate => "exibição original",
-        K::Absolute => "absoluta",
-        K::Dvd => "DVD",
-        K::Digital => "digital",
-        K::StoryArc => "arco narrativo",
-        K::Production => "produção",
-        K::Tv => "TV",
-        K::Other(_) => "desconhecida",
+/// A season left blank is not cut, which is what lets an operator
+/// declare the one season that is wrong without restating the series.
+/// Every field blank is an error rather than an empty recipe: an empty
+/// `Ordering::Manual` is the provider's own tree wearing a label that
+/// says otherwise, and the next refresh would find nothing to re-apply.
+fn declared_cut(fields: &[(String, String)]) -> Result<structure::Recipe, String> {
+    let mut seasons: Vec<structure::RecipeSeason> = Vec::new();
+    for (name, raw) in fields {
+        let Some(number) = name.strip_prefix("sizes_") else {
+            continue;
+        };
+        if raw.trim().is_empty() {
+            continue;
+        }
+        let Ok(season) = number.parse::<i32>() else {
+            continue;
+        };
+        let sizes = Block::parse_sizes(raw).map_err(|e| format!("temporada {season}: {e}"))?;
+        if !sizes.is_empty() {
+            seasons.push(structure::RecipeSeason { season, sizes });
+        }
     }
+    if seasons.is_empty() {
+        return Err(
+            "declare o tamanho de pelo menos um bloco, ou escolha uma ordenação acima".to_owned(),
+        );
+    }
+    seasons.sort_by_key(|s| s.season);
+    Ok(structure::Recipe { seasons })
 }
 
 /// How often the badge asks whether its sweep has finished.

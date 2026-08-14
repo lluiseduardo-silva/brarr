@@ -1629,130 +1629,191 @@ async fn a_movie_not_out_yet_is_upcoming_rather_than_missing() {
     assert!(!body.contains("lib-status-missing"), "{body}");
 }
 
-/// The numbering panel. What it says out loud matters as much as what it
-/// lists: an operator about to change how a title is searched needs to
-/// know that the catalogue is not being renumbered, and needs to see
-/// when an ordering covers fewer episodes than the catalogue holds.
+/// The structure panel. **What it says out loud matters as much as what
+/// it lists**, and the sentence changed with the mechanism: the old
+/// numbering panel promised "nada é renumerado na biblioteca" and kept
+/// its word, because it stored a translation beside the tree. This one
+/// rebuilds the tree, so the promise it can honestly make is the
+/// narrower one — every row keeps its id, so no acquisition loses its
+/// episode.
 #[test]
-fn the_numbering_panel_offers_only_alternates_and_declares_what_it_changes() {
-    use askama::Template;
-    use brarr_orchestrator::web::templates::{GroupRow, LibraryGroupsModalPartial};
+fn the_structure_panel_offers_every_source_and_marks_the_one_in_force() {
+    use askama::Template as _;
+    use brarr_orchestrator::web::templates::{LibrarySourcesModalPartial, SourceOption};
 
-    let row = |id: &str, name: &str, kind: &str, alternate: bool, eps: i32| GroupRow {
-        id: id.to_owned(),
-        active: false,
-        name: name.to_owned(),
-        kind: kind.to_owned(),
-        alternate,
-        group_count: 3,
-        episode_count: eps,
-    };
+    let option =
+        |source: &str, name: &str, family: &str, handle: &str, active: bool| SourceOption {
+            source: source.to_owned(),
+            source_name: source.to_uppercase(),
+            family: family.to_owned(),
+            handle: handle.to_owned(),
+            name: name.to_owned(),
+            coverage: None,
+            active,
+            renumbers: family != "default",
+        };
 
-    let panel = LibraryGroupsModalPartial {
+    let panel = LibrarySourcesModalPartial {
         item_id: "11111111-1111-4111-8111-111111111111".to_owned(),
         item_title: "Jujutsu Kaisen".to_owned(),
-        alternates: 1,
-        active_name: None,
-        source: None,
-        seasons: Vec::new(),
-        error: None,
-        tvdb_available: false,
-        settled_by_operator: false,
         episodes: 59,
-        rows: vec![
-            row("ki", "季", "produção", true, 59),
-            row("orig", "Original Air Date", "exibição original", false, 59),
+        current_source: Some("TMDB".to_owned()),
+        current_ordering: "ordenação própria da fonte".to_owned(),
+        pinned: false,
+        options: vec![
+            option("tmdb", "ordenação própria", "default", "", true),
+            option("tmdb", "Story Arcs", "alternate", "ki", false),
+            option("tvdb", "ordenação própria", "default", "", false),
         ],
+        unavailable: vec!["IMDb não aparece aqui: o título não guarda um id dela.".to_owned()],
+        seasons: Vec::new(),
+        preview: None,
+        error: None,
     };
     let html = panel.render().unwrap();
 
+    assert!(html.contains("Estrutura da série"));
     assert!(
-        html.contains("/groups/ki/apply"),
-        "an alternate ordering is offered"
+        html.contains("value=\"ki\""),
+        "an alternate ordering is on offer"
     );
     assert!(
-        !html.contains("/groups/orig/apply"),
-        "the canonical ordering is listed but never offered — it is what the tree already is"
+        html.contains("bg-accent-soft"),
+        "the ordering in force is marked, or the operator cannot tell where they are"
     );
     assert!(
-        html.contains("Nada é renumerado na biblioteca"),
-        "the panel has to say what it does not touch, or applying reads as a rewrite"
+        html.contains("aquisição perde o episódio"),
+        "the panel has to say what a rebuild does not take with it"
     );
-
-    // Active: the row offers the way back, not the way in.
-    let active = LibraryGroupsModalPartial {
-        active_name: Some("季".to_owned()),
-        rows: vec![GroupRow {
-            active: true,
-            ..row("ki", "季", "produção", true, 59)
-        }],
-        ..panel
-    };
-    let html = active.render().unwrap();
-    assert!(html.contains("/groups/clear"));
-    assert!(!html.contains("/groups/ki/apply"));
-    assert!(html.contains("A árvore e os arquivos seguem a numeração"));
-
-    // Partial coverage is flagged rather than discovered afterwards.
-    let short = LibraryGroupsModalPartial {
-        item_id: "22222222-2222-4222-8222-222222222222".to_owned(),
-        item_title: "Jujutsu Kaisen".to_owned(),
-        alternates: 1,
-        active_name: None,
-        source: None,
-        seasons: Vec::new(),
-        error: None,
-        tvdb_available: false,
-        settled_by_operator: false,
-        episodes: 59,
-        rows: vec![row("arcs", "Story Arcs", "arco narrativo", true, 48)],
-    };
     assert!(
-        short
-            .render()
-            .unwrap()
-            .contains("cobre menos episódios do que o catálogo tem")
+        html.contains("o título não guarda um id dela"),
+        "a source that cannot be offered says why, rather than being absent"
+    );
+    assert!(
+        !html.contains("Aplicar esta estrutura"),
+        "nothing is applied before a plan has been computed"
     );
 }
 
-/// The escape hatch for a title neither TMDB nor the \*arr splits the way
+/// **A plan that would lose a file does not grow a button.**
+///
+/// This is the gate made visible. `structure::apply` refuses an orphaned
+/// episode, and the screen refuses it in the same breath rather than
+/// offering the action and reporting the refusal afterwards — an
+/// operator who clicks and is told no learns the same thing later and
+/// with less trust.
+#[test]
+fn a_plan_with_orphans_has_no_apply_button() {
+    use askama::Template as _;
+    use brarr_orchestrator::web::templates::{
+        LibrarySourcesModalPartial, StructurePreview, StructurePreviewPack,
+    };
+
+    let preview = |orphans: usize, refusal: Option<String>| StructurePreview {
+        source_name: "TheTVDB".to_owned(),
+        ordering_name: "ordenação própria da fonte".to_owned(),
+        paired: 129,
+        orphans,
+        added: 0,
+        grabs_at_risk: if orphans > 0 { 2 } else { 0 },
+        stored_coverage: 100,
+        incoming_coverage: 100,
+        packs: vec![StructurePreviewPack {
+            season: 1,
+            was: 131,
+            now: 14,
+            grabs: 1,
+        }],
+        would_commit: refusal.is_none(),
+        refusal,
+        source: "tvdb".to_owned(),
+        family: "default".to_owned(),
+        handle: String::new(),
+        pinned: true,
+    };
+
+    let panel = |p: StructurePreview| LibrarySourcesModalPartial {
+        item_id: "44444444-4444-4444-8444-444444444444".to_owned(),
+        item_title: "Dragon Ball Super".to_owned(),
+        episodes: 131,
+        current_source: Some("TMDB".to_owned()),
+        current_ordering: "ordenação própria da fonte".to_owned(),
+        pinned: false,
+        options: Vec::new(),
+        unavailable: Vec::new(),
+        seasons: Vec::new(),
+        preview: Some(p),
+        error: None,
+    };
+
+    let refused = panel(preview(
+        2,
+        Some("recusado: 2 episódio(s) armazenado(s) ficariam fora da árvore".to_owned()),
+    ))
+    .render()
+    .unwrap();
+    assert!(
+        !refused.contains("Aplicar esta estrutura"),
+        "a plan the gate would refuse must not be offered"
+    );
+    assert!(refused.contains("ficariam fora da árvore"), "{refused}");
+    assert!(
+        refused.contains("2 aquisição(ões) perderiam o episódio"),
+        "{refused}"
+    );
+
+    let clean = panel(preview(0, None)).render().unwrap();
+    assert!(clean.contains("Aplicar esta estrutura"));
+    assert!(
+        clean.contains("name=\"confirm\""),
+        "the button reposts the same choice with a confirmation, not a new one"
+    );
+    // The correction the operator has to be told about rather than
+    // discover: the season-1 pack stops meaning the whole series.
+    assert!(clean.contains("passa a cobrir 14 episódio(s)"), "{clean}");
+}
+
+/// The escape hatch for a title neither TMDB nor TheTVDB splits the way
 /// releases do. Solo Leveling: one season of 25 in the catalogue, two
 /// blocks of 12 and 13 in every release name.
 #[test]
 fn the_panel_offers_hand_declared_blocks() {
     use askama::Template as _;
-    use brarr_orchestrator::web::templates::{LibraryGroupsModalPartial, NumberingSeasonRow};
+    use brarr_orchestrator::web::templates::{LibrarySourcesModalPartial, NumberingSeasonRow};
 
-    let panel = LibraryGroupsModalPartial {
+    let panel = LibrarySourcesModalPartial {
         item_id: "33333333-3333-4333-8333-333333333333".to_owned(),
         item_title: "Solo Leveling".to_owned(),
-        alternates: 0,
-        active_name: None,
-        source: None,
+        episodes: 25,
+        current_source: Some("TMDB".to_owned()),
+        current_ordering: "ordenação própria da fonte".to_owned(),
+        pinned: false,
+        options: Vec::new(),
+        unavailable: Vec::new(),
         seasons: vec![NumberingSeasonRow {
             season: 1,
             episodes: 25,
             sizes: String::new(),
             first_season: 1,
         }],
+        preview: None,
         error: None,
-        tvdb_available: false,
-        settled_by_operator: false,
-        episodes: 25,
-        rows: Vec::new(),
     };
     let html = panel.render().unwrap();
-    assert!(html.contains("/numbering"), "the form posts the blocks");
+    assert!(html.contains("/structure"), "the form posts the blocks");
     assert!(html.contains("sizes_1"), "one field per canonical season");
-    assert!(html.contains("first_1"));
     assert!(
         html.contains("25 episódios"),
         "the operator needs the total to make the sizes add up"
     );
+    assert!(
+        html.contains("value=\"manual\""),
+        "the cut is a family, not a separate route"
+    );
 
     // A rejected form says why, and keeps what was typed.
-    let failed = LibraryGroupsModalPartial {
-        error: Some("a temporada 1 tem 25 episódios e seus blocos somam 24".to_owned()),
+    let failed = LibrarySourcesModalPartial {
+        error: Some("season 1 has 25 episodes and the blocks add up to 24".to_owned()),
         seasons: vec![NumberingSeasonRow {
             season: 1,
             episodes: 25,
@@ -1762,9 +1823,67 @@ fn the_panel_offers_hand_declared_blocks() {
         ..panel
     };
     let html = failed.render().unwrap();
-    assert!(html.contains("seus blocos somam 24"));
+    assert!(html.contains("blocks add up to 24"));
     assert!(
         html.contains("value=\"12, 12\""),
         "a rejected form must not eat what was typed"
     );
+}
+
+/// The panel answers on the real router, from the real button.
+///
+/// The three tests above render the template in isolation, which cannot
+/// catch a route that is not registered, an extractor that does not
+/// match, or a detail page still pointing at the URL the old panel used.
+/// This asks the router for both, over HTTP.
+///
+/// With no metadata credential configured the options list is empty and
+/// the panel says so — which is the honest answer, and is also what
+/// makes this test need no network.
+#[tokio::test]
+async fn the_structure_panel_answers_on_the_real_router() {
+    let (addr, state) = spawn().await;
+    let item = seed_series(&state).await;
+
+    let detail = get(addr, &format!("/library/{item}")).await;
+    assert!(
+        detail.contains(&format!("/library/{item}/sources")),
+        "the detail page points at the panel that exists"
+    );
+    assert!(
+        !detail.contains(&format!("/library/{item}/groups")),
+        "and not at the one it replaced"
+    );
+
+    let panel = get(addr, &format!("/library/{item}/sources")).await;
+    assert!(panel.contains("Estrutura da série"), "{panel}");
+    assert!(
+        panel.contains("Nenhuma fonte de metadados está configurada"),
+        "no credential is a sentence, not an empty table: {panel}"
+    );
+    assert!(
+        panel.contains(&format!("/library/{item}/structure")),
+        "the hand-declared cut posts to the one route that writes: {panel}"
+    );
+}
+
+/// A film has no tree, so the panel refuses rather than rendering an
+/// empty one — and the detail page does not offer the button at all.
+#[tokio::test]
+async fn a_film_has_no_structure_panel() {
+    use brarr_orchestrator::db::library;
+
+    let (addr, state) = spawn().await;
+    let film = library::upsert(
+        state.pool(),
+        &support::Seed::movie(603, "The Matrix").build(),
+    )
+    .await
+    .unwrap();
+
+    let detail = get(addr, &format!("/library/{}", film.id)).await;
+    assert!(!detail.contains(&format!("/library/{}/sources", film.id)));
+
+    let refused = get(addr, &format!("/library/{}/sources", film.id)).await;
+    assert!(refused.contains("só séries têm estrutura"), "{refused}");
 }

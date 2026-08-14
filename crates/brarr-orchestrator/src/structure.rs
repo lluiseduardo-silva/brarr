@@ -971,27 +971,40 @@ fn guard_source(
     Ok(())
 }
 
-/// Refuse a plan that would lose a file, or move rows on no evidence.
-fn guard_plan(plan: &StructurePlan) -> Result<(), AppError> {
+/// Why this plan would be refused, or `None` if it would commit.
+///
+/// The sentence and the gate are the same code on purpose. A screen that
+/// previews a write has to say what the write would say, and the way
+/// those drift is that one of them is a second copy written later — so
+/// [`guard_plan`] is this function plus a `?`, and the panel reads it
+/// directly rather than reconstructing the reasoning from the numbers it
+/// happens to be rendering.
+#[must_use]
+pub fn refusal(plan: &StructurePlan) -> Option<String> {
     if !plan.orphans.is_empty() {
-        return Err(AppError::InvalidInput(format!(
+        return Some(format!(
             "recusado: {} episódio(s) armazenado(s) ficariam fora da árvore, levando {} aquisição(ões)",
             plan.orphans.len(),
             plan.grabs_at_risk()
-        )));
+        ));
     }
 
     if plan.moves_anything() && plan.air_dates_are_thin() {
         let (stored, incoming) = plan.air_date_coverage;
-        return Err(AppError::InvalidInput(format!(
+        return Some(format!(
             "recusado: a árvore renumeraria episódios com datas de exibição insuficientes \
              para confirmar o pareamento (armazenado {:.0}%, recebido {:.0}%, mínimo {:.0}%)",
             stored * 100.0,
             incoming * 100.0,
             MIN_AIR_DATE_COVERAGE * 100.0
-        )));
+        ));
     }
-    Ok(())
+    None
+}
+
+/// Refuse a plan that would lose a file, or move rows on no evidence.
+fn guard_plan(plan: &StructurePlan) -> Result<(), AppError> {
+    refusal(plan).map_or(Ok(()), |why| Err(AppError::InvalidInput(why)))
 }
 
 #[cfg(test)]
