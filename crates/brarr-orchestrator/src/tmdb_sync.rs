@@ -133,7 +133,6 @@ pub fn season_to_new(season: &SeasonDetails) -> NewSeason {
             .episodes
             .iter()
             .map(|e| NewEpisode {
-                tmdb_episode_id: (e.id > 0).then_some(e.id),
                 episode_number: e.episode_number,
                 title: e.title.clone(),
                 air_date: e.air_date.map(at_midnight),

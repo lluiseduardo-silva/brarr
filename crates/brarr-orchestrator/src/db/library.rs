@@ -257,8 +257,6 @@ pub struct Season {
 pub struct Episode {
     /// Stable UUID v4.
     pub id: Uuid,
-    /// TMDB's own episode id, once a refresh has filled it in.
-    pub tmdb_episode_id: Option<i64>,
     /// Parent item.
     pub item_id: Uuid,
     /// Parent season.
@@ -312,13 +310,6 @@ pub struct NewSeason {
 /// One episode from a TMDB season fetch.
 #[derive(Debug, Clone)]
 pub struct NewEpisode {
-    /// TMDB's own episode id, when the payload carried one.
-    ///
-    /// The identity that survives a re-numbering: neither the local UUID
-    /// nor the (season, episode) pair does, and this is what lets an
-    /// episode move between seasons as an UPDATE rather than a delete
-    /// plus an insert.
-    pub tmdb_episode_id: Option<i64>,
     /// Episode number within the season.
     pub episode_number: i32,
     /// Episode title.
@@ -918,20 +909,19 @@ struct StoredTree {
     seasons: HashMap<i32, StoredSeason>,
     /// By `(season_number, episode_number)`.
     episodes: HashMap<(i32, i32), StoredEpisode>,
-    /// By TMDB episode id, for the rows that carry one.
-    by_tmdb: HashMap<i64, StoredEpisode>,
 }
 
 #[cfg(test)]
 impl StoredTree {
     /// The row this payload episode belongs to, if the tree already has
-    /// it. The id wins: it is the only key that means the same thing
-    /// before and after a re-numbering.
-    fn resolve(&self, tmdb_id: Option<i64>, season: i32, number: i32) -> Option<StoredEpisode> {
-        tmdb_id
-            .and_then(|id| self.by_tmdb.get(&id))
-            .or_else(|| self.episodes.get(&(season, number)))
-            .copied()
+    /// it.
+    ///
+    /// Coordinates only, which is all this door can offer: `NewSeason`
+    /// carries no identity. Production tree writes go through
+    /// [`crate::structure::apply`], which pairs on the owning source's
+    /// own episode id and reaches a coordinate only when there is none.
+    fn resolve(&self, season: i32, number: i32) -> Option<StoredEpisode> {
+        self.episodes.get(&(season, number)).copied()
     }
 }
 
@@ -961,36 +951,26 @@ async fn existing_tree(pool: &Pool, item_id: Uuid) -> Result<StoredTree, AppErro
     }
 
     let existing_eps = sqlx::query(
-        "SELECT id, season_number, episode_number, monitored, tmdb_episode_id \
+        "SELECT id, season_number, episode_number, monitored \
          FROM library_episodes WHERE item_id = ?",
     )
     .bind(item_id.to_string())
     .fetch_all(pool)
     .await?;
     let mut episodes = HashMap::with_capacity(existing_eps.len());
-    let mut by_tmdb = HashMap::with_capacity(existing_eps.len());
     for row in &existing_eps {
         let s: i64 = row.try_get("season_number")?;
         let e: i64 = row.try_get("episode_number")?;
         let flag: i64 = row.try_get("monitored")?;
-        let tmdb: Option<i64> = row.try_get("tmdb_episode_id")?;
-        let stored = StoredEpisode {
-            id: uuid_at(row, "id")?,
-            monitored: flag != 0,
-        };
         episodes.insert(
             (i32::try_from(s).unwrap_or(0), i32::try_from(e).unwrap_or(0)),
-            stored,
+            StoredEpisode {
+                id: uuid_at(row, "id")?,
+                monitored: flag != 0,
+            },
         );
-        if let Some(id) = tmdb {
-            by_tmdb.insert(id, stored);
-        }
     }
-    Ok(StoredTree {
-        seasons,
-        episodes,
-        by_tmdb,
-    })
+    Ok(StoredTree { seasons, episodes })
 }
 
 /// The item's [`MonitorScope`]. A missing row falls back to
@@ -1042,17 +1022,12 @@ pub(crate) async fn sync_seasons(
             .episodes
             .iter()
             .map(|episode| {
-                let known = stored.resolve(
-                    episode.tmdb_episode_id,
-                    season.season_number,
-                    episode.episode_number,
-                );
+                let known = stored.resolve(season.season_number, episode.episode_number);
                 DecidedEpisode {
                     id: known.map_or_else(Uuid::new_v4, |e| e.id),
                     number: episode.episode_number,
                     title: episode.title.clone(),
                     air_date: episode.air_date,
-                    tmdb_episode_id: episode.tmdb_episode_id,
                     // The compatibility door writes no identity: it is
                     // fed `NewSeason`, which has nowhere to carry one.
                     // Only `structure::apply` stamps the neutral columns.
@@ -1120,7 +1095,6 @@ pub(crate) struct DecidedEpisode {
     /// Air date.
     pub air_date: Option<OffsetDateTime>,
     /// TMDB's own episode id, where the payload carried one.
-    pub tmdb_episode_id: Option<i64>,
     /// Who numbered this row.
     pub source: Option<MetadataSource>,
     /// The owning source's episode id, as text.
@@ -1394,8 +1368,8 @@ async fn upsert_episode_row(
     sqlx::query(
         "INSERT INTO library_episodes \
             (id, item_id, season_id, season_number, episode_number, title, air_date, \
-             monitored, tmdb_episode_id, source, external_id, absolute_number) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+             monitored, source, external_id, absolute_number) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT(id) DO UPDATE SET \
             season_id       = excluded.season_id, \
             season_number   = excluded.season_number, \
@@ -1403,7 +1377,6 @@ async fn upsert_episode_row(
             title           = excluded.title, \
             air_date        = excluded.air_date, \
             monitored       = excluded.monitored, \
-            tmdb_episode_id = COALESCE(excluded.tmdb_episode_id, tmdb_episode_id), \
             source          = COALESCE(excluded.source, source), \
             external_id     = COALESCE(excluded.external_id, external_id), \
             absolute_number = COALESCE(excluded.absolute_number, absolute_number)",
@@ -1416,7 +1389,6 @@ async fn upsert_episode_row(
     .bind(episode.title.as_deref())
     .bind(episode.air_date.map(OffsetDateTime::unix_timestamp))
     .bind(i64::from(episode.monitored))
-    .bind(episode.tmdb_episode_id)
     .bind(episode.source.map(MetadataSource::label))
     .bind(episode.external_id.as_deref())
     .bind(episode.absolute_number.map(i64::from))
@@ -1694,7 +1666,7 @@ pub async fn seasons(pool: &Pool, item_id: Uuid) -> Result<Vec<Season>, AppError
 pub async fn episodes(pool: &Pool, item_id: Uuid) -> Result<Vec<Episode>, AppError> {
     let rows = sqlx::query(
         "SELECT id, item_id, season_id, season_number, episode_number, title, air_date, monitored, \
-                tmdb_episode_id, source, external_id, absolute_number \
+                source, external_id, absolute_number \
          FROM library_episodes WHERE item_id = ? \
          ORDER BY season_number ASC, episode_number ASC",
     )
@@ -1708,7 +1680,6 @@ pub async fn episodes(pool: &Pool, item_id: Uuid) -> Result<Vec<Episode>, AppErr
             let episode_number: i64 = row.try_get("episode_number")?;
             Ok(Episode {
                 id: uuid_at(row, "id")?,
-                tmdb_episode_id: row.try_get("tmdb_episode_id")?,
                 item_id: uuid_at(row, "item_id")?,
                 season_id: uuid_at(row, "season_id")?,
                 season_number: i32::try_from(season_number).unwrap_or(0),
@@ -1911,7 +1882,6 @@ mod tests {
                 number: 1,
                 title: None,
                 air_date: None,
-                tmdb_episode_id: None,
                 source: None,
                 external_id: None,
                 absolute_number: None,
@@ -2081,102 +2051,6 @@ mod tests {
                 e.season_number,
                 e.episode_number
             );
-        }
-    }
-
-    /// The whole point of `tmdb_episode_id`: a series can be re-ordered
-    /// and every episode keeps its row, so every file keeps its episode.
-    /// Dragon Ball Super is 1×131 at TMDB and 14/13/19/30/55 everywhere
-    /// else; moving episode 15 from `(1, 15)` to `(2, 1)` used to be a
-    /// delete plus an insert, and `grabs.episode_id` is
-    /// `ON DELETE SET NULL`.
-    #[tokio::test]
-    async fn renumbering_a_series_keeps_every_row_and_every_link() {
-        let pool = open_memory().await.unwrap();
-        let item = upsert(&pool, &Seed::series(62715, "Dragon Ball Super").build())
-            .await
-            .unwrap();
-
-        // Canonical: one season of 20, each episode carrying its id.
-        let flat = vec![NewSeason {
-            season_number: 1,
-            episode_count: 20,
-            air_date: None,
-            episodes: (1..=20)
-                .map(|n| NewEpisode {
-                    tmdb_episode_id: Some(i64::from(1_000_000 + n)),
-                    episode_number: n,
-                    title: None,
-                    air_date: None,
-                })
-                .collect(),
-        }];
-        sync_seasons(&pool, item.id, &flat).await.unwrap();
-
-        let before: HashMap<i64, Uuid> = episodes(&pool, item.id)
-            .await
-            .unwrap()
-            .into_iter()
-            .filter_map(|e| e.tmdb_episode_id.map(|t| (t, e.id)))
-            .collect();
-        assert_eq!(before.len(), 20, "the ids reached the database");
-
-        // The same 20 episodes, re-ordered into 14 + 6.
-        let split = vec![
-            NewSeason {
-                season_number: 1,
-                episode_count: 14,
-                air_date: None,
-                episodes: (1..=14)
-                    .map(|n| NewEpisode {
-                        tmdb_episode_id: Some(i64::from(1_000_000 + n)),
-                        episode_number: n,
-                        title: None,
-                        air_date: None,
-                    })
-                    .collect(),
-            },
-            NewSeason {
-                season_number: 2,
-                episode_count: 6,
-                air_date: None,
-                episodes: (1..=6)
-                    .map(|n| NewEpisode {
-                        tmdb_episode_id: Some(i64::from(1_000_000 + 14 + n)),
-                        episode_number: n,
-                        title: None,
-                        air_date: None,
-                    })
-                    .collect(),
-            },
-        ];
-        sync_seasons(&pool, item.id, &split).await.unwrap();
-
-        let after = episodes(&pool, item.id).await.unwrap();
-        assert_eq!(after.len(), 20, "nothing was lost in the re-ordering");
-        for e in &after {
-            let tmdb = e.tmdb_episode_id.unwrap();
-            assert_eq!(
-                before.get(&tmdb),
-                Some(&e.id),
-                "TMDB episode {tmdb} must keep its row across a re-numbering"
-            );
-        }
-
-        // Canonical 15 is now S02E01, on the same row.
-        let moved = after
-            .iter()
-            .find(|e| e.tmdb_episode_id == Some(1_000_015))
-            .unwrap();
-        assert_eq!((moved.season_number, moved.episode_number), (2, 1));
-        assert_eq!(before[&1_000_015], moved.id);
-
-        // And back again, which is the undo an operator will reach for.
-        sync_seasons(&pool, item.id, &flat).await.unwrap();
-        let back = episodes(&pool, item.id).await.unwrap();
-        assert_eq!(back.len(), 20);
-        for e in &back {
-            assert_eq!(before.get(&e.tmdb_episode_id.unwrap()), Some(&e.id));
         }
     }
 

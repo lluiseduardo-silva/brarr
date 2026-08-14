@@ -86,12 +86,6 @@ pub enum LinkMethod {
     /// The owning source names this row: same `source`, same
     /// `external_id`. A refresh, not a switch.
     Owner,
-    /// The row predates the identity migration and carries only
-    /// `tmdb_episode_id`. Reached solely for a TMDB-owned tree, because
-    /// for any other owner that column is a foreign namespace and a
-    /// numeric collision between two providers' episode ids means
-    /// nothing.
-    ExternalId,
     /// Same `(season, episode)` as before. Not identity — it is exactly
     /// the key a renumbering changes — but it is what keeps a tree whose
     /// rows have no stored id from being deleted and reinserted.
@@ -305,7 +299,6 @@ pub fn pair(stored: &[Episode], incoming: &SeriesTree) -> Paired {
 
     for tier in [
         LinkMethod::Owner,
-        LinkMethod::ExternalId,
         LinkMethod::Coordinates,
         LinkMethod::AirDate,
         LinkMethod::Absolute,
@@ -364,9 +357,7 @@ struct Index<'a> {
 impl<'a> Index<'a> {
     fn lookup(&self, episode: &TreeEpisode, coord: (i32, i32)) -> Option<&'a Episode> {
         match self.tier {
-            LinkMethod::Owner | LinkMethod::ExternalId => {
-                self.by_identity.get(&episode.external_id).copied()
-            }
+            LinkMethod::Owner => self.by_identity.get(&episode.external_id).copied(),
             LinkMethod::Coordinates => self.by_coordinate.get(&coord).copied(),
             LinkMethod::AirDate => episode
                 .air_date
@@ -400,18 +391,6 @@ fn build_index<'a>(
                 if row.source == Some(source) {
                     if let Some(id) = row.external_id.as_ref() {
                         index.by_identity.insert(id.clone(), row);
-                    }
-                }
-            }
-        }
-        LinkMethod::ExternalId => {
-            // Only a TMDB-owned tree may read `tmdb_episode_id`. For any
-            // other owner it is a foreign namespace, and two providers'
-            // episode ids colliding numerically means nothing at all.
-            if source == MetadataSource::Tmdb {
-                for row in stored {
-                    if let Some(id) = row.tmdb_episode_id {
-                        index.by_identity.insert(id.to_string(), row);
                     }
                 }
             }
@@ -765,13 +744,6 @@ pub async fn apply_with(
                             number: episode.number,
                             title: episode.title.clone(),
                             air_date: episode.air_date,
-                            // Kept in step with the neutral pair while
-                            // the legacy column is still read: a TMDB
-                            // tree writes both, any other owner writes
-                            // only the neutral one.
-                            tmdb_episode_id: (incoming.source == MetadataSource::Tmdb)
-                                .then(|| episode.external_id.parse::<i64>().ok())
-                                .flatten(),
                             source: Some(incoming.source),
                             external_id: Some(episode.external_id.clone()),
                             absolute_number: episode.absolute_number,
@@ -913,7 +885,6 @@ mod tests {
     fn stored(season: i32, number: i32) -> Episode {
         Episode {
             id: Uuid::new_v4(),
-            tmdb_episode_id: None,
             item_id: Uuid::nil(),
             season_id: Uuid::nil(),
             season_number: season,
@@ -1146,12 +1117,16 @@ mod tests {
         assert!(paired.unclaimed.is_empty());
     }
 
-    /// A TheTVDB-owned tree must not read `tmdb_episode_id`. The two are
-    /// different namespaces and a numeric collision means nothing.
+    /// **An episode id belongs to the source that issued it.** The
+    /// identity tier keys on `external_id` *and* on `source`, so two
+    /// providers numbering an episode the same means nothing — which is
+    /// the whole reason the neutral pair replaced a column named after
+    /// one provider.
     #[test]
-    fn a_foreign_owner_does_not_read_the_tmdb_episode_id() {
+    fn an_identity_from_another_source_does_not_match() {
         let stored_rows = vec![Episode {
-            tmdb_episode_id: Some(5_345_648),
+            source: Some(MetadataSource::Tmdb),
+            external_id: Some("5345648".to_owned()),
             ..stored(1, 1)
         }];
         let incoming_eps = vec![ep(4, "5345648")];
@@ -1167,12 +1142,13 @@ mod tests {
         );
     }
 
-    /// The same row, under a TMDB-owned tree, is the compatibility tier
-    /// that keeps every pre-identity row linked.
+    /// The same row under its own source matches by identity, and a move
+    /// it records rather than a row it recreates.
     #[test]
-    fn a_tmdb_tree_still_matches_a_row_that_predates_the_identity_column() {
+    fn a_tree_from_the_owning_source_matches_by_identity() {
         let stored_rows = vec![Episode {
-            tmdb_episode_id: Some(5_345_648),
+            source: Some(MetadataSource::Tmdb),
+            external_id: Some("5345648".to_owned()),
             ..stored(1, 1)
         }];
         let incoming_eps = vec![ep(4, "5345648")];
@@ -1183,7 +1159,7 @@ mod tests {
         );
 
         let matched = paired.by_coordinate.get(&(1, 4)).expect("id tier matches");
-        assert_eq!(matched.method, LinkMethod::ExternalId);
+        assert_eq!(matched.method, LinkMethod::Owner);
         assert!(matched.moved, "1x01 becoming 1x04 is a move");
     }
 

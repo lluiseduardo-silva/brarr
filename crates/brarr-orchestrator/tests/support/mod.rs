@@ -106,7 +106,6 @@ impl Seed {
 /// names it.
 pub fn episode(number: i32) -> NewEpisode {
     NewEpisode {
-        tmdb_episode_id: None,
         episode_number: number,
         title: None,
         air_date: None,
@@ -172,19 +171,14 @@ pub fn as_series_tree(seasons: &[NewSeason]) -> SeriesTree {
                     .episodes
                     .iter()
                     .map(|e| TreeEpisode {
-                        external_id: e.tmdb_episode_id.map_or_else(
-                            || {
-                                // Unique per item by construction, which
-                                // is what `idx_library_episodes_external`
-                                // needs, and numeric so it reads back as
-                                // a TMDB id rather than as a placeholder.
-                                (1_000_000
-                                    + i64::from(s.season_number) * 1_000
-                                    + i64::from(e.episode_number))
-                                .to_string()
-                            },
-                            |id| id.to_string(),
-                        ),
+                        // Unique per item by construction, which is what
+                        // `idx_library_episodes_external` needs, and
+                        // numeric so it reads back as a TMDB id rather
+                        // than as a placeholder.
+                        external_id: (1_000_000
+                            + i64::from(s.season_number) * 1_000
+                            + i64::from(e.episode_number))
+                        .to_string(),
                         number: e.episode_number,
                         title: e.title.clone(),
                         air_date: e.air_date,

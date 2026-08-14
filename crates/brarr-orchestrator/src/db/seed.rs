@@ -108,7 +108,6 @@ impl Seed {
 /// never name it.
 pub(crate) fn episode(number: i32) -> NewEpisode {
     NewEpisode {
-        tmdb_episode_id: None,
         episode_number: number,
         title: None,
         air_date: None,
