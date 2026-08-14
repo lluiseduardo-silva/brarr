@@ -67,6 +67,7 @@ use crate::db::library::{self, LibraryItem, MediaType, MonitorScope};
 use crate::db::{Pool, episode_numbering, grabs};
 use crate::episode_match::{self, EpisodeMatcher, ExternalNumber};
 use crate::remote_path::{self, PrefixRule};
+use crate::structure;
 use crate::tmdb_sync;
 use crate::{AppError, AppState};
 
@@ -1030,20 +1031,22 @@ async fn upsert_metadata(
     }
 }
 
-/// Rebuild a series' season tree from TMDB.
+/// Rebuild a series' season tree, through the one door that asks who
+/// owns it first.
+///
+/// This runs for **every** series on **every** passive sweep, outside the
+/// `if created` gate — which is what made the v0.13 unlink hit a whole TV
+/// library every half hour. [`structure::apply`] is what makes that
+/// frequency safe rather than merely survivable.
 async fn sync_tree(
     pool: &Pool,
     tmdb: &TmdbClient,
     item: &LibraryItem,
     tmdb_id: i64,
 ) -> Result<(), AppError> {
-    let details = tmdb.tv(tmdb_id).await?;
-    let mut seasons = Vec::with_capacity(details.seasons.len());
-    for summary in &details.seasons {
-        let season = tmdb.season(tmdb_id, summary.season_number).await?;
-        seasons.push(tmdb_sync::season_to_new(&season));
-    }
-    library::sync_seasons(pool, item.id, &seasons).await
+    let tree = tmdb_sync::canonical_tree(tmdb, tmdb_id).await?;
+    structure::apply(pool, item.id, &tree).await?;
+    Ok(())
 }
 
 /// Give a created title its profile and its root folder.

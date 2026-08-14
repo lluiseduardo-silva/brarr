@@ -13,7 +13,7 @@ use sqlx::{Row, sqlite::SqliteRow};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use brarr_core::{ExternalId, MetadataSource};
+use brarr_core::{ExternalId, MetadataSource, Ordering, OrderingFamily};
 
 use crate::db::item_ids;
 use crate::{AppError, db::Pool};
@@ -273,6 +273,27 @@ pub struct Episode {
     pub air_date: Option<OffsetDateTime>,
     /// Whether the scanner should chase this episode.
     pub monitored: bool,
+    /// Who numbered this row.
+    ///
+    /// `None` for every row written before the tree writer learned to
+    /// stamp it, which is most of them until a refresh has been round.
+    /// Read together with [`Self::external_id`]: the pair is what a
+    /// UNIQUE index can hold once two providers can each own a tree,
+    /// because TheTVDB's episode 5345648 and TMDB's episode 5345648 are
+    /// not the same row.
+    pub source: Option<MetadataSource>,
+    /// The owning source's own episode id, as text.
+    ///
+    /// The only identity that survives a renumbering — neither the local
+    /// UUID nor the `(season, episode)` pair does.
+    pub external_id: Option<String>,
+    /// Position in the series as a whole, when the source has one.
+    ///
+    /// **Evidence and a tiebreak, never a coordinate.** TheTVDB gives
+    /// absolute 13 to a Kaiju No. 8 special, so its `S02E01` carries
+    /// absolute 14 and an absolute-first join moves a whole season by
+    /// one.
+    pub absolute_number: Option<i32>,
 }
 
 /// A season plus its episodes, as returned by a TMDB season fetch.
@@ -347,6 +368,17 @@ fn opt_ts_at(row: &SqliteRow, col: &str) -> Result<Option<OffsetDateTime>, AppEr
         Some(v) => Ok(OffsetDateTime::from_unix_timestamp(v).ok()),
         None => Ok(None),
     }
+}
+
+/// Read a nullable INTEGER that Rust holds as an `i32`.
+///
+/// A stored value outside `i32` is bad data and degrades to `None`, the
+/// same call as [`opt_ts_at`]: an absolute number nobody can represent is
+/// a reason to have no tiebreak, never a reason to make the episode
+/// unreadable.
+fn opt_i32_at(row: &SqliteRow, col: &str) -> Result<Option<i32>, AppError> {
+    let raw: Option<i64> = row.try_get(col)?;
+    Ok(raw.and_then(|v| i32::try_from(v).ok()))
 }
 
 fn row_to_item(row: &SqliteRow) -> Result<LibraryItem, AppError> {
@@ -849,6 +881,7 @@ pub async fn counts(pool: &Pool) -> Result<LibraryCounts, AppError> {
 
 /// A season row as it stands before a sync: its identity and the flag
 /// the operator set.
+#[cfg(test)]
 #[derive(Debug, Clone, Copy)]
 struct StoredSeason {
     id: Uuid,
@@ -856,6 +889,7 @@ struct StoredSeason {
 }
 
 /// An episode row as it stands before a sync.
+#[cfg(test)]
 #[derive(Debug, Clone, Copy)]
 struct StoredEpisode {
     id: Uuid,
@@ -878,6 +912,7 @@ struct StoredEpisode {
 /// re-numbering but is absent until a refresh has filled it in. Matching
 /// by the id first and falling back to the pair is what lets a series be
 /// re-ordered without any row — or any grab — being lost.
+#[cfg(test)]
 struct StoredTree {
     /// By season number.
     seasons: HashMap<i32, StoredSeason>,
@@ -887,6 +922,7 @@ struct StoredTree {
     by_tmdb: HashMap<i64, StoredEpisode>,
 }
 
+#[cfg(test)]
 impl StoredTree {
     /// The row this payload episode belongs to, if the tree already has
     /// it. The id wins: it is the only key that means the same thing
@@ -904,6 +940,7 @@ impl StoredTree {
 /// Split out of [`sync_seasons`] to keep that function under the line
 /// limit, and because "what is stored right now" is a question worth
 /// being able to ask on its own.
+#[cfg(test)]
 async fn existing_tree(pool: &Pool, item_id: Uuid) -> Result<StoredTree, AppError> {
     let existing =
         sqlx::query("SELECT id, season_number, monitored FROM library_seasons WHERE item_id = ?")
@@ -970,104 +1007,299 @@ async fn item_scope(pool: &Pool, item_id: Uuid) -> Result<MonitorScope, AppError
     }
 }
 
-/// Refresh the season/episode tree of a series from a TMDB fetch.
+/// Seed a tree from a `NewSeason` payload. **Tests only.**
 ///
-/// Monitoring flags of seasons and episodes that survive the sync are
-/// preserved — the same reasoning as [`upsert`]: TMDB owns the shape,
-/// the operator owns what gets chased. Seasons TMDB no longer reports
-/// are dropped (and their episodes cascade).
+/// Production writes go through [`crate::structure::apply`], which asks
+/// who owns the shape before rewriting it and computes the pairing with
+/// evidence it can report. This door exists because a hundred-odd unit
+/// tests want a tree in the database and do not want to state an identity
+/// for every episode to get one; it resolves rows the way the writer did
+/// before [`crate::structure::pair`] existed — the owning id, then the
+/// `(season, episode)` pair — and stamps no identity, so it cannot
+/// pretend a source produced rows no source did.
 ///
-/// A row this has never seen takes its default from the item's
-/// [`MonitorScope`], which is why "only the first season" survives a
-/// refresh that publishes a second one.
-///
-/// **A surviving row keeps its `id`, and that is the point.** This used
-/// to `DELETE` the item's seasons and reinsert everything with fresh
-/// UUIDs, which cost nothing visible in the tree — the flags were
-/// recopied by number — but nulled every `grabs.episode_id` pointing
-/// into it. Since the passive \*arr sweep calls this for every series on
-/// every pass, an operator's whole TV library was unlinked from its
-/// files every half hour, and because an unlinked grab reads as
-/// `(NULL, NULL)` — "covers the whole item" — the damage rendered as
-/// *complete*, not as missing. Upserting by number keeps the ids, so the
-/// only rows that lose their link are the ones TMDB genuinely dropped.
-///
-/// **An episode that moves keeps its row.** `(1, 15)` becoming `(2, 1)`
-/// under an alternate ordering used to be a new key, so a delete plus an
-/// insert, so an unlinked file. Matching on TMDB's episode id — the only
-/// identity that means the same thing before and after a re-numbering —
-/// makes it an UPDATE of two integers on a row that lives. The number
-/// pair remains the fallback for rows a refresh has not filled the id
-/// into yet, which is exactly the behaviour that shipped before.
+/// It is `#[cfg(test)]` rather than merely private because "no production
+/// caller" is the property this phase bought, and a compiler error is a
+/// better way to keep it than a review.
 ///
 /// # Errors
 ///
-/// Returns [`AppError::Database`] on SQL failure.
-pub async fn sync_seasons(
+/// Returns [`AppError::Database`] on SQL failure, or
+/// [`AppError::InvalidInput`] when the write would orphan an acquisition.
+#[cfg(test)]
+pub(crate) async fn sync_seasons(
     pool: &Pool,
     item_id: Uuid,
     seasons: &[NewSeason],
 ) -> Result<(), AppError> {
     let stored = existing_tree(pool, item_id).await?;
+    let policy = FlagPolicy::read(pool, item_id, seasons.iter().map(|s| s.season_number)).await?;
 
-    // A row this function has never seen takes its default from the
-    // item's scope. Rows it *has* seen keep whatever the operator set —
-    // the scope decides defaults, it does not overwrite choices.
-    let scope = item_scope(pool, item_id).await?;
-    // Season 0 is TMDB's specials bucket and never counts as "the first
-    // season" — The Boys carries 76 specials against 40 real episodes.
-    let first_season = seasons
-        .iter()
-        .map(|s| s.season_number)
-        .filter(|n| *n > 0)
-        .min()
-        .unwrap_or(1);
-    let now = OffsetDateTime::now_utc();
+    let mut decided = Vec::with_capacity(seasons.len());
+    for season in seasons {
+        let known = stored.seasons.get(&season.season_number);
+        let episodes = season
+            .episodes
+            .iter()
+            .map(|episode| {
+                let known = stored.resolve(
+                    episode.tmdb_episode_id,
+                    season.season_number,
+                    episode.episode_number,
+                );
+                DecidedEpisode {
+                    id: known.map_or_else(Uuid::new_v4, |e| e.id),
+                    number: episode.episode_number,
+                    title: episode.title.clone(),
+                    air_date: episode.air_date,
+                    tmdb_episode_id: episode.tmdb_episode_id,
+                    // The compatibility door writes no identity: it is
+                    // fed `NewSeason`, which has nowhere to carry one.
+                    // Only `structure::apply` stamps the neutral columns.
+                    source: None,
+                    external_id: None,
+                    absolute_number: None,
+                    monitored: policy.for_row(
+                        season.season_number,
+                        episode.air_date,
+                        known.map(|e| e.monitored),
+                    ),
+                }
+            })
+            .collect();
 
-    // One transaction: a failure halfway used to leave the item with a
-    // partially rebuilt tree, because the `DELETE` had already committed.
+        decided.push(DecidedSeason {
+            id: known.map_or_else(Uuid::new_v4, |s| s.id),
+            number: season.season_number,
+            episode_count: season.episode_count,
+            air_date: season.air_date,
+            monitored: policy.for_row(
+                season.season_number,
+                season.air_date,
+                known.map(|s| s.monitored),
+            ),
+            episodes,
+        });
+    }
+
+    write_tree(pool, item_id, &decided).await
+}
+
+/// One season as the writer will store it, with its row id already
+/// decided.
+///
+/// The type exists so that *deciding* which stored row an incoming
+/// episode is — the part [`crate::structure::pair`] owns and the part
+/// that can be got wrong — happens before the transaction opens and can
+/// be inspected without writing anything.
+#[derive(Debug, Clone)]
+pub(crate) struct DecidedSeason {
+    /// Row id to write under: a stored one when the season survives.
+    pub id: Uuid,
+    /// Season number.
+    pub number: i32,
+    /// Episode count to record.
+    pub episode_count: i32,
+    /// First air date.
+    pub air_date: Option<OffsetDateTime>,
+    /// Resolved monitoring flag.
+    pub monitored: bool,
+    /// Episodes belonging to it.
+    pub episodes: Vec<DecidedEpisode>,
+}
+
+/// One episode as the writer will store it.
+#[derive(Debug, Clone)]
+pub(crate) struct DecidedEpisode {
+    /// Row id to write under: a stored one when the episode survives.
+    pub id: Uuid,
+    /// Episode number within the season.
+    pub number: i32,
+    /// Episode title.
+    pub title: Option<String>,
+    /// Air date.
+    pub air_date: Option<OffsetDateTime>,
+    /// TMDB's own episode id, where the payload carried one.
+    pub tmdb_episode_id: Option<i64>,
+    /// Who numbered this row.
+    pub source: Option<MetadataSource>,
+    /// The owning source's episode id, as text.
+    pub external_id: Option<String>,
+    /// Position in the series as a whole.
+    pub absolute_number: Option<i32>,
+    /// Resolved monitoring flag.
+    pub monitored: bool,
+}
+
+/// How a row this writer has never seen gets its monitoring flag.
+///
+/// Rows it *has* seen keep whatever the operator set: the scope decides
+/// defaults, it never overwrites a choice.
+pub(crate) struct FlagPolicy {
+    scope: MonitorScope,
+    first_season: i32,
+    now: OffsetDateTime,
+}
+
+impl FlagPolicy {
+    /// Read the item's scope and fix the reference points.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::Database`] on SQL failure.
+    pub(crate) async fn read(
+        pool: &Pool,
+        item_id: Uuid,
+        seasons: impl Iterator<Item = i32>,
+    ) -> Result<Self, AppError> {
+        Ok(Self {
+            scope: item_scope(pool, item_id).await?,
+            // Season 0 is TMDB's specials bucket and never counts as
+            // "the first season" — The Boys carries 76 specials against
+            // 40 real episodes.
+            first_season: seasons.filter(|n| *n > 0).min().unwrap_or(1),
+            now: OffsetDateTime::now_utc(),
+        })
+    }
+
+    /// The flag for one row. `known` is its stored flag, when it has one.
+    pub(crate) fn for_row(
+        &self,
+        season: i32,
+        air_date: Option<OffsetDateTime>,
+        known: Option<bool>,
+    ) -> bool {
+        // No air date counts as "not aired": TMDB leaves it blank until
+        // it schedules one, and calling that aired would mark the episode
+        // unmonitored under `future`, where it would stay forever — the
+        // tree preserves flags by number, so it could never come back on
+        // its own.
+        let aired = air_date.is_some_and(|d| d <= self.now);
+        known.unwrap_or_else(|| self.scope.wants_new_row(season, self.first_season, aired))
+    }
+}
+
+/// Write a decided tree, and refuse to leave a file unlinked.
+///
+/// **The one place in brarr that rebuilds a season tree.** Everything
+/// else reaches it through [`crate::structure::apply`], which is what
+/// makes "who owns this shape?" a question that gets asked before the
+/// shape is rewritten rather than after.
+///
+/// One transaction: a failure halfway used to leave the item with a
+/// partially rebuilt tree, because the `DELETE` had already committed.
+///
+/// **The net.** `grabs.episode_id` is `ON DELETE SET NULL`, so every
+/// prune silently unlinks whatever pointed at the row — no error, no log,
+/// and the resulting `(scope='episode', episode_id=NULL)` covers nothing
+/// while the screen used to render the series *complete*. So the count of
+/// this item's orphaned episode grabs is taken before and after, inside
+/// the same transaction, and a rise rolls the whole thing back. It is one
+/// query, and it is the entire safety net, because the damage it guards
+/// has no other symptom.
+///
+/// # Errors
+///
+/// Returns [`AppError::Database`] on SQL failure, or
+/// [`AppError::InvalidInput`] when the write would orphan an acquisition.
+pub(crate) async fn write_tree(
+    pool: &Pool,
+    item_id: Uuid,
+    seasons: &[DecidedSeason],
+) -> Result<(), AppError> {
     let mut tx = pool.begin().await?;
+
+    // Every read from here on goes through `&mut *tx`, never the pool:
+    // `open_memory` runs with `max_connections(1)`, so a pool query
+    // issued while this transaction is checked out waits for the
+    // connection the transaction itself holds, and the test hangs
+    // instead of failing.
+    let before = crate::db::grabs::orphan_episode_count(&mut tx, item_id).await?;
+    let stored_ids = tree_row_ids(&mut tx, item_id).await?;
+
     park(&mut tx, item_id).await?;
 
     let mut claimed: HashSet<Uuid> = HashSet::new();
     for season in seasons {
-        let known = stored.seasons.get(&season.season_number);
-        let season_id = known.map_or_else(Uuid::new_v4, |s| s.id);
-        let season_aired = season.air_date.is_some_and(|d| d <= now);
-        let monitored = known.map_or_else(
-            || scope.wants_new_row(season.season_number, first_season, season_aired),
-            |s| s.monitored,
-        );
-        claimed.insert(season_id);
-        upsert_season(&mut tx, season_id, item_id, season, monitored).await?;
-
+        claimed.insert(season.id);
+        upsert_season_row(&mut tx, item_id, season).await?;
         for episode in &season.episodes {
-            // No air date counts as "not aired": TMDB leaves it blank
-            // until it schedules one, and calling that aired would mark
-            // the episode unmonitored under `future`, where it would
-            // stay forever — the tree preserves flags by number, so it
-            // could never come back on its own.
-            let aired = episode.air_date.is_some_and(|d| d <= now);
-            let known = stored.resolve(
-                episode.tmdb_episode_id,
-                season.season_number,
-                episode.episode_number,
-            );
-            let ep_monitored = known.map_or_else(
-                || scope.wants_new_row(season.season_number, first_season, aired),
-                |e| e.monitored,
-            );
             let ids = EpisodeIds {
-                id: known.map_or_else(Uuid::new_v4, |e| e.id),
+                id: episode.id,
                 item_id,
-                season_id,
+                season_id: season.id,
             };
-            claimed.insert(ids.id);
-            upsert_episode(&mut tx, ids, season.season_number, episode, ep_monitored).await?;
+            claimed.insert(episode.id);
+            upsert_episode_row(&mut tx, ids, season.number, episode).await?;
         }
     }
-    prune_tree(&mut tx, &stored, &claimed).await?;
+
+    prune_rows(&mut tx, &stored_ids, &claimed).await?;
+
+    let after = crate::db::grabs::orphan_episode_count(&mut tx, item_id).await?;
+    if after > before {
+        // Dropping the transaction rolls it back. Returning the numbers
+        // rather than a bare refusal is what makes the failure legible in
+        // a log line that nobody was watching for.
+        return Err(AppError::InvalidInput(format!(
+            "recusado: a escrita da árvore deixaria {} aquisição(ões) sem episódio (antes {before}, depois {after})",
+            after - before
+        )));
+    }
+
     tx.commit().await?;
+    Ok(())
+}
+
+/// Every season and episode row id this item currently has.
+///
+/// Read inside the transaction, unlike the snapshot [`sync_seasons`]
+/// diffs against: it decides what gets deleted, so it must see the same
+/// state the deletes will run against.
+async fn tree_row_ids(
+    conn: &mut sqlx::SqliteConnection,
+    item_id: Uuid,
+) -> Result<Vec<(Uuid, bool)>, AppError> {
+    let mut out = Vec::new();
+    let seasons = sqlx::query("SELECT id FROM library_seasons WHERE item_id = ?")
+        .bind(item_id.to_string())
+        .fetch_all(&mut *conn)
+        .await?;
+    for row in &seasons {
+        out.push((uuid_at(row, "id")?, false));
+    }
+    let episodes = sqlx::query("SELECT id FROM library_episodes WHERE item_id = ?")
+        .bind(item_id.to_string())
+        .fetch_all(&mut *conn)
+        .await?;
+    for row in &episodes {
+        out.push((uuid_at(row, "id")?, true));
+    }
+    Ok(out)
+}
+
+/// Drop the rows the payload did not claim.
+///
+/// Episodes go first so the reason each row died is the one stated here,
+/// not an incidental CASCADE from its season.
+async fn prune_rows(
+    conn: &mut sqlx::SqliteConnection,
+    stored: &[(Uuid, bool)],
+    claimed: &HashSet<Uuid>,
+) -> Result<(), AppError> {
+    let doomed = || stored.iter().filter(|(id, _)| !claimed.contains(id));
+    for (id, _) in doomed().filter(|(_, is_episode)| *is_episode) {
+        sqlx::query("DELETE FROM library_episodes WHERE id = ?")
+            .bind(id.to_string())
+            .execute(&mut *conn)
+            .await?;
+    }
+    for (id, _) in doomed().filter(|(_, is_episode)| !*is_episode) {
+        sqlx::query("DELETE FROM library_seasons WHERE id = ?")
+            .bind(id.to_string())
+            .execute(&mut *conn)
+            .await?;
+    }
     Ok(())
 }
 
@@ -1114,12 +1346,10 @@ struct EpisodeIds {
 /// time this runs — a season being renumbered no longer collides with
 /// the number it is leaving, and the row that owns the id is the one to
 /// update.
-async fn upsert_season(
+async fn upsert_season_row(
     conn: &mut sqlx::SqliteConnection,
-    id: Uuid,
     item_id: Uuid,
-    season: &NewSeason,
-    monitored: bool,
+    season: &DecidedSeason,
 ) -> Result<(), AppError> {
     sqlx::query(
         "INSERT INTO library_seasons \
@@ -1131,12 +1361,12 @@ async fn upsert_season(
             air_date      = excluded.air_date, \
             monitored     = excluded.monitored",
     )
-    .bind(id.to_string())
+    .bind(season.id.to_string())
     .bind(item_id.to_string())
-    .bind(i64::from(season.season_number))
+    .bind(i64::from(season.number))
     .bind(i64::from(season.episode_count))
     .bind(season.air_date.map(OffsetDateTime::unix_timestamp))
-    .bind(i64::from(monitored))
+    .bind(i64::from(season.monitored))
     .execute(conn)
     .await?;
     Ok(())
@@ -1148,18 +1378,24 @@ async fn upsert_season(
 /// `season_id` *is* updated: the parent row survives a refresh now, but
 /// a season that TMDB dropped and republished gets a new one, and the
 /// child has to follow it or the CASCADE would take the wrong rows.
-async fn upsert_episode(
+/// `COALESCE` on every identity column, never a bare `excluded`.
+///
+/// An id can be set but not cleared. The compatibility door
+/// ([`sync_seasons`]) carries no identity at all, so an unconditional
+/// write from it would blank the very column the next refresh pairs on —
+/// which is the fastest route back to delete-and-reinsert and to 7328
+/// unlinked files.
+async fn upsert_episode_row(
     conn: &mut sqlx::SqliteConnection,
     ids: EpisodeIds,
     season_number: i32,
-    episode: &NewEpisode,
-    monitored: bool,
+    episode: &DecidedEpisode,
 ) -> Result<(), AppError> {
     sqlx::query(
         "INSERT INTO library_episodes \
             (id, item_id, season_id, season_number, episode_number, title, air_date, \
-             monitored, tmdb_episode_id) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
+             monitored, tmdb_episode_id, source, external_id, absolute_number) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT(id) DO UPDATE SET \
             season_id       = excluded.season_id, \
             season_number   = excluded.season_number, \
@@ -1167,50 +1403,113 @@ async fn upsert_episode(
             title           = excluded.title, \
             air_date        = excluded.air_date, \
             monitored       = excluded.monitored, \
-            tmdb_episode_id = COALESCE(excluded.tmdb_episode_id, tmdb_episode_id)",
+            tmdb_episode_id = COALESCE(excluded.tmdb_episode_id, tmdb_episode_id), \
+            source          = COALESCE(excluded.source, source), \
+            external_id     = COALESCE(excluded.external_id, external_id), \
+            absolute_number = COALESCE(excluded.absolute_number, absolute_number)",
     )
     .bind(ids.id.to_string())
     .bind(ids.item_id.to_string())
     .bind(ids.season_id.to_string())
     .bind(i64::from(season_number))
-    .bind(i64::from(episode.episode_number))
+    .bind(i64::from(episode.number))
     .bind(episode.title.as_deref())
     .bind(episode.air_date.map(OffsetDateTime::unix_timestamp))
-    .bind(i64::from(monitored))
+    .bind(i64::from(episode.monitored))
     .bind(episode.tmdb_episode_id)
+    .bind(episode.source.map(MetadataSource::label))
+    .bind(episode.external_id.as_deref())
+    .bind(episode.absolute_number.map(i64::from))
     .execute(conn)
     .await?;
     Ok(())
 }
 
-/// Drop the rows TMDB no longer reports.
+/// Who owns a series' shape today.
 ///
-/// Deleting by id, from the set difference computed in Rust, rather than
-/// by a `NOT IN` list built into the SQL: the payload is tens of rows and
-/// the interesting part is which ones vanish, not how the statement is
-/// assembled. Episodes go first so the reason each row died is the one
-/// stated here, not an incidental CASCADE.
-async fn prune_tree(
-    conn: &mut sqlx::SqliteConnection,
-    stored: &StoredTree,
-    claimed: &HashSet<Uuid>,
+/// Lives here rather than in [`crate::structure`] because it is the shape
+/// of a row; the module that consumes it re-exports the name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StructureOwner {
+    /// Source recorded on the item.
+    ///
+    /// `None` means **unclaimed**, not "anyone may write". Every series
+    /// catalogued since the identity migration reads this way, because
+    /// [`upsert`] does not write the column — so the first tree write
+    /// adopts the item, and only a *disagreement* is refused. Note
+    /// [`source_of`] turns an unregistered label into `None` too; that is
+    /// the right call for rendering, and it means a typo in this column
+    /// reads as unclaimed rather than as a hard stop.
+    pub source: Option<MetadataSource>,
+    /// brarr's word for the ordering in force.
+    pub family: Option<OrderingFamily>,
+    /// The owning source's opaque handle for it.
+    pub handle: Option<String>,
+    /// Whether the operator froze the choice.
+    pub pinned: bool,
+}
+
+/// Read who owns a series' shape.
+///
+/// # Errors
+///
+/// Returns [`AppError::NotFound`] for an unknown item, or
+/// [`AppError::Database`] on SQL failure.
+pub async fn structure_owner(pool: &Pool, item_id: Uuid) -> Result<StructureOwner, AppError> {
+    let row = sqlx::query(
+        "SELECT structure_source, structure_family, structure_handle, structure_pinned \
+         FROM library_items WHERE id = ?",
+    )
+    .bind(item_id.to_string())
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| AppError::NotFound(format!("library item {item_id}")))?;
+
+    let family: Option<String> = row.try_get("structure_family")?;
+    let pinned: i64 = row.try_get("structure_pinned")?;
+    Ok(StructureOwner {
+        source: source_of(&row, "structure_source")?,
+        family: family.as_deref().and_then(OrderingFamily::parse),
+        handle: row.try_get("structure_handle")?,
+        pinned: pinned != 0,
+    })
+}
+
+/// Record who owns the shape, after a tree write was accepted.
+///
+/// Deliberately **not** part of [`write_tree`]'s transaction. The tree is
+/// the thing that must be all-or-nothing; this is a label describing what
+/// was just committed, and a failure here leaves the column reading what
+/// it read before — stale, but never claiming an ownership the rows do
+/// not have.
+///
+/// `structure_pinned` is never touched: it is the operator's, and a sweep
+/// that cleared it would be the one-way door the flag exists to avoid.
+///
+/// # Errors
+///
+/// Returns [`AppError::Database`] on SQL failure.
+pub async fn record_structure(
+    pool: &Pool,
+    item_id: Uuid,
+    source: MetadataSource,
+    ordering: &Ordering,
 ) -> Result<(), AppError> {
-    for episode in stored.episodes.values() {
-        if !claimed.contains(&episode.id) {
-            sqlx::query("DELETE FROM library_episodes WHERE id = ?")
-                .bind(episode.id.to_string())
-                .execute(&mut *conn)
-                .await?;
-        }
-    }
-    for season in stored.seasons.values() {
-        if !claimed.contains(&season.id) {
-            sqlx::query("DELETE FROM library_seasons WHERE id = ?")
-                .bind(season.id.to_string())
-                .execute(&mut *conn)
-                .await?;
-        }
-    }
+    sqlx::query(
+        "UPDATE library_items SET \
+            structure_source       = ?, \
+            structure_family       = ?, \
+            structure_handle       = ?, \
+            structure_refreshed_at = ? \
+         WHERE id = ?",
+    )
+    .bind(source.label())
+    .bind(ordering.family().label())
+    .bind(ordering.handle())
+    .bind(OffsetDateTime::now_utc().unix_timestamp())
+    .bind(item_id.to_string())
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -1343,7 +1642,8 @@ pub async fn seasons(pool: &Pool, item_id: Uuid) -> Result<Vec<Season>, AppError
 /// Returns [`AppError::Database`] on SQL failure.
 pub async fn episodes(pool: &Pool, item_id: Uuid) -> Result<Vec<Episode>, AppError> {
     let rows = sqlx::query(
-        "SELECT id, item_id, season_id, season_number, episode_number, title, air_date, monitored, tmdb_episode_id \
+        "SELECT id, item_id, season_id, season_number, episode_number, title, air_date, monitored, \
+                tmdb_episode_id, source, external_id, absolute_number \
          FROM library_episodes WHERE item_id = ? \
          ORDER BY season_number ASC, episode_number ASC",
     )
@@ -1365,6 +1665,9 @@ pub async fn episodes(pool: &Pool, item_id: Uuid) -> Result<Vec<Episode>, AppErr
                 title: row.try_get("title")?,
                 air_date: opt_ts_at(row, "air_date")?,
                 monitored: monitored != 0,
+                source: source_of(row, "source")?,
+                external_id: row.try_get("external_id")?,
+                absolute_number: opt_i32_at(row, "absolute_number")?,
             })
         })
         .collect()
@@ -1478,6 +1781,111 @@ mod tests {
         assert!(!after.monitored, "monitoring is operator state, not TMDB's");
         assert_eq!(after.root_folder.as_deref(), Some("/data/media/filmes"));
         assert_eq!(after.added_at, item.added_at, "added_at must not move");
+    }
+
+    /// The net under every gate: a write that would unlink a file rolls
+    /// back, even when nothing upstream saw it coming.
+    ///
+    /// `structure::plan` refuses an orphan before the transaction opens,
+    /// so this reaches [`write_tree`] directly — which is the point. The
+    /// count exists for the pairing that goes wrong in a way the gates
+    /// did *not* predict, and the only honest way to test a backstop is
+    /// to hand it the case the front stops would have caught.
+    #[tokio::test]
+    async fn a_rise_in_orphan_grabs_rolls_back() {
+        let pool = open_memory().await.unwrap();
+        let item = upsert(&pool, &Seed::series(1, "A Series").build())
+            .await
+            .unwrap();
+        sync_seasons(
+            &pool,
+            item.id,
+            &[NewSeason {
+                season_number: 1,
+                episode_count: 2,
+                air_date: None,
+                episodes: vec![crate::db::seed::episode(1), crate::db::seed::episode(2)],
+            }],
+        )
+        .await
+        .unwrap();
+
+        let rows = episodes(&pool, item.id).await.unwrap();
+        let doomed = rows.iter().find(|e| e.episode_number == 2).unwrap();
+
+        let base_url = url::Url::parse("https://capybarabr.com/").unwrap();
+        let provider = crate::db::providers::insert(
+            &pool,
+            crate::db::providers::NewProvider {
+                name: "capybara",
+                base_url: &base_url,
+                api_token: "tok",
+                kind: "unit3d",
+                plugin_path: None,
+            },
+        )
+        .await
+        .unwrap();
+        crate::db::grabs::reserve(
+            &pool,
+            &crate::db::grabs::NewGrab {
+                item_id: item.id,
+                episode_id: Some(doomed.id),
+                season_number: None,
+                decision_id: None,
+                provider_id: provider.id,
+                provider_name: "capybara",
+                release_id_remote: "rel",
+                release_name: "rel",
+                download_url: None,
+                protocol: crate::db::grabs::Protocol::Torrent,
+            },
+        )
+        .await
+        .unwrap()
+        .expect("first reservation");
+
+        // A decided tree that simply does not mention episode 2. Nothing
+        // here is malformed; it is what a bad pairing produces.
+        let kept = rows.iter().find(|e| e.episode_number == 1).unwrap();
+        let season_id = kept.season_id;
+        let truncated = vec![DecidedSeason {
+            id: season_id,
+            number: 1,
+            episode_count: 1,
+            air_date: None,
+            monitored: true,
+            episodes: vec![DecidedEpisode {
+                id: kept.id,
+                number: 1,
+                title: None,
+                air_date: None,
+                tmdb_episode_id: None,
+                source: None,
+                external_id: None,
+                absolute_number: None,
+                monitored: true,
+            }],
+        }];
+
+        let err = write_tree(&pool, item.id, &truncated)
+            .await
+            .expect_err("unlinking a file must roll the write back");
+        assert!(err.to_string().contains("sem episódio"), "{err}");
+
+        // And the rollback is real: the row is still there, still linked.
+        let after = episodes(&pool, item.id).await.unwrap();
+        assert_eq!(after.len(), 2, "the pruned episode came back");
+        let still_linked: i64 = sqlx::query(
+            "SELECT count(*) AS n FROM grabs WHERE item_id = ? AND episode_id IS NOT NULL",
+        )
+        .bind(item.id.to_string())
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+        .try_get("n")
+        .unwrap();
+        assert_eq!(still_linked, 1, "and the file kept its episode");
     }
 
     #[tokio::test]

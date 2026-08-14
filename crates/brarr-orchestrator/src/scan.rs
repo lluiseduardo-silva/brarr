@@ -898,6 +898,9 @@ mod tests {
             title: None,
             air_date: air.map(|t| OffsetDateTime::from_unix_timestamp(t).unwrap()),
             monitored,
+            source: None,
+            external_id: None,
+            absolute_number: None,
         }
     }
 

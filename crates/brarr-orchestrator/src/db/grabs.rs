@@ -22,6 +22,8 @@
 //! `reserved` row *before* any network work and lets the unique index
 //! decide the winner. Losers get `Ok(None)` and simply stop.
 
+use std::collections::HashMap;
+
 use sqlx::{Row, sqlite::SqliteRow};
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -1307,6 +1309,105 @@ pub async fn unlinked_episode_grabs(pool: &Pool) -> Result<Vec<Grab>, AppError> 
     .fetch_all(pool)
     .await?;
     rows.iter().map(row_to_grab).collect()
+}
+
+/// How many of this item's acquisitions have lost their episode.
+///
+/// Deliberately **wider** than [`unlinked_episode_grabs`], which narrows
+/// to rows that name a file still on disk because that is the set
+/// [`crate::relink`] can repair. This one counts a reserved grab and a
+/// failed one too: for a before/after delta they cancel out, and a row
+/// that loses its episode mid-download is damage whether or not anything
+/// can heal it.
+///
+/// Takes a connection rather than a [`Pool`] because its only caller
+/// brackets a tree write with it, and a pool query issued while that
+/// transaction is open would read *outside* it — seeing none of the
+/// uncommitted deletes, so the after-count would equal the before-count
+/// and the guard would never fire. On `open_memory`, with one connection,
+/// it would not even get that far: it would wait for the connection the
+/// transaction holds and hang.
+///
+/// # Errors
+///
+/// Returns [`AppError::Database`] on SQL failure.
+pub(crate) async fn orphan_episode_count(
+    conn: &mut sqlx::SqliteConnection,
+    item_id: Uuid,
+) -> Result<i64, AppError> {
+    let row = sqlx::query(
+        "SELECT count(*) AS n FROM grabs \
+         WHERE item_id = ? AND scope = 'episode' AND episode_id IS NULL",
+    )
+    .bind(item_id.to_string())
+    .fetch_one(conn)
+    .await?;
+    Ok(row.try_get("n")?)
+}
+
+/// Acquisitions hanging off each of this item's episodes.
+///
+/// What turns an orphan from a row into a consequence: a stored episode
+/// the incoming tree drops is housekeeping when nothing points at it and
+/// a file about to be unlinked when something does.
+///
+/// # Errors
+///
+/// Returns [`AppError::Database`] on SQL failure.
+pub async fn episode_grab_counts(
+    pool: &Pool,
+    item_id: Uuid,
+) -> Result<HashMap<Uuid, i64>, AppError> {
+    let rows = sqlx::query(
+        "SELECT episode_id, count(*) AS n FROM grabs \
+         WHERE item_id = ? AND episode_id IS NOT NULL \
+         GROUP BY episode_id",
+    )
+    .bind(item_id.to_string())
+    .fetch_all(pool)
+    .await?;
+
+    let mut out = HashMap::with_capacity(rows.len());
+    for row in &rows {
+        let raw: String = row.try_get("episode_id")?;
+        let Ok(id) = Uuid::parse_str(&raw) else {
+            continue;
+        };
+        out.insert(id, row.try_get::<i64, _>("n")?);
+    }
+    Ok(out)
+}
+
+/// Season packs this item holds, by season number.
+///
+/// A pack answers for whatever its season contains, so a season that
+/// changes size changes what the pack covers — Dragon Ball Super's
+/// season-1 pack narrows from 131 episodes to 14 the moment the tree
+/// switches. That is the correction, but it has to be reported rather
+/// than discovered.
+///
+/// # Errors
+///
+/// Returns [`AppError::Database`] on SQL failure.
+pub async fn pack_counts(pool: &Pool, item_id: Uuid) -> Result<HashMap<i32, i64>, AppError> {
+    let rows = sqlx::query(
+        "SELECT season_number, count(*) AS n FROM grabs \
+         WHERE item_id = ? AND scope = 'season' AND season_number IS NOT NULL \
+         GROUP BY season_number",
+    )
+    .bind(item_id.to_string())
+    .fetch_all(pool)
+    .await?;
+
+    let mut out = HashMap::with_capacity(rows.len());
+    for row in &rows {
+        let season: i64 = row.try_get("season_number")?;
+        let Ok(season) = i32::try_from(season) else {
+            continue;
+        };
+        out.insert(season, row.try_get::<i64, _>("n")?);
+    }
+    Ok(out)
 }
 
 /// The live grab holding `path` for this item, if there is one.

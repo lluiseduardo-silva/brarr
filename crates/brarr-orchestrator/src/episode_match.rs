@@ -474,6 +474,9 @@ mod tests {
             title: None,
             air_date: aired,
             monitored: true,
+            source: None,
+            external_id: None,
+            absolute_number: None,
         }
     }
 

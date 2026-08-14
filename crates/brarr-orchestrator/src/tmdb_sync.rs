@@ -16,6 +16,8 @@ use brarr_tmdb::{MovieDetails, SeasonDetails, TmdbClient, TmdbError, TvDetails};
 use time::{Date, OffsetDateTime, Time};
 use uuid::Uuid;
 
+use brarr_core::{ExternalId, MetadataProvider, MetadataSource, Ordering, SeriesTree};
+
 use crate::{
     AppError,
     db::{
@@ -23,6 +25,7 @@ use crate::{
         library::{self, LibraryItem, MediaType, NewEpisode, NewLibraryItem, NewSeason},
         settings,
     },
+    structure,
 };
 
 /// Default metadata staleness before a refresh, in days. Well inside the
@@ -240,14 +243,27 @@ pub async fn add_series(
 ) -> Result<LibraryItem, AppError> {
     let details = tmdb.tv(tmdb_id).await?;
     let item = library::upsert(pool, &tv_to_item(&details)).await?;
-
-    let mut seasons = Vec::with_capacity(details.seasons.len());
-    for summary in &details.seasons {
-        let season = tmdb.season(tmdb_id, summary.season_number).await?;
-        seasons.push(season_to_new(&season));
-    }
-    library::sync_seasons(pool, item.id, &seasons).await?;
+    let tree = canonical_tree(tmdb, tmdb_id).await?;
+    structure::apply(pool, item.id, &tree).await?;
     Ok(item)
+}
+
+/// The TMDB tree under its own default ordering.
+///
+/// Goes through [`MetadataProvider::tree`] rather than walking the
+/// seasons here: that implementation already does the `/tv/{id}` call
+/// plus one per season, already refuses an answer carrying no episodes
+/// as [`brarr_core::MetadataError::Empty`] instead of as an empty
+/// success, and is the same code path a TheTVDB-owned tree will take.
+/// Three copies of the walk was how `arr_import::sync_tree` came to fetch
+/// `/tv/{id}` twice per series per sweep.
+pub(crate) async fn canonical_tree(
+    tmdb: &TmdbClient,
+    tmdb_id: i64,
+) -> Result<SeriesTree, AppError> {
+    let id = ExternalId::new(MetadataSource::Tmdb, &tmdb_id.to_string())
+        .map_err(brarr_core::MetadataError::BadId)?;
+    Ok(tmdb.tree(&id, &Ordering::Default).await?)
 }
 
 /// What the operator chose in the add dialog.
@@ -293,18 +309,14 @@ pub async fn add_with_options(
     // The row has to exist before its scope can be set, and `upsert`
     // preserves operator state on conflict, so this is safe for a title
     // that is already catalogued.
-    let (item, season_numbers) = match media_type {
+    let item = match media_type {
         MediaType::Movie => {
             let details = tmdb.movie(tmdb_id).await?;
-            (library::upsert(pool, &movie_to_item(&details)).await?, None)
+            library::upsert(pool, &movie_to_item(&details)).await?
         }
         MediaType::Tv => {
             let details = tmdb.tv(tmdb_id).await?;
-            let numbers: Vec<i32> = details.seasons.iter().map(|s| s.season_number).collect();
-            (
-                library::upsert(pool, &tv_to_item(&details)).await?,
-                Some(numbers),
-            )
+            library::upsert(pool, &tv_to_item(&details)).await?
         }
     };
 
@@ -312,13 +324,9 @@ pub async fn add_with_options(
         library::set_monitor_scope(pool, item.id, scope).await?;
     }
 
-    if let Some(numbers) = season_numbers {
-        let mut seasons = Vec::with_capacity(numbers.len());
-        for number in numbers {
-            let season = tmdb.season(tmdb_id, number).await?;
-            seasons.push(season_to_new(&season));
-        }
-        library::sync_seasons(pool, item.id, &seasons).await?;
+    if media_type == MediaType::Tv {
+        let tree = canonical_tree(tmdb, tmdb_id).await?;
+        structure::apply(pool, item.id, &tree).await?;
     }
 
     // Only touch placement when the operator actually chose something.

@@ -67,7 +67,7 @@ async fn seed_series(state: &AppState) -> Uuid {
     )
     .await
     .unwrap();
-    library::sync_seasons(
+    support::tree(
         state.pool(),
         item.id,
         &[
@@ -112,8 +112,7 @@ async fn seed_series(state: &AppState) -> Uuid {
             },
         ],
     )
-    .await
-    .unwrap();
+    .await;
     item.id
 }
 
@@ -135,7 +134,7 @@ async fn seed_series_with_special(state: &AppState) -> Uuid {
         air_date: Some(days_ago(3000)),
         ..support::episode(n)
     };
-    library::sync_seasons(
+    support::tree(
         state.pool(),
         item.id,
         &[
@@ -153,8 +152,7 @@ async fn seed_series_with_special(state: &AppState) -> Uuid {
             },
         ],
     )
-    .await
-    .unwrap();
+    .await;
     item.id
 }
 

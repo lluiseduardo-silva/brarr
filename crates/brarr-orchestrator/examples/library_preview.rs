@@ -16,12 +16,46 @@
     reason = "developer-facing preview harness"
 )]
 
+use brarr_core::{MetadataSource, Ordering, SeriesTree, TreeEpisode, TreeSeason};
 use brarr_decision_service::Engine;
 use brarr_orchestrator::db::grabs::{self, LocalGrab};
 use brarr_orchestrator::db::library::{self, MediaType, NewEpisode, NewLibraryItem, NewSeason};
-use brarr_orchestrator::{AppState, db, web};
+use brarr_orchestrator::{AppState, db, structure, web};
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
+
+/// The seed payload as the neutral tree [`structure::apply`] takes.
+///
+/// Ids are synthesised per coordinate: this harness invents its library
+/// and there is no TMDB behind it, but an episode still has to be
+/// nameable or it could not own a row.
+fn as_tree(seasons: &[NewSeason]) -> SeriesTree {
+    SeriesTree {
+        source: MetadataSource::Tmdb,
+        ordering: Ordering::Default,
+        seasons: seasons
+            .iter()
+            .map(|s| TreeSeason {
+                number: s.season_number,
+                air_date: s.air_date,
+                episodes: s
+                    .episodes
+                    .iter()
+                    .map(|e| TreeEpisode {
+                        external_id: (1_000_000
+                            + i64::from(s.season_number) * 1_000
+                            + i64::from(e.episode_number))
+                        .to_string(),
+                        number: e.episode_number,
+                        title: e.title.clone(),
+                        air_date: e.air_date,
+                        absolute_number: None,
+                    })
+                    .collect(),
+            })
+            .collect(),
+    }
+}
 
 fn ago(n: i64) -> OffsetDateTime {
     OffsetDateTime::now_utc() - Duration::days(n)
@@ -43,7 +77,7 @@ async fn series(state: &AppState, tmdb: i64, title: &str, seasons: &[NewSeason])
     )
     .await
     .unwrap();
-    library::sync_seasons(state.pool(), item.id, seasons)
+    structure::apply(state.pool(), item.id, &as_tree(seasons))
         .await
         .unwrap();
     item.id

@@ -15,10 +15,12 @@
 
 #![allow(dead_code, reason = "each integration test uses a subset")]
 
+use brarr_core::{MetadataSource, Ordering, SeriesTree, TreeEpisode, TreeSeason};
 use brarr_orchestrator::db::Pool;
 use brarr_orchestrator::db::library::{
     self, LibraryItem, MediaType, NewEpisode, NewLibraryItem, NewSeason,
 };
+use brarr_orchestrator::structure;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
@@ -135,13 +137,61 @@ pub fn full_season(number: i32, count: i32) -> NewSeason {
     season(number, (1..=count).map(episode).collect())
 }
 
-/// Write a tree.
+/// Write a tree, through the door production uses.
+///
+/// The integration suite seeds trees in `NewSeason` shape, which carries
+/// no episode identity; [`brarr_orchestrator::structure::apply`] takes a
+/// [`SeriesTree`], where an identity is required because a source that
+/// cannot name its episodes cannot own a tree. This bridges the two with
+/// a deterministic TMDB-shaped id per coordinate — the convention
+/// `renumbering_a_series_keeps_every_row_and_every_link` already used —
+/// so seeded rows pair on identity exactly like real ones and the
+/// fixtures exercise the same tier a refresh does.
 ///
 /// # Panics
 ///
-/// If the write fails.
+/// If the write is refused or fails.
 pub async fn tree(pool: &Pool, item: Uuid, seasons: &[NewSeason]) {
-    library::sync_seasons(pool, item, seasons)
+    structure::apply(pool, item, &as_series_tree(seasons))
         .await
         .expect("seed the tree");
+}
+
+/// A `NewSeason` payload as the neutral tree the writer takes.
+#[must_use]
+pub fn as_series_tree(seasons: &[NewSeason]) -> SeriesTree {
+    SeriesTree {
+        source: MetadataSource::Tmdb,
+        ordering: Ordering::Default,
+        seasons: seasons
+            .iter()
+            .map(|s| TreeSeason {
+                number: s.season_number,
+                air_date: s.air_date,
+                episodes: s
+                    .episodes
+                    .iter()
+                    .map(|e| TreeEpisode {
+                        external_id: e.tmdb_episode_id.map_or_else(
+                            || {
+                                // Unique per item by construction, which
+                                // is what `idx_library_episodes_external`
+                                // needs, and numeric so it reads back as
+                                // a TMDB id rather than as a placeholder.
+                                (1_000_000
+                                    + i64::from(s.season_number) * 1_000
+                                    + i64::from(e.episode_number))
+                                .to_string()
+                            },
+                            |id| id.to_string(),
+                        ),
+                        number: e.episode_number,
+                        title: e.title.clone(),
+                        air_date: e.air_date,
+                        absolute_number: None,
+                    })
+                    .collect(),
+            })
+            .collect(),
+    }
 }

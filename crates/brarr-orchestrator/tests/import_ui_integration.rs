@@ -74,7 +74,7 @@ async fn add_series(state: &AppState) -> uuid::Uuid {
     )
     .await
     .unwrap();
-    library::sync_seasons(
+    support::tree(
         state.pool(),
         item.id,
         &[NewSeason {
@@ -89,8 +89,7 @@ async fn add_series(state: &AppState) -> uuid::Uuid {
                 .collect(),
         }],
     )
-    .await
-    .unwrap();
+    .await;
     item.id
 }
 

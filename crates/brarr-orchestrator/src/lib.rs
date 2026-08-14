@@ -72,6 +72,7 @@ pub mod remote_path;
 pub mod scan;
 pub mod search;
 pub mod state;
+pub mod structure;
 pub mod tmdb_sync;
 pub mod ttl_cache;
 pub mod tvdb_sync;

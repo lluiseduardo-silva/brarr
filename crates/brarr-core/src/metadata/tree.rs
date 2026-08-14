@@ -222,6 +222,57 @@ impl OrderingFamily {
     pub const fn renumbers(self) -> bool {
         !matches!(self, Self::Default | Self::Aired)
     }
+
+    /// Iteration order, defined by an exhaustive `match`.
+    ///
+    /// Same shape and same reason as [`crate::MetadataSource::all`]: an
+    /// array literal never fails to compile for being short, so a new
+    /// variant would ship uncovered with the suite green. Adding one here
+    /// breaks `next` and the author has to say where it belongs — and, in
+    /// this case, remember that the persisted counterpart is a CHECK
+    /// constraint that has to grow with it.
+    const fn next(self) -> Option<Self> {
+        match self {
+            Self::Default => Some(Self::Aired),
+            Self::Aired => Some(Self::Dvd),
+            Self::Dvd => Some(Self::Absolute),
+            Self::Absolute => Some(Self::Alternate),
+            Self::Alternate => Some(Self::Production),
+            Self::Production => Some(Self::Manual),
+            Self::Manual => Some(Self::Other),
+            Self::Other => None,
+        }
+    }
+
+    /// Every family, in a fixed order. What the guards walk.
+    pub fn all() -> impl Iterator<Item = Self> {
+        std::iter::successors(Some(Self::Default), |f| f.next())
+    }
+
+    /// The `library_items.structure_family` value.
+    ///
+    /// These strings are a CHECK constraint in the schema. Changing one
+    /// is a migration, not an edit.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Aired => "aired",
+            Self::Dvd => "dvd",
+            Self::Absolute => "absolute",
+            Self::Alternate => "alternate",
+            Self::Production => "production",
+            Self::Manual => "manual",
+            Self::Other => "other",
+        }
+    }
+
+    /// Inverse of [`Self::label`]. `None` for anything the CHECK would
+    /// have refused.
+    #[must_use]
+    pub fn parse(raw: &str) -> Option<Self> {
+        Self::all().find(|f| f.label() == raw)
+    }
 }
 
 /// A full ordering choice.
