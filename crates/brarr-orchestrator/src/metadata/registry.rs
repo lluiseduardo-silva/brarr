@@ -232,9 +232,18 @@ fn credentials_of(source: MetadataSource) -> &'static [CredentialField] {
 /// mapped; **an unmapped tag yields English alone**, which is a worse
 /// answer than their language and a much better one than Japanese.
 fn episode_languages(tag: Option<&str>) -> Vec<&'static str> {
-    let preferred = tag
-        .map(|t| t.trim().to_ascii_lowercase())
-        .and_then(|t| tvdb_language(t.split(['-', '_']).next().unwrap_or_default()));
+    // Unset means the same thing here as it does to `tmdb_sync`, which
+    // is the whole point of the shared constant: a deployment that never
+    // touched the field was getting Portuguese metadata from one
+    // provider and English episode names from the other.
+    let tag = tag.unwrap_or(settings::DEFAULT_METADATA_LANGUAGE);
+    let preferred = tvdb_language(
+        tag.trim()
+            .to_ascii_lowercase()
+            .split(['-', '_'])
+            .next()
+            .unwrap_or_default(),
+    );
     match preferred {
         Some("eng") | None => vec!["eng"],
         Some(other) => vec![other, "eng"],
@@ -400,8 +409,13 @@ mod tests {
         assert_eq!(episode_languages(Some("pt")), vec!["por", "eng"]);
         // Already English: asking twice would be a wasted request.
         assert_eq!(episode_languages(Some("en-US")), vec!["eng"]);
-        // Unset, or a tag TheTVDB's three-letter codes do not cover.
-        assert_eq!(episode_languages(None), vec!["eng"]);
+        // **Unset is the configured default, not English.** Treating
+        // absence as English is what shipped Doctor Who with English
+        // episode titles on a deployment whose metadata language was
+        // Portuguese by default — the same split-default defect the
+        // TMDB token had, introduced in the fix for it.
+        assert_eq!(episode_languages(None), vec!["por", "eng"]);
+        // A tag TheTVDB's three-letter codes do not cover.
         assert_eq!(episode_languages(Some("tlh")), vec!["eng"]);
     }
 

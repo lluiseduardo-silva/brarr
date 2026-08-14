@@ -43,8 +43,19 @@ pub const KEY_PERSIST_REJECTED: &str = "persist_rejected";
 /// v3 API key: that is a different string from the same account page and
 /// is sent as a query parameter, so passing it here yields a 401.
 pub const KEY_TMDB_TOKEN: &str = "tmdb_token";
-/// Metadata language for TMDB calls. Default `pt-BR`.
+/// Metadata language for provider calls. Default
+/// [`DEFAULT_METADATA_LANGUAGE`].
 pub const KEY_TMDB_LANGUAGE: &str = "tmdb_language";
+
+/// What an unset [`KEY_TMDB_LANGUAGE`] means.
+///
+/// **A constant because two doors read it.** `tmdb_sync::load_config`
+/// defaulted to this inline while the TheTVDB episode chain treated the
+/// same absence as English — so a deployment that never touched the
+/// field got Portuguese metadata from one provider and English episode
+/// names from the other, which is precisely the split-default defect
+/// this repository has now paid for twice.
+pub const DEFAULT_METADATA_LANGUAGE: &str = "pt-BR";
 /// Country used to resolve per-country release dates. Default `BR`.
 pub const KEY_TMDB_COUNTRY: &str = "tmdb_country";
 /// How stale a library item's metadata may get before the sweep

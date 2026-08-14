@@ -229,7 +229,8 @@ pub async fn load_config(pool: &Pool) -> Result<TmdbConfig, AppError> {
         .unwrap_or(DEFAULT_TTL_DAYS);
     Ok(TmdbConfig {
         token: token.trim().to_owned(),
-        language: pick(settings::KEY_TMDB_LANGUAGE).unwrap_or_else(|| "pt-BR".to_owned()),
+        language: pick(settings::KEY_TMDB_LANGUAGE)
+            .unwrap_or_else(|| settings::DEFAULT_METADATA_LANGUAGE.to_owned()),
         country: pick(settings::KEY_TMDB_COUNTRY).unwrap_or_else(|| "BR".to_owned()),
         ttl_days,
     })
