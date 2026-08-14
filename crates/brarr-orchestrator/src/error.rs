@@ -42,6 +42,17 @@ pub enum AppError {
     #[error("tmdb error: {0}")]
     Tmdb(#[source] brarr_tmdb::TmdbError),
 
+    /// A failure from a metadata provider, in the neutral vocabulary.
+    ///
+    /// Replaces the two divergent conversions the provider crates each
+    /// had — one peeling 401 into a sentence about the read access token,
+    /// the other into a sentence about the API key — with one boundary
+    /// that already knows which source it is about. `#[from]`, because
+    /// the peeling now happens inside the provider impls where the
+    /// distinction is made, not at the call site.
+    #[error("{0}")]
+    Metadata(#[from] brarr_core::MetadataError),
+
     /// Configuration/parse error (URL, etc.).
     #[error("invalid input: {0}")]
     InvalidInput(String),
@@ -85,6 +96,16 @@ impl AppError {
             // is the one who clears it. 503 reads as "try again shortly",
             // which is the opposite of what a pause means.
             Self::Paused { .. } => StatusCode::CONFLICT,
+            // A refused or missing credential is the operator's to fix,
+            // and an unknown id is a 404 whoever asked. Everything else
+            // is upstream being upstream.
+            Self::Metadata(e) => match e {
+                brarr_core::MetadataError::Unauthorized { .. } => StatusCode::UNAUTHORIZED,
+                brarr_core::MetadataError::NotFound { .. } => StatusCode::NOT_FOUND,
+                brarr_core::MetadataError::BadId(_)
+                | brarr_core::MetadataError::UnknownOrdering { .. } => StatusCode::BAD_REQUEST,
+                _ => StatusCode::BAD_GATEWAY,
+            },
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -107,6 +128,7 @@ impl From<AppError> for tonic::Status {
             // Not `Unavailable`: that one tells a client to retry, and a
             // pause is cleared by a person, not by waiting.
             AppError::Paused { .. } => tonic::Code::FailedPrecondition,
+            AppError::Metadata(_) => tonic::Code::Unavailable,
             _ => tonic::Code::Internal,
         };
         Self::new(code, err.to_string())

@@ -7,6 +7,8 @@
 //! - [`art`] builds an image URL for a stored path, given who stored it.
 //! - [`axis`] turns a catalogue identity into the search keys the tracker
 //!   fan-out speaks — and reports what it could not use.
+//! - [`registry`] says which providers this deployment can reach, and
+//!   filters on capabilities *before* anything is dispatched.
 //!
 //! The rule these two share is the reason the module exists: **no
 //! provider crate's type crosses into `db::` or `web::`.** Before this
@@ -17,3 +19,4 @@
 
 pub mod art;
 pub mod axis;
+pub mod registry;
