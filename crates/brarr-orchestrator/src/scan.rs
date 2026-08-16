@@ -193,8 +193,22 @@ pub struct ScanSummary {
     pub searches: usize,
     /// Releases handed to a download client.
     pub grabbed: usize,
-    /// Targets searched that produced nothing worth grabbing.
+    /// Targets searched whose results held nothing worth grabbing —
+    /// nothing found, or nothing that cleared the profile's threshold.
     pub no_candidate: usize,
+    /// Targets whose candidates were **all refused by the barrier**:
+    /// every release worth grabbing had already been tried and marked
+    /// `failed` on an earlier sweep.
+    ///
+    /// Counted apart from [`Self::no_candidate`] because the two say
+    /// opposite things and the badge used to say the wrong one. This is
+    /// the shape the operator reported: the automatic search answered
+    /// "nada encontrado — nenhuma release passou do threshold" while the
+    /// interactive search on the same episode listed nine releases, most
+    /// of them above the line. Both halves of that sentence were false —
+    /// the releases were found, and they passed. They were simply all
+    /// spent, which is a story about `grabs`, not about the trackers.
+    pub exhausted: usize,
     /// Episodes in scope that the operator paused.
     ///
     /// Only interesting on a narrowed sweep: a paused episode among
@@ -721,7 +735,7 @@ async fn run_target(
     }
     match take_first_available(state, item, target, &candidates).await? {
         TargetOutcome::Grabbed => summary.grabbed += 1,
-        TargetOutcome::Nothing => summary.no_candidate += 1,
+        TargetOutcome::Nothing => summary.exhausted += 1,
         TargetOutcome::Failed(reason) => {
             summary.failures.push((target.label.clone(), reason));
         }
@@ -730,6 +744,7 @@ async fn run_target(
 }
 
 /// What happened to one target after candidates were picked.
+#[derive(Debug)]
 enum TargetOutcome {
     Grabbed,
     /// Every candidate was refused by the barrier — all of them already
@@ -1826,6 +1841,92 @@ mod tests {
             configured_budget(&pool).await,
             DEFAULT_SEARCHES_PER_CYCLE,
             "blanked from the UI means the default"
+        );
+    }
+
+    /// The operator's report, reduced to its mechanism.
+    ///
+    /// The automatic search on one episode answered "nada encontrado"
+    /// while the interactive search on the *same* episode listed nine
+    /// releases. Nothing was wrong with the trackers, the profile or the
+    /// threshold: seven earlier sweeps had each grabbed a different
+    /// release for that episode, every one of them had failed at import,
+    /// and `failed` keeps its barrier key on purpose. So every candidate
+    /// was refused, `take_first_available` returned `Nothing`, and that
+    /// landed in the same counter as "nothing passed the threshold".
+    ///
+    /// This pins the counter. The badge built on it is pinned in
+    /// `web::routes::tests`.
+    #[tokio::test]
+    async fn every_candidate_already_spent_is_exhausted_not_no_candidate() {
+        use crate::db::grabs::{GrabStatus, NewGrab, Protocol};
+
+        let pool = crate::db::open_memory().await.expect("open in-memory db");
+        let stored = library::upsert(
+            &pool,
+            &crate::db::seed::Seed::movie(603, "The Matrix").build(),
+        )
+        .await
+        .unwrap();
+        let provider = crate::db::providers::insert(
+            &pool,
+            crate::db::providers::NewProvider {
+                name: "capybara",
+                base_url: &url::Url::parse("https://capybarabr.com/").unwrap(),
+                api_token: "tok",
+                kind: "unit3d",
+                plugin_path: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let mut candidate = decision("Matrix.1999.1080p", 500, 10);
+        candidate.provider_id = Some(provider.id);
+
+        // The earlier sweep: this exact release was taken and it failed
+        // for good, so its key stays occupied.
+        let spent = grabs::reserve(
+            &pool,
+            &NewGrab {
+                item_id: stored.id,
+                episode_id: None,
+                season_number: None,
+                decision_id: None,
+                provider_id: provider.id,
+                provider_name: "capybara",
+                release_id_remote: &candidate.stable_release_key(),
+                release_name: &candidate.release_name,
+                download_url: None,
+                protocol: Protocol::Torrent,
+            },
+        )
+        .await
+        .unwrap()
+        .expect("the first sweep wins the reservation");
+        grabs::set_status(&pool, spent.id, GrabStatus::Failed, Some("no import"))
+            .await
+            .unwrap();
+
+        let state = AppState::new(pool, brarr_decision_service::Engine::baseline());
+        let target = movie_target_for(&item(MediaType::Movie));
+        let outcome = take_first_available(&state, &stored, &target, &[&candidate])
+            .await
+            .unwrap();
+
+        assert!(
+            matches!(outcome, TargetOutcome::Nothing),
+            "the barrier refuses a release an earlier sweep burned — got {outcome:?}"
+        );
+        // Nothing reached a download client, so the delivery path was
+        // never entered: this asserts the barrier, not the network.
+        assert_eq!(
+            grabs::for_item(state.pool(), stored.id)
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "a refused reservation must not leave a second row behind"
         );
     }
 }

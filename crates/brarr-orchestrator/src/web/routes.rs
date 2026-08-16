@@ -3511,12 +3511,35 @@ fn scan_badge(summary: &crate::scan::ScanSummary) -> PingBadge {
                 summary.skipped_covered
             ),
         }
+    } else if summary.exhausted > 0 {
+        // The answer the operator actually hit: releases were found, they
+        // did pass, and every one of them had already been tried and
+        // marked `failed` on an earlier sweep — so the barrier refused
+        // them all. Folded into "nada encontrado" this read as a tracker
+        // problem, while the magnifier right beside it listed nine
+        // releases. The fix for this is in the grab history, never in the
+        // profile.
+        PingBadge {
+            ok: false,
+            label: "releases esgotadas".to_string(),
+            detail: format!(
+                "{} alvo(s): todas as releases encontradas já foram tentadas e falharam antes. \
+                 Veja o histórico de grabs do título — o motivo da falha está lá. \
+                 A lupa mostra o que a busca encontra agora.",
+                summary.exhausted
+            ),
+        }
     } else {
         PingBadge {
             ok: false,
             label: "nada encontrado".to_string(),
+            // Two causes, and the sentence used to claim only the second
+            // — which made it a lie whenever the providers simply had
+            // nothing, and a worse one when they had plenty and the
+            // barrier was the wall (that case is the branch above now).
             detail: format!(
-                "{} busca(s), nenhuma release passou do threshold do perfil",
+                "{} busca(s): os providers não devolveram nada para este alvo, \
+                 ou nada passou do threshold do perfil",
                 summary.searches
             ),
         }
@@ -7259,7 +7282,7 @@ fn humanize_bytes(b: u64) -> String {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-    use super::{audio_chips_from_languages, subtitle_chips_from_languages};
+    use super::{audio_chips_from_languages, scan_badge, subtitle_chips_from_languages};
     use brarr_core::Language;
 
     #[test]
@@ -7334,5 +7357,51 @@ mod tests {
     fn empty_enrichment_produces_no_chips() {
         assert!(audio_chips_from_languages(&[], &[]).is_empty());
         assert!(subtitle_chips_from_languages(&[]).is_empty());
+    }
+
+    /// The badge the operator reported: the automatic search said
+    /// "nada encontrado — nenhuma release passou do threshold" while the
+    /// magnifier on the same episode listed nine releases, seven of them
+    /// above the line. Both halves were false. `TargetOutcome::Nothing`
+    /// used to land in the same counter as "nothing passed", so a sweep
+    /// blocked entirely by the barrier blamed the trackers and the
+    /// profile — the two places the fix is *not*.
+    #[test]
+    fn a_sweep_the_barrier_blocked_does_not_blame_the_trackers() {
+        let summary = crate::scan::ScanSummary {
+            targets: 1,
+            searches: 1,
+            exhausted: 1,
+            ..crate::scan::ScanSummary::default()
+        };
+        let badge = scan_badge(&summary);
+        assert!(!badge.ok);
+        assert_eq!(badge.label, "releases esgotadas");
+        assert!(
+            badge.detail.contains("histórico de grabs"),
+            "the badge has to point at where the answer is: {}",
+            badge.detail
+        );
+        assert!(
+            !badge.detail.contains("threshold"),
+            "the releases passed the threshold; saying otherwise is what sent              the operator to the profile editor: {}",
+            badge.detail
+        );
+    }
+
+    /// And the genuine empty-handed sweep keeps its own answer, now
+    /// naming both of the things that produce it.
+    #[test]
+    fn a_sweep_that_really_found_nothing_still_says_so() {
+        let summary = crate::scan::ScanSummary {
+            targets: 1,
+            searches: 1,
+            no_candidate: 1,
+            ..crate::scan::ScanSummary::default()
+        };
+        let badge = scan_badge(&summary);
+        assert_eq!(badge.label, "nada encontrado");
+        assert!(badge.detail.contains("não devolveram nada"));
+        assert!(badge.detail.contains("threshold"));
     }
 }
