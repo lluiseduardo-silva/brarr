@@ -724,6 +724,39 @@ pub async fn get_by_id(pool: &Pool, id: Uuid) -> Result<LibraryItem, AppError> {
     }
 }
 
+/// Whether another catalogue entry of the same media type carries this
+/// exact title.
+///
+/// The one question [`crate::import::folder_year`] needs: a series folder
+/// is the title on its own, and the year comes back only when the title
+/// alone would name two different shows. Asked of the catalogue rather
+/// than of the disk, because the disk cannot say whether a folder that is
+/// already there belongs to *this* item or to its namesake.
+///
+/// Compared with `NOCASE`, since a filesystem that folds case would put
+/// the two in one folder regardless of how the catalogue spells them.
+///
+/// # Errors
+///
+/// Returns [`AppError::Database`] on SQL failure.
+pub async fn title_is_shared(
+    pool: &Pool,
+    id: Uuid,
+    media_type: MediaType,
+    title: &str,
+) -> Result<bool, AppError> {
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM library_items \
+          WHERE media_type = ? AND title = ? COLLATE NOCASE AND id <> ?",
+    )
+    .bind(media_type.label())
+    .bind(title)
+    .bind(id.to_string())
+    .fetch_one(pool)
+    .await?;
+    Ok(count > 0)
+}
+
 /// The entry a given external id names, whichever source issued it.
 ///
 /// **This is what "already in the library?" is.** A lookup on one axis

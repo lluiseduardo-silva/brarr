@@ -76,7 +76,8 @@ pub(crate) struct AdoptContext {
     pub library_roots: Vec<PathBuf>,
     /// Catalogue title, for the destination path.
     pub title: String,
-    /// Release year, for the folder name.
+    /// The year that goes in the folder name — see
+    /// [`crate::import::folder_year`]. A series normally has none.
     pub year: Option<i32>,
 }
 
@@ -793,7 +794,22 @@ async fn build_row(
             .map(|r| real(&r.path))
             .collect(),
         title: item.title.clone(),
-        year: item.year,
+        // Same rule the importer follows, and it has to be the same rule:
+        // an adoption that linked into `Título (Ano)` while the importer
+        // writes `Título` would build the split this release exists to
+        // stop building.
+        year: crate::import::folder_year(
+            item.year,
+            item.media_type,
+            crate::db::library::title_is_shared(
+                state.pool(),
+                item.id,
+                item.media_type,
+                &item.title,
+            )
+            .await
+            .unwrap_or(false),
+        ),
     };
     let marker = found.marker.ok();
     match action_for(&found.path, marker, &ctx) {

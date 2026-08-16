@@ -15,7 +15,8 @@
 //!   pick_video()    ── which file is the release
 //!         │
 //!         ▼
-//!   destination()   ── {root}/Título (Ano)/Título (Ano) - S01E02.mkv
+//!   destination()   ── {root}/Título/Season 01/Título - S01E02.mkv
+//!                      (a film keeps the year: {root}/Título (Ano)/…)
 //!         │
 //!         ▼
 //!   place()         ── hardlink, or copy, or move
@@ -57,7 +58,7 @@ use tokio::time::sleep;
 use tracing::{debug, info, warn};
 
 use crate::db::grabs::{self, Grab, GrabStatus};
-use crate::db::library::{self, LibraryItem};
+use crate::db::library::{self, LibraryItem, MediaType};
 use crate::db::root_folders::{self, RootFolder};
 use crate::db::{download_clients, path_mappings, settings};
 use crate::{AppError, AppState};
@@ -365,10 +366,25 @@ async fn plan_and_place(state: &AppState, grab: &Grab) -> Result<ImportOutcome, 
         ))
     });
 
+    // `Título (Ano)` is the film convention; a series folder is the title,
+    // and the year only comes back to tell two same-named shows apart.
+    let collides = library::title_is_shared(state.pool(), item.id, item.media_type, &item.title)
+        .await
+        .unwrap_or(false);
+    let folder_year = folder_year(item.year, item.media_type, collides);
+    if collides && folder_year.is_none() {
+        warn!(
+            target: "brarr_orchestrator::import",
+            item = %item.title,
+            "another catalogue entry shares this title and neither carries a year; \
+             both will land in the same folder"
+        );
+    }
+
     let plan = Placement {
         root: root.path.clone(),
         title: item.title.clone(),
-        year: item.year,
+        year: folder_year,
         episode: marker,
         mode: configured_mode(state).await,
     };
@@ -576,7 +592,9 @@ struct Placement {
     root: PathBuf,
     /// Catalogue title.
     title: String,
-    /// Release year, for the folder name.
+    /// The year that goes in the folder name, already decided by
+    /// [`folder_year`] — not the item's release year, which a series
+    /// carries without putting it on disk.
     year: Option<i32>,
     /// Season and episode, for a series.
     episode: Option<(u16, u16)>,
@@ -754,15 +772,20 @@ pub(crate) fn looks_like_sample(path: &Path, base: &Path) -> bool {
 /// Build the destination path, Plex/Jellyfin style.
 ///
 /// - movie: `{root}/Título (Ano)/Título (Ano).mkv`
-/// - episode: `{root}/Título (Ano)/Season 01/Título - S01E02.mkv`
+/// - episode: `{root}/Título/Season 01/Título - S01E02.mkv`
+///
+/// `folder_year` is **the year that belongs in the folder name**, not the
+/// item's release year — see [`folder_year`], which is where the two stop
+/// being the same thing. This builds a path and holds no policy about
+/// when a year is warranted.
 pub(crate) fn destination(
     root: &Path,
     title: &str,
-    year: Option<i32>,
+    folder_year: Option<i32>,
     episode: Option<(u16, u16)>,
     extension: &str,
 ) -> PathBuf {
-    let folder = match year {
+    let folder = match folder_year {
         Some(y) => sanitize(&format!("{title} ({y})")),
         None => sanitize(title),
     };
@@ -777,6 +800,36 @@ pub(crate) fn destination(
         None => path.push(sanitize(&format!("{folder}.{extension}"))),
     }
     path
+}
+
+/// The year that belongs in an item's folder name.
+///
+/// **`Título (Ano)` is the film convention.** A series folder is the
+/// title on its own — it is what Sonarr writes, it is what this
+/// operator's library is made of, and the year appears there only to
+/// tell two same-named shows apart. brarr appended it unconditionally,
+/// so every series it imported grew a second folder beside the one the
+/// rest of the library already used: 39 of them on this install, 11 of
+/// which had both halves populated at once. Plex reconciles the two by
+/// metadata and shows one series; Sonarr does not, and neither did
+/// brarr's own importer.
+///
+/// The collision escape is the operator's rule, kept: when another item
+/// of the same media type carries the same title, the year is what
+/// separates them, and a series does get one. With a collision and no
+/// year there is nothing to separate them *with* — the caller logs it
+/// and both land together, which is visible, rather than picking a
+/// folder out of the air.
+pub(crate) const fn folder_year(
+    year: Option<i32>,
+    media_type: MediaType,
+    title_collides: bool,
+) -> Option<i32> {
+    match media_type {
+        MediaType::Movie => year,
+        MediaType::Tv if title_collides => year,
+        MediaType::Tv => None,
+    }
 }
 
 /// Swap in the series/film folder that is already there, when its name
@@ -1181,13 +1234,95 @@ mod tests {
         let path = destination(
             Path::new("/data/series"),
             "The Boys",
-            Some(2019),
+            folder_year(Some(2019), MediaType::Tv, false),
             Some((4, 7)),
             "mkv",
         );
         assert_eq!(
             path,
-            Path::new("/data/series/The Boys (2019)/Season 04/The Boys - S04E07.mkv")
+            Path::new("/data/series/The Boys/Season 04/The Boys - S04E07.mkv"),
+            "a series folder is the title; the year is the film convention"
+        );
+    }
+
+    /// `Título (Ano)` is what a *film* folder looks like. brarr appended
+    /// the year to every series too, so each one it imported grew a
+    /// second folder beside the one Sonarr had already made — 39 on this
+    /// install, 11 with both halves populated at the same time. Plex
+    /// reconciles those by metadata and shows one series; Sonarr does
+    /// not, and neither did brarr's own importer, which is how an
+    /// episode already on disk got downloaded again.
+    #[test]
+    fn the_year_is_the_film_convention_and_the_collision_escape() {
+        // A film always carries it.
+        assert_eq!(folder_year(Some(1999), MediaType::Movie, false), Some(1999));
+        assert_eq!(folder_year(Some(1999), MediaType::Movie, true), Some(1999));
+
+        // A series does not.
+        assert_eq!(folder_year(Some(2019), MediaType::Tv, false), None);
+
+        // Unless the title alone would name two different shows — the
+        // one case where the year is doing real work.
+        assert_eq!(folder_year(Some(2005), MediaType::Tv, true), Some(2005));
+
+        // And a collision with nothing to disambiguate by stays
+        // undisambiguated rather than inventing a folder. The caller
+        // warns; see `plan_and_place`.
+        assert_eq!(folder_year(None, MediaType::Tv, true), None);
+    }
+
+    #[tokio::test]
+    async fn a_shared_title_is_only_shared_within_one_media_type() {
+        let pool = crate::db::open_memory().await.unwrap();
+        let a = library::upsert(
+            &pool,
+            &crate::db::seed::Seed::series(1, "Doctor Who")
+                .year(1963)
+                .build(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            !library::title_is_shared(&pool, a.id, a.media_type, &a.title)
+                .await
+                .unwrap(),
+            "a title alone in the catalogue collides with nothing"
+        );
+
+        let b = library::upsert(
+            &pool,
+            &crate::db::seed::Seed::series(2, "Doctor Who")
+                .year(2005)
+                .build(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            library::title_is_shared(&pool, b.id, b.media_type, &b.title)
+                .await
+                .unwrap()
+        );
+        assert!(
+            library::title_is_shared(&pool, a.id, a.media_type, &a.title)
+                .await
+                .unwrap(),
+            "both sides of a collision have to see it, or one of them keeps the bare folder"
+        );
+
+        // A film sharing a series' title is not a collision: they are in
+        // different roots and cannot land in the same folder.
+        let film = library::upsert(
+            &pool,
+            &crate::db::seed::Seed::movie(3, "Doctor Who")
+                .year(1996)
+                .build(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            !library::title_is_shared(&pool, film.id, film.media_type, &film.title)
+                .await
+                .unwrap()
         );
     }
 
@@ -1391,17 +1526,16 @@ mod tests {
             &Placement {
                 root: root.clone(),
                 title: "The Boys".to_owned(),
-                year: Some(2019),
+                // What `folder_year` hands a series that shares its title
+                // with nothing.
+                year: None,
                 episode: Some((4, 7)),
                 mode: ImportMode::Hardlink,
             },
         );
         match outcome {
             ImportOutcome::Imported { path, .. } => {
-                assert_eq!(
-                    path,
-                    root.join("The Boys (2019)/Season 04/The Boys - S04E07.mkv")
-                );
+                assert_eq!(path, root.join("The Boys/Season 04/The Boys - S04E07.mkv"));
                 assert!(path.exists());
             }
             other => panic!("expected an import, got {other:?}"),
@@ -1562,13 +1696,18 @@ mod tests {
         );
     }
 
-    /// The other half of the same production finding: brarr writes
+    /// The other half of the same production finding: brarr wrote
     /// `Título (ano)/Season 0N` while the library it was pointed at is
     /// Sonarr's, `Título/Season N`. `reuse_existing_season_folder` fixed
     /// the season component and could never fire, because the *series*
     /// folder differed first — so brarr made a second folder per series
     /// and put one episode in it. Eleven series on this operator's disk
     /// ended up split in two.
+    ///
+    /// [`folder_year`] is what stops that at the source now. This covers
+    /// what remains: a series that legitimately carries a year, because
+    /// its title names two shows, still meets a bare folder already on
+    /// disk and takes it.
     #[test]
     fn an_existing_series_folder_is_reused_across_the_year_suffix() {
         let dir = TempDir::new("seriesfolder");
