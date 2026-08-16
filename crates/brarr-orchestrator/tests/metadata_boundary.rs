@@ -187,9 +187,19 @@ fn collect_core() -> Vec<PathBuf> {
 /// a dependency this suite does not have, and the failure mode of
 /// counting is a block that ends early — which can only produce a false
 /// *pass*, never a false accusation.
+///
+/// **Every offset here is a byte offset**, and that has to stay true.
+/// The first version walked `source.chars().collect::<Vec<char>>()` by
+/// element index while `open` and `start` came from `str::find`, which
+/// answers in bytes. The two agree only while the file is pure ASCII, so
+/// the guard quietly read a shifted, truncated block out of any file
+/// containing an accent — and this repository writes its operator-facing
+/// strings in Portuguese. It surfaced as a panic on a char boundary,
+/// which was lucky: the same mismatch one byte the other way is a block
+/// that ends early, and this guard's own docs note that ending early can
+/// only produce a false pass.
 fn match_blocks(source: &str) -> Vec<String> {
     let mut blocks = Vec::new();
-    let bytes: Vec<char> = source.chars().collect();
     let mut idx = 0;
     while let Some(found) = source[idx..].find("match ") {
         let start = idx + found;
@@ -198,7 +208,7 @@ fn match_blocks(source: &str) -> Vec<String> {
         };
         let mut depth = 0_i32;
         let mut end = open;
-        for (offset, ch) in bytes.iter().enumerate().skip(open) {
+        for (offset, ch) in source[open..].char_indices().map(|(o, c)| (open + o, c)) {
             match ch {
                 '{' => depth += 1,
                 '}' => {
