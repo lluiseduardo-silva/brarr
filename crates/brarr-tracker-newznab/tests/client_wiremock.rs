@@ -4,11 +4,32 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::doc_markdown)]
 
-use brarr_core::{ImdbId, TrackerProvider, TrackerSource};
+use brarr_core::{ImdbId, TmdbId, TrackerProvider, TrackerSource};
 use brarr_tracker_newznab::NewznabClient;
 use url::Url;
 use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
+
+/// NZBGeek's real answer, trimmed to the element that matters:
+/// `movie-search` accepts `imdbid` and **not** `tmdbid`.
+const CAPS_WITHOUT_TMDBID: &str = r#"<?xml version="1.0"?>
+<caps>
+  <server title="NZBgeek"/>
+  <searching>
+    <search available="yes" supportedParams="q,group"/>
+    <tv-search available="yes" supportedParams="q,rid,tvdbid,tvmazeid,season,ep"/>
+    <movie-search available="yes" supportedParams="q,imdbid,genre"/>
+  </searching>
+</caps>"#;
+
+/// Curupira's real answer: the same document, with `tmdbid` advertised.
+const CAPS_WITH_TMDBID: &str = r#"<?xml version="1.0"?>
+<caps>
+  <searching>
+    <tv-search available="yes" supportedParams="q,season,ep,cat,tvdbid,tmdbid,imdbid"/>
+    <movie-search available="yes" supportedParams="q,cat,limit,offset,imdbid,tmdbid"/>
+  </searching>
+</caps>"#;
 
 const MOVIE_FEED: &str = r#"<?xml version="1.0"?>
 <rss xmlns:newznab="http://www.newznab.com/DTD/2010/feeds/attributes/">
@@ -160,4 +181,123 @@ async fn rejects_bad_apikey() {
         err,
         brarr_tracker_newznab::ClientError::InvalidApiKey
     ));
+}
+
+/// The defect this guards, measured in production on 2026-08-15: brarr
+/// asked NZBGeek for a film it holds only a TMDb id for, NZBGeek does
+/// not support `tmdbid` on `movie-search`, and Newznab servers **ignore
+/// an unknown parameter** rather than refusing it. So `t=movie` with no
+/// filter left is the whole recent-movie feed, and the scanner grabbed
+/// the top-scoring stranger — 16 unrelated films, 317 GiB, one per
+/// sweep. The axis has to be one the indexer says it accepts.
+#[tokio::test]
+async fn a_tmdb_movie_search_is_not_sent_to_an_indexer_that_cannot_filter_by_it() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api"))
+        .and(query_param("t", "caps"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(CAPS_WITHOUT_TMDBID))
+        .mount(&server)
+        .await;
+    // Deliberately mounted: if the client asks anyway, it gets a feed of
+    // something else entirely and the assertion below fails loudly —
+    // which is exactly what production did.
+    Mock::given(method("GET"))
+        .and(path("/api"))
+        .and(query_param("t", "movie"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(MOVIE_FEED))
+        .mount(&server)
+        .await;
+
+    let client = NewznabClient::new(tracker_for(&server), "k").unwrap();
+    let releases = client
+        .search_by_tmdb(TmdbId::new(1_445_721).unwrap())
+        .await
+        .unwrap();
+    assert!(
+        releases.is_empty(),
+        "an indexer that cannot filter by tmdbid must be asked nothing, not asked unfiltered"
+    );
+}
+
+/// The other half: a fork that *does* advertise `tmdbid` keeps working.
+/// Refusing the axis outright would have been the cheap fix and would
+/// have cost this provider's movie results.
+#[tokio::test]
+async fn a_tmdb_movie_search_still_goes_to_an_indexer_that_advertises_it() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api"))
+        .and(query_param("t", "caps"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(CAPS_WITH_TMDBID))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api"))
+        .and(query_param("t", "movie"))
+        .and(query_param("tmdbid", "603"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(MOVIE_FEED))
+        .mount(&server)
+        .await;
+
+    let client = NewznabClient::new(tracker_for(&server), "k").unwrap();
+    let releases = client
+        .search_by_tmdb(TmdbId::new(603).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(releases.len(), 1);
+}
+
+/// `imdbid` is the axis the Newznab spec mandates for `movie-search`, so
+/// it is taken on faith and costs no `caps` round trip. Only the
+/// non-standard axis has to be checked — which is also the only one
+/// whose failure mode is an unfiltered feed.
+#[tokio::test]
+async fn an_imdb_movie_search_does_not_ask_for_caps() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api"))
+        .and(query_param("t", "movie"))
+        .and(query_param("imdbid", "9999001"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(MOVIE_FEED))
+        .mount(&server)
+        .await;
+    // No `t=caps` mock at all: wiremock 404s an unmatched request, so a
+    // caps fetch here would fail the search and this test.
+    let client = NewznabClient::new(tracker_for(&server), "k").unwrap();
+    let releases = client
+        .search_by_imdb(ImdbId::new(9_999_001).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(releases.len(), 1);
+}
+
+/// Read once, not once per search. The client is cached per provider by
+/// the orchestrator, so a sweep of a whole catalogue must not add a caps
+/// round trip per title.
+#[tokio::test]
+async fn caps_are_read_once_per_client() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api"))
+        .and(query_param("t", "caps"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(CAPS_WITH_TMDBID))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api"))
+        .and(query_param("t", "movie"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(MOVIE_FEED))
+        .mount(&server)
+        .await;
+
+    let client = NewznabClient::new(tracker_for(&server), "k").unwrap();
+    for _ in 0..3 {
+        client
+            .search_by_tmdb(TmdbId::new(603).unwrap())
+            .await
+            .unwrap();
+    }
+    // `expect(1)` is asserted when the server drops.
 }

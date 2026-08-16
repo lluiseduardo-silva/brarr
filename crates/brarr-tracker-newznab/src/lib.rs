@@ -42,11 +42,13 @@
     reason = "Newznab/Torznab/IMDb/TMDb/TVDB/UNIT3D appear in module docs frequently"
 )]
 
+mod caps;
 mod client;
 mod convert;
 mod dto;
 mod error;
 
+pub use caps::{Capabilities, SupportedParams};
 pub use client::{
     EnrichmentSnapshot, ExternalIdsSnapshot, InspectResult, ItemDebug, NewznabClient, PingReport,
     ReleaseSnapshot,

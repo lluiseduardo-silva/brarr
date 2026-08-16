@@ -1,14 +1,17 @@
 //! Async HTTP client for a single Newznab/Torznab indexer.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use brarr_core::{
     ImdbId, ProviderError, ProviderFuture, Release, TmdbId, TrackerProvider, TrackerSource, TvdbId,
 };
 use reqwest::Client;
-use tracing::{info, warn};
+use tokio::sync::Mutex;
+use tracing::{debug, info, warn};
 use url::Url;
 
+use crate::caps::Capabilities;
 use crate::convert::item_to_release;
 use crate::dto::parse_feed;
 use crate::error::ClientError;
@@ -243,13 +246,23 @@ fn redact_apikey(url: &Url) -> String {
 
 /// HTTP client for a single Newznab indexer.
 ///
-/// `Clone` is cheap — the inner `reqwest::Client` is `Arc`-shared.
+/// `Clone` is cheap — the inner `reqwest::Client` is `Arc`-shared, and
+/// the capability cache is shared with it rather than copied, so clones
+/// of one client also share the single `t=caps` round trip.
 #[derive(Debug, Clone)]
 pub struct NewznabClient {
     http: Client,
     base_url: Url,
     tracker: TrackerSource,
     apikey: String,
+    /// `t=caps`, read at most once per client.
+    ///
+    /// Behind a `tokio::sync::Mutex` held *across* the fetch, the same
+    /// shape as `brarr-download-client`'s qBittorrent `SID`: a burst of
+    /// concurrent searches then performs one round trip rather than one
+    /// each. The orchestrator caches the client per provider, so in
+    /// practice this is once per process.
+    caps: Arc<Mutex<Option<Capabilities>>>,
 }
 
 impl NewznabClient {
@@ -283,7 +296,46 @@ impl NewznabClient {
             base_url: tracker.base_url.clone(),
             tracker,
             apikey: apikey.to_string(),
+            caps: Arc::new(Mutex::new(None)),
         })
+    }
+
+    /// What this indexer says it can be asked, read once and reused.
+    ///
+    /// See [`crate::caps`] for why this is asked at all: a Newznab
+    /// server **ignores a parameter it does not know** and answers the
+    /// unfiltered question instead, so an unsupported axis does not come
+    /// back empty — it comes back full of the wrong thing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] on transport failure or a body that is
+    /// not well-formed XML. A failure is **not** cached: a network blip
+    /// must not disable an axis for the life of the process.
+    pub async fn capabilities(&self) -> Result<Capabilities, ClientError> {
+        let mut slot = self.caps.lock().await;
+        if let Some(cached) = slot.as_ref() {
+            return Ok(cached.clone());
+        }
+        let url = self.build_url("caps", &[])?;
+        let body = self
+            .http
+            .get(url)
+            .send()
+            .await?
+            .error_for_status()?
+            .text()
+            .await?;
+        let parsed = crate::caps::parse(&body)?;
+        info!(
+            target: "brarr_tracker_newznab",
+            tracker = %self.tracker.name,
+            movie_search = ?parsed.movie_search.as_slice(),
+            tv_search = ?parsed.tv_search.as_slice(),
+            "indexer capabilities read"
+        );
+        *slot = Some(parsed.clone());
+        Ok(parsed)
     }
 
     /// Tracker source associated with this client.
@@ -375,14 +427,39 @@ impl NewznabClient {
         self.fetch_and_parse(url).await
     }
 
-    /// `GET /api?t=movie&tmdbid=<id>&apikey=<key>` — non-standard but a
-    /// handful of Newznab servers honour it. NZBGeek does **not**.
-    /// Provided so we can try TMDb opportunistically.
+    /// `GET /api?t=movie&tmdbid=<id>&apikey=<key>` — **only when the
+    /// indexer advertises `tmdbid`**, which most do not.
+    ///
+    /// `tmdbid` is a Torznab extension to `movie-search`, and "try it
+    /// opportunistically" is not a thing this protocol supports: a
+    /// Newznab server drops a parameter it does not recognise and
+    /// answers the *unfiltered* question. So an unsupported axis does
+    /// not return nothing, it returns the recent-movie feed — which is
+    /// how a film brarr holds only a TMDb id for grabbed sixteen
+    /// unrelated titles and 317 GiB, one per sweep, until every one of
+    /// them was refused at import. `caps` is the server answering the
+    /// question itself; see [`Self::capabilities`].
+    ///
+    /// Returns an empty list when the axis is unsupported: that is the
+    /// honest count of what this indexer can find for this film, and it
+    /// reaches `provider_metrics` as a zero rather than as an error,
+    /// because nothing failed.
     ///
     /// # Errors
     ///
-    /// See [`ClientError`].
+    /// See [`ClientError`]. A `caps` read that fails surfaces here
+    /// rather than falling back to the unfiltered query — the fallback
+    /// *is* the defect.
     pub async fn search_movie_by_tmdb(&self, tmdb: TmdbId) -> Result<Vec<Release>, ClientError> {
+        if !self.capabilities().await?.movie_search.supports("tmdbid") {
+            debug!(
+                target: "brarr_tracker_newznab",
+                tracker = %self.tracker.name,
+                tmdb = tmdb.get(),
+                "indexer does not offer tmdbid on movie-search; not asking"
+            );
+            return Ok(Vec::new());
+        }
         let url = self.build_url(
             "movie",
             &[
