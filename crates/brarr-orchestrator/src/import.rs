@@ -130,11 +130,33 @@ pub enum ImportOutcome {
         /// a hardlink was impossible.
         mode: ImportMode,
     },
+    /// A file was already sitting at the destination brarr computed for
+    /// this grab, so the coordinate is covered and the grab records that
+    /// file rather than the one that just arrived.
+    ///
+    /// **Not a failure, and specifically not this release's failure.**
+    /// It used to be [`Self::Permanent`], which marks the grab `failed`
+    /// — and `failed` deliberately *keeps* the barrier key occupied so
+    /// the scanner moves on to the next release. The next release then
+    /// downloaded, landed on the same file, and failed the same way, one
+    /// per sweep, forever: 55 grabs and 413.7 GiB on this operator's
+    /// install before it was found. The destination encodes the episode
+    /// (or the film), not the release, so a file there answers the
+    /// question the sweep was asking.
+    ///
+    /// Never-overwrite is untouched: adopting reads the path and writes
+    /// nothing.
+    AlreadyPresent {
+        /// The file that was already there. Becomes the grab's
+        /// `imported_path`, which is what [`crate::verify`] then watches
+        /// — so if the operator deletes it, brarr goes looking again.
+        path: PathBuf,
+    },
     /// Could not import *yet*: no root folder configured, the client is
     /// unreachable. The grab stays `completed` and the next pass retries.
     Waiting(String),
-    /// Will never work: no video in the download, destination occupied.
-    /// The grab is marked `failed`.
+    /// Will never work: no video in the download, nothing importable in
+    /// it. The grab is marked `failed`.
     Permanent(String),
 }
 
@@ -145,6 +167,13 @@ pub struct ImportSummary {
     pub considered: usize,
     /// Files placed in the library.
     pub imported: usize,
+    /// Grabs whose destination already held a file, recorded against it.
+    ///
+    /// Counted apart from [`Self::imported`] because nothing was
+    /// written: a run that is all adoptions means brarr is downloading
+    /// what it already has, which is a configuration story, not a
+    /// success story.
+    pub adopted: usize,
     /// Grabs left for the next pass.
     pub waiting: usize,
     /// Grabs marked failed.
@@ -211,6 +240,21 @@ pub async fn import_pending(state: &AppState) -> Result<ImportSummary, AppError>
                     "imported"
                 );
             }
+            ImportOutcome::AlreadyPresent { path } => {
+                summary.adopted += 1;
+                // `warn!`, not `info!`: brarr downloaded something it
+                // already had. The file is fine and the catalogue is now
+                // right, but the traffic was wasted and the operator is
+                // the only one who can say why the coordinate was not
+                // covered in the first place.
+                warn!(
+                    target: "brarr_orchestrator::import",
+                    grab_id = %grab.id,
+                    release = %grab.release_name,
+                    destination = %path.display(),
+                    "the destination already held a file; adopted it and did not overwrite"
+                );
+            }
             ImportOutcome::Waiting(reason) => {
                 summary.waiting += 1;
                 debug!(
@@ -248,7 +292,11 @@ pub async fn import_grab(state: &AppState, grab: &Grab) -> Result<ImportOutcome,
 
     let outcome = plan_and_place(state, grab).await?;
     match &outcome {
-        ImportOutcome::Imported { path, .. } => {
+        // Both record the grab against a file in the library. The only
+        // difference is who put it there, and that is a counter and a
+        // log line, not a different row state: `blocks_search` has to go
+        // true either way or the sweep comes straight back.
+        ImportOutcome::Imported { path, .. } | ImportOutcome::AlreadyPresent { path } => {
             grabs::mark_imported(state.pool(), grab.id, &path.to_string_lossy()).await?;
         }
         // Left as `completed` on purpose: the next pass tries again, and
@@ -552,7 +600,18 @@ fn place_download(source: &Path, plan: &Placement) -> ImportOutcome {
         |e| e.to_string_lossy().to_ascii_lowercase(),
     );
     let destination = destination(&plan.root, &plan.title, plan.year, plan.episode, &extension);
+    // Outermost component first: the season rule reads the item folder,
+    // so it has to be told which item folder before it can look inside.
+    let destination = reuse_existing_item_folder(&plan.root, &destination);
     let destination = reuse_existing_season_folder(&destination);
+
+    // Asked before placing, not discovered by failing to place. `place`
+    // keeps its own check for the race, but a file already there is an
+    // answer about the coordinate, and only here is there enough context
+    // to say so — see `ImportOutcome::AlreadyPresent`.
+    if destination.exists() {
+        return ImportOutcome::AlreadyPresent { path: destination };
+    }
 
     match place(&video, &destination, plan.mode) {
         Ok(used) => ImportOutcome::Imported {
@@ -718,6 +777,100 @@ pub(crate) fn destination(
         None => path.push(sanitize(&format!("{folder}.{extension}"))),
     }
     path
+}
+
+/// Swap in the series/film folder that is already there, when its name
+/// differs from ours only by the `(year)` suffix.
+///
+/// The same idea as [`reuse_existing_season_folder`], one component
+/// further out, and it is the one that actually mattered: brarr writes
+/// `Título (2022)` while Sonarr wrote `Título`, so the season rule never
+/// got a chance to run — it looks *inside* the item folder, and brarr had
+/// just decided to create a brand new one. Measured on this operator's
+/// disk: eleven series with two folders side by side, one of them holding
+/// a single episode.
+///
+/// Conservative in three ways, and the third was put there by the disk.
+///
+/// It only replaces the component when the folder brarr would write
+/// **does not exist**, so it can neither invent a destination nor move a
+/// library that is already consistent. It compares whole names, not
+/// prefixes, so `Dune` cannot adopt `Dune Part Two`'s folder. And **the
+/// year is removed from one side only**: a candidate matches when it is
+/// this exact title with no year at all, never when it is the same title
+/// under a *different* year.
+///
+/// That last rule is not hypothetical. Stripping the year from both
+/// sides looked right and this operator's film library refutes it in two
+/// places — `Resident Evil (2002)` beside `Resident Evil (2023)`, and
+/// `Scary Movie (2000)` beside `Scary Movie (2026)`. Those are different
+/// films that share a title, and the symmetric rule would have filed a
+/// third `Resident Evil` inside the 2002 folder, where the movie naming
+/// scheme puts a second film in a folder named after the first.
+///
+/// Two candidates is a question, not an answer: with no year on the item
+/// and both `Título (1978)` and `Título (2003)` on disk, the pick would
+/// come down to readdir order. Ambiguity leaves the path alone, the same
+/// way [`pick_video`] refuses a multi-video folder it cannot resolve.
+fn reuse_existing_item_folder(root: &Path, path: &Path) -> PathBuf {
+    let Ok(rest) = path.strip_prefix(root) else {
+        return path.to_path_buf();
+    };
+    let mut components = rest.components();
+    let Some(std::path::Component::Normal(wanted)) = components.next() else {
+        return path.to_path_buf();
+    };
+    if root.join(wanted).is_dir() {
+        return path.to_path_buf();
+    }
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return path.to_path_buf();
+    };
+    let wanted = wanted.to_string_lossy();
+    let mut found: Option<std::ffi::OsString> = None;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if !entry.path().is_dir() || !names_one_title(&wanted, &name.to_string_lossy()) {
+            continue;
+        }
+        if found.is_some() {
+            // More than one year-variant on disk and no way to choose.
+            return path.to_path_buf();
+        }
+        found = Some(name);
+    }
+    match found {
+        Some(name) => root.join(name).join(components.as_path()),
+        None => path.to_path_buf(),
+    }
+}
+
+/// Whether two folder names differ only by *the presence* of a year.
+///
+/// One side keeps its suffix and the other must have none — which is
+/// what makes `Resident Evil (2002)` and `Resident Evil (2023)` two
+/// titles rather than one.
+fn names_one_title(wanted: &str, candidate: &str) -> bool {
+    candidate.eq_ignore_ascii_case(strip_year_suffix(wanted))
+        || strip_year_suffix(candidate).eq_ignore_ascii_case(wanted)
+}
+
+/// A folder name without its trailing ` (2022)`, if it has one.
+///
+/// Only a four-digit group in parentheses at the very end counts, so
+/// `Blade Runner 2049` keeps its number — that is part of the title, and
+/// stripping it would let `Blade Runner` adopt its folder.
+fn strip_year_suffix(name: &str) -> &str {
+    let trimmed = name.trim_end();
+    let Some(open) = trimmed.strip_suffix(')').and_then(|s| s.rfind('(')) else {
+        return trimmed;
+    };
+    let inner = &trimmed[open + 1..trimmed.len() - 1];
+    if inner.len() == 4 && inner.bytes().all(|b| b.is_ascii_digit()) {
+        trimmed[..open].trim_end()
+    } else {
+        trimmed
+    }
 }
 
 /// Swap in the season folder that is already there, when its name only
@@ -1362,6 +1515,217 @@ mod tests {
             matches!(outcome, ImportOutcome::Waiting(_)),
             "a path brarr cannot open is configuration, not a dead release — got {outcome:?}"
         );
+    }
+
+    /// The loop this closes, measured in production on 2026-08-15.
+    ///
+    /// A file sat at exactly the destination brarr computes for this
+    /// episode. `place` refused to overwrite it — correctly — and
+    /// `place_download` turned that refusal into `Permanent`, which
+    /// marks the grab `failed`, which **keeps the barrier key occupied
+    /// on purpose** so the next sweep picks a *different* release. That
+    /// release downloads, lands on the same file, and fails identically.
+    /// Fifty-five grabs, 413.7 GiB, still running when it was found.
+    ///
+    /// The destination is a coordinate, not a release: a file already
+    /// there is this episode, and the answer is to record it rather than
+    /// to blame the release that arrived second.
+    #[test]
+    fn a_destination_that_already_holds_a_file_is_adopted_not_failed() {
+        let dir = TempDir::new("already");
+        dir.file("download/skeleton.s02e06.mkv", 128);
+        let root = dir.path().join("library");
+        let occupied = dir.file(
+            "library/Skeleton Knight (2022)/Season 02/Skeleton Knight - S02E06.mkv",
+            999,
+        );
+
+        let outcome = place_download(
+            &dir.path().join("download/skeleton.s02e06.mkv"),
+            &Placement {
+                root,
+                title: "Skeleton Knight".to_owned(),
+                year: Some(2022),
+                episode: Some((2, 6)),
+                mode: ImportMode::Hardlink,
+            },
+        );
+
+        match outcome {
+            ImportOutcome::AlreadyPresent { path } => assert_eq!(path, occupied),
+            other => panic!("expected the file already there to be adopted, got {other:?}"),
+        }
+        assert_eq!(
+            std::fs::read(&occupied).unwrap().len(),
+            999,
+            "never overwrite is still the rule — adopting is not writing"
+        );
+    }
+
+    /// The other half of the same production finding: brarr writes
+    /// `Título (ano)/Season 0N` while the library it was pointed at is
+    /// Sonarr's, `Título/Season N`. `reuse_existing_season_folder` fixed
+    /// the season component and could never fire, because the *series*
+    /// folder differed first — so brarr made a second folder per series
+    /// and put one episode in it. Eleven series on this operator's disk
+    /// ended up split in two.
+    #[test]
+    fn an_existing_series_folder_is_reused_across_the_year_suffix() {
+        let dir = TempDir::new("seriesfolder");
+        dir.file("download/skeleton.s02e06.mkv", 128);
+        let root = dir.path().join("library");
+        // What Sonarr built: no year on the folder, no padding on the
+        // season.
+        dir.file("library/Skeleton Knight/Season 2/S02E05.mkv", 1);
+
+        let outcome = place_download(
+            &dir.path().join("download/skeleton.s02e06.mkv"),
+            &Placement {
+                root: root.clone(),
+                title: "Skeleton Knight".to_owned(),
+                year: Some(2022),
+                episode: Some((2, 6)),
+                mode: ImportMode::Hardlink,
+            },
+        );
+
+        match outcome {
+            ImportOutcome::Imported { path, .. } => assert_eq!(
+                path,
+                root.join("Skeleton Knight/Season 2/Skeleton Knight - S02E06.mkv"),
+                "one folder per series, one folder per season"
+            ),
+            other => panic!("expected an import, got {other:?}"),
+        }
+        assert!(
+            !root.join("Skeleton Knight (2022)").exists(),
+            "the second folder is exactly what must stop being created"
+        );
+    }
+
+    /// Conservative in the same way the season rule is: it only ever
+    /// swaps in a directory that **exists**. With nothing there, brarr
+    /// writes its own name, which is what a greenfield library wants.
+    #[test]
+    fn nothing_on_disk_means_brarr_writes_its_own_folder_name() {
+        let dir = TempDir::new("greenfield");
+        dir.file("download/movie.mkv", 32);
+        let root = dir.path().join("library");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let outcome = place_download(
+            &dir.path().join("download/movie.mkv"),
+            &Placement {
+                root: root.clone(),
+                title: "The Matrix".to_owned(),
+                year: Some(1999),
+                episode: None,
+                mode: ImportMode::Hardlink,
+            },
+        );
+
+        match outcome {
+            ImportOutcome::Imported { path, .. } => {
+                assert_eq!(path, root.join("The Matrix (1999)/The Matrix (1999).mkv"));
+            }
+            other => panic!("expected an import, got {other:?}"),
+        }
+    }
+
+    /// Found by listing the operator's actual disk while writing this:
+    /// `/midias/Filmes` carries `Resident Evil (2002)` beside `Resident
+    /// Evil (2023)`, and `Scary Movie (2000)` beside `Scary Movie
+    /// (2026)`. Two films, one title. The first version of the rule
+    /// stripped the year from both sides, so a third `Resident Evil`
+    /// would have been filed inside the 2002 folder — and the movie
+    /// naming scheme names the file after the folder, which puts two
+    /// different films in one place under one name.
+    #[test]
+    fn the_same_title_under_another_year_is_another_film() {
+        let dir = TempDir::new("remake");
+        dir.file("download/movie.mkv", 32);
+        let root = dir.path().join("library");
+        dir.file("library/Resident Evil (2002)/Resident Evil (2002).mkv", 1);
+
+        let outcome = place_download(
+            &dir.path().join("download/movie.mkv"),
+            &Placement {
+                root: root.clone(),
+                title: "Resident Evil".to_owned(),
+                year: Some(2023),
+                episode: None,
+                mode: ImportMode::Hardlink,
+            },
+        );
+
+        match outcome {
+            ImportOutcome::Imported { path, .. } => assert_eq!(
+                path,
+                root.join("Resident Evil (2023)/Resident Evil (2023).mkv")
+            ),
+            other => panic!("expected its own folder, got {other:?}"),
+        }
+    }
+
+    /// And when the disk offers two years for a title brarr holds none
+    /// for, readdir order is not a tiebreak. Leaving the path alone is
+    /// the same refusal `pick_video` makes for an ambiguous folder.
+    #[test]
+    fn two_year_variants_are_ambiguous_and_nothing_is_reused() {
+        let dir = TempDir::new("ambiguous");
+        dir.file("download/movie.mkv", 32);
+        let root = dir.path().join("library");
+        dir.file("library/Battlestar Galactica (1978)/x.mkv", 1);
+        dir.file("library/Battlestar Galactica (2003)/x.mkv", 1);
+
+        let outcome = place_download(
+            &dir.path().join("download/movie.mkv"),
+            &Placement {
+                root: root.clone(),
+                title: "Battlestar Galactica".to_owned(),
+                year: None,
+                episode: None,
+                mode: ImportMode::Hardlink,
+            },
+        );
+
+        match outcome {
+            ImportOutcome::Imported { path, .. } => assert_eq!(
+                path,
+                root.join("Battlestar Galactica/Battlestar Galactica.mkv"),
+                "an unresolvable choice is not a choice"
+            ),
+            other => panic!("expected its own folder, got {other:?}"),
+        }
+    }
+
+    /// A different film that happens to share a prefix is not the same
+    /// film. The rule compares whole names modulo the year suffix, not
+    /// prefixes — `Dune` must not adopt `Dune Part Two`'s folder.
+    #[test]
+    fn a_different_title_is_not_a_year_variant() {
+        let dir = TempDir::new("notvariant");
+        dir.file("download/movie.mkv", 32);
+        let root = dir.path().join("library");
+        dir.file("library/Dune Part Two (2024)/x.mkv", 1);
+
+        let outcome = place_download(
+            &dir.path().join("download/movie.mkv"),
+            &Placement {
+                root: root.clone(),
+                title: "Dune".to_owned(),
+                year: Some(2021),
+                episode: None,
+                mode: ImportMode::Hardlink,
+            },
+        );
+
+        match outcome {
+            ImportOutcome::Imported { path, .. } => {
+                assert_eq!(path, root.join("Dune (2021)/Dune (2021).mkv"));
+            }
+            other => panic!("expected an import, got {other:?}"),
+        }
     }
 
     #[test]
