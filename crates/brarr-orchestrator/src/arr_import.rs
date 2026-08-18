@@ -903,6 +903,7 @@ async fn import_title(
         place(pool, &item, title, ctx).await?;
     }
     record_tvdb_id(pool, &item, title).await?;
+    record_arr_folder(pool, &item, title, ctx.rules).await?;
 
     let detail = match title.media_type {
         MediaType::Movie => SeriesDetail::default(),
@@ -925,6 +926,41 @@ async fn import_title(
         created,
         files: adopt_files(pool, &item, files, ctx.rules).await?,
     })
+}
+
+/// Keep the folder the \*arr uses for this title, in brarr's namespace.
+///
+/// **The observed answer to "where does this title live", against
+/// brarr's computed one.** brarr names a folder from a title, and the
+/// \*arr names it from a different catalogue's title — `Os Simpsons`
+/// against `The Simpsons` — so for 64 of this operator's 176 series the
+/// two disagree and the first import makes a second folder. A rule can
+/// close most of that (see [`crate::folder_names`]); it cannot close a
+/// folder made by hand, or one holding a name TheTVDB has since changed,
+/// because a folder is a snapshot of the title on the day it was made.
+/// Four of these 176 are exactly that. The \*arr knows, and says so on
+/// every sweep.
+///
+/// Written on **every** pass, not only for a created title, unlike
+/// monitoring and placement: this is not a choice the operator makes,
+/// it is a fact that can change under them when they move a library.
+/// A path no mapping covers is skipped rather than stored raw — a
+/// remote-namespace path is not somewhere brarr can write.
+async fn record_arr_folder(
+    pool: &crate::db::Pool,
+    item: &LibraryItem,
+    title: &ArrTitle,
+    rules: &[PrefixRule],
+) -> Result<(), AppError> {
+    if title.path.trim().is_empty() {
+        return Ok(());
+    }
+    let translated = remote_path::translate(rules, &title.path);
+    let local = translated.local.to_string_lossy().to_string();
+    if item.arr_folder.as_deref() == Some(local.as_str()) {
+        return Ok(());
+    }
+    library::set_arr_folder(pool, item.id, Some(&local)).await
 }
 
 /// Keep the id the \*arr reports, not only the one TMDB does.

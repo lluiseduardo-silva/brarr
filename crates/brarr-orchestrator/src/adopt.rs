@@ -793,7 +793,14 @@ async fn build_row(
             .filter(|r| r.media_type.is_none() || r.media_type == Some(item.media_type))
             .map(|r| real(&r.path))
             .collect(),
-        title: item.title.clone(),
+        // Same source the importer uses, and it has to be: an adoption
+        // that linked into the catalogue-language folder while the
+        // importer writes the English one would build the split both of
+        // them exist to stop building.
+        title: item
+            .folder_title
+            .clone()
+            .unwrap_or_else(|| item.title.clone()),
         // Same rule the importer follows, and it has to be the same rule:
         // an adoption that linked into `Título (Ano)` while the importer
         // writes `Título` would build the split this release exists to

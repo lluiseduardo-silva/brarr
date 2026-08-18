@@ -54,8 +54,8 @@ use brarr_orchestrator::db::settings::{
 };
 use brarr_orchestrator::state::{LogReloader, RuntimeConfig};
 use brarr_orchestrator::{
-    AppState, AuthConfig, BypassConfig, TrustedPeers, arr_import, db, grpc, import, maintenance,
-    poll, queue, relink, scan, verify, web,
+    AppState, AuthConfig, BypassConfig, TrustedPeers, arr_import, db, folder_names, grpc, import,
+    maintenance, poll, queue, relink, scan, verify, web,
 };
 use tracing::warn;
 use tracing_subscriber::layer::SubscriberExt;
@@ -239,6 +239,12 @@ async fn main() -> Result<()> {
     // no-ops while no instance is a source or TMDB is unconfigured, so a
     // deployment that never touches the *arr screen sees no change.
     let _arr_sync_handle = arr_import::spawn(state.clone());
+    // Names the folder brarr would create the way the *arr name theirs:
+    // from TheTVDB's English title, not the operator's language. Twelve
+    // hours apart, because a title is renamed upstream rarely and being
+    // a cycle late costs nothing — the name is only consulted when an
+    // import actually creates a folder. No-ops without a TheTVDB key.
+    let _folder_names_handle = folder_names::spawn(state.clone());
     // One-shot repair, not a long-lived task: until this release a
     // metadata refresh unlinked every per-episode grab, and the damage
     // rendered as *complete* rather than as missing, so nothing would

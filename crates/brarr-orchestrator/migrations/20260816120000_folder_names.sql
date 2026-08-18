@@ -1,0 +1,26 @@
+-- Where a title's files live, as two answers of different confidence.
+--
+-- brarr and the *arr write into the same library, and until now brarr
+-- built its folder name from `title` — which is the TMDB title, in the
+-- operator's language, while the *arr builds its own from TheTVDB's
+-- English translation. `Os Simpsons` against `The Simpsons`: no rule
+-- over names bridges that, and the first import for such a title makes a
+-- second folder for a series that already has one. Measured on this
+-- operator's catalogue: 112 of 176 titles agreed, 61 diverged and had
+-- simply never been imported into, 3 were already split.
+--
+-- `folder_title` is the naming rule: the English name from whoever owns
+-- the structure, which is what an *arr would have written. Reproduces
+-- 172 of the 176 folders on this disk.
+--
+-- `arr_folder` is the observed fact: the directory an *arr says it uses,
+-- already translated into brarr's namespace. It covers the remaining 4,
+-- which no rule can reach because they were made by hand or hold a name
+-- TheTVDB has since changed, and a folder is a snapshot of the title on
+-- the day it was created.
+--
+-- Both nullable, and neither is refreshed by the metadata sweep the way
+-- `title` is: they describe placement, and `db::library`'s rule since
+-- the beginning is that placement is state, not cache.
+ALTER TABLE library_items ADD COLUMN folder_title TEXT;
+ALTER TABLE library_items ADD COLUMN arr_folder TEXT;

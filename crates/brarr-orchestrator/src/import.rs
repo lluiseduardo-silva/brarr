@@ -383,10 +383,18 @@ async fn plan_and_place(state: &AppState, grab: &Grab) -> Result<ImportOutcome, 
 
     let plan = Placement {
         root: root.path.clone(),
-        title: item.title.clone(),
+        // The name the folder takes when brarr is the one creating it.
+        // `title` is TMDB's, in the operator's language; `folder_title`
+        // is the English one the \*arr would have used, and using it is
+        // what makes a fresh install agree with a Sonarr added later.
+        title: item
+            .folder_title
+            .clone()
+            .unwrap_or_else(|| item.title.clone()),
         year: folder_year,
         episode: marker,
         mode: configured_mode(state).await,
+        arr_folder: item.arr_folder.as_deref().map(PathBuf::from),
     };
 
     // Everything past here touches the filesystem, so it runs on the
@@ -600,6 +608,15 @@ struct Placement {
     episode: Option<(u16, u16)>,
     /// Hardlink, copy or move.
     mode: ImportMode,
+    /// The folder an \*arr reports for this title, when there is one.
+    ///
+    /// **Outranks every naming rule, because it is not one.** A rule can
+    /// reproduce 172 of this operator's 176 series folders; the other
+    /// four hold a name that no longer exists anywhere — one made by
+    /// hand, three that TheTVDB has renamed since the folder was created
+    /// — and a folder is a snapshot of the title on the day it was made.
+    /// Only the \*arr can say where those are, and it does.
+    arr_folder: Option<PathBuf>,
 }
 
 /// Pick the file, build the destination, and place it.
@@ -618,9 +635,13 @@ fn place_download(source: &Path, plan: &Placement) -> ImportOutcome {
         |e| e.to_string_lossy().to_ascii_lowercase(),
     );
     let destination = destination(&plan.root, &plan.title, plan.year, plan.episode, &extension);
-    // Outermost component first: the season rule reads the item folder,
-    // so it has to be told which item folder before it can look inside.
-    let destination = reuse_existing_item_folder(&plan.root, &destination);
+    // Observed first, rule second. `arr_folder` is only taken when it is
+    // really there: a stale row must not send a file into a directory
+    // that no longer exists, which would create it under a dead name.
+    let destination = match plan.arr_folder.as_deref() {
+        Some(folder) if folder.is_dir() => graft_onto(folder, &plan.root, &destination),
+        _ => reuse_existing_item_folder(&plan.root, &destination),
+    };
     let destination = reuse_existing_season_folder(&destination);
 
     // Asked before placing, not discovered by failing to place. `place`
@@ -800,6 +821,22 @@ pub(crate) fn destination(
         None => path.push(sanitize(&format!("{folder}.{extension}"))),
     }
     path
+}
+
+/// Re-root a computed destination onto a folder that is already known.
+///
+/// Keeps everything below the item component — the season folder and the
+/// file name — and swaps only the folder itself, so the naming rules for
+/// the parts brarr does own still apply.
+fn graft_onto(folder: &Path, root: &Path, computed: &Path) -> PathBuf {
+    let Ok(rest) = computed.strip_prefix(root) else {
+        return computed.to_path_buf();
+    };
+    let mut components = rest.components();
+    if components.next().is_none() {
+        return computed.to_path_buf();
+    }
+    folder.join(components.as_path())
 }
 
 /// The year that belongs in an item's folder name.
@@ -1020,7 +1057,6 @@ fn replace_colons(raw: &str) -> String {
 /// deleting it is legal and *wrong*: it is what put five series in two
 /// folders each.
 pub(crate) fn sanitize(raw: &str) -> String {
-    const ILLEGAL: &[char] = &['<', '>', ':', '"', '/', '\\', '|', '?', '*'];
     const RESERVED: &[&str] = &[
         "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8",
         "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
@@ -1029,21 +1065,34 @@ pub(crate) fn sanitize(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len());
     let mut last_was_space = false;
     for c in raw.chars() {
-        let c = if ILLEGAL.contains(&c) || c.is_control() {
-            ' '
-        } else {
-            c
-        };
-        // Collapse the runs a replacement leaves behind.
-        if c == ' ' {
-            if last_was_space {
+        let replacement = match c {
+            // Sonarr's own map, verbatim from its `CleanFileName` with
+            // `replaceIllegalCharacters` on - which is the default and
+            // what this operator runs. It **substitutes** rather than
+            // blanking, and the difference is visible on disk today:
+            // `Fate/strange Fake` is `Fate+strange Fake` there, while
+            // brarr wrote `Fate strange Fake`.
+            SLASH | BACKSLASH => "+",
+            '?' => "!",
+            '*' => "-",
+            // The four it simply drops.
+            '<' | '>' | '|' | QUOTE => "",
+            c if c.is_control() => " ",
+            _ => {
+                if c == ' ' {
+                    if last_was_space {
+                        continue;
+                    }
+                    last_was_space = true;
+                } else {
+                    last_was_space = false;
+                }
+                out.push(c);
                 continue;
             }
-            last_was_space = true;
-        } else {
-            last_was_space = false;
-        }
-        out.push(c);
+        };
+        last_was_space = replacement.ends_with(' ');
+        out.push_str(replacement);
     }
     let trimmed = out.trim().trim_end_matches(['.', ' ']).to_owned();
     let stem = trimmed.split('.').next().unwrap_or("").to_ascii_lowercase();
@@ -1055,6 +1104,12 @@ pub(crate) fn sanitize(raw: &str) -> String {
     }
     truncate_chars(&trimmed, 200)
 }
+
+/// The three characters whose literals are awkward to read inline.
+///
+const SLASH: char = '/';
+const BACKSLASH: char = '\\';
+const QUOTE: char = '\"';
 
 /// Cap a component's length on a char boundary. 255 bytes is the usual
 /// filesystem limit; 200 chars leaves room for a multi-byte title.
@@ -1278,14 +1333,20 @@ mod tests {
         );
     }
 
-    /// The rest of the illegal set still collapses to a space — only the
-    /// colon got a replacement, because only the colon is common enough
-    /// in real titles for the two programs to disagree about it at
-    /// scale.
+    /// The whole illegal set now follows Sonarr's map, not just the
+    /// colon. It **substitutes** where Sonarr substitutes and drops
+    /// where Sonarr drops, which is visible on this operator's disk:
+    /// `Fate/strange Fake` is `Fate+strange Fake` there, and brarr wrote
+    /// `Fate strange Fake` — one more folder for one more series.
     #[test]
-    fn the_other_illegal_characters_are_unchanged() {
-        assert_eq!(sanitize("Where/When?"), "Where When");
-        assert_eq!(sanitize("A<B>C"), "A B C");
+    fn the_illegal_set_follows_the_arrs_map() {
+        assert_eq!(sanitize("Where/When?"), "Where+When!");
+        assert_eq!(sanitize("Fate/strange Fake"), "Fate+strange Fake");
+        assert_eq!(sanitize("2*3"), "2-3");
+        // The four it drops outright, rather than leaving a gap behind.
+        assert_eq!(sanitize("A<B>C"), "ABC");
+        assert_eq!(sanitize("say \"what\""), "say what");
+        assert_eq!(sanitize("a|b"), "ab");
     }
 
     #[test]
@@ -1421,11 +1482,16 @@ mod tests {
     fn sanitising_removes_what_a_filesystem_refuses() {
         // The colon is the exception, and deliberately so: it becomes
         // what the *arr writes (`-`, no space after), while everything
-        assert_eq!(sanitize("A/B\\C:D*E?F\"G<H>I|J"), "A B C-D E F G H I J");
+        assert_eq!(sanitize("A/B\\C:D*E?F\"G<H>I|J"), "A+B+C-D-E!FGHIJ");
         assert_eq!(sanitize("trailing dot."), "trailing dot");
         assert_eq!(sanitize("  espaços   demais  "), "espaços demais");
         assert_eq!(sanitize(""), "sem-titulo");
-        assert_eq!(sanitize("///"), "sem-titulo");
+        // Sonarr's answer for a name made only of substituted characters
+        // is the substitutions, and it is a perfectly good folder name.
+        assert_eq!(sanitize("///"), "+++");
+        // The fallback still covers what really does reduce to nothing:
+        // the four characters Sonarr drops leave no name behind.
+        assert_eq!(sanitize("<>|"), "sem-titulo");
     }
 
     #[test]
@@ -1618,6 +1684,7 @@ mod tests {
                 year: None,
                 episode: Some((4, 7)),
                 mode: ImportMode::Hardlink,
+                arr_folder: None,
             },
         );
         match outcome {
@@ -1729,6 +1796,7 @@ mod tests {
                 year: Some(1999),
                 episode: None,
                 mode: ImportMode::Hardlink,
+                arr_folder: None,
             },
         );
 
@@ -1769,6 +1837,7 @@ mod tests {
                 year: Some(2022),
                 episode: Some((2, 6)),
                 mode: ImportMode::Hardlink,
+                arr_folder: None,
             },
         );
 
@@ -1812,6 +1881,7 @@ mod tests {
                 year: Some(2022),
                 episode: Some((2, 6)),
                 mode: ImportMode::Hardlink,
+                arr_folder: None,
             },
         );
 
@@ -1827,6 +1897,75 @@ mod tests {
             !root.join("Skeleton Knight (2022)").exists(),
             "the second folder is exactly what must stop being created"
         );
+    }
+
+    /// Fix B: the folder an \*arr reports outranks every rule, because
+    /// it is not a rule. Four of this operator's 176 series folders hold
+    /// a name that exists nowhere any more — one made by hand, three
+    /// renamed on TheTVDB after Sonarr created the folder — and nothing
+    /// derived from a title can reach those.
+    #[test]
+    fn the_folder_the_arr_reports_wins_over_the_computed_one() {
+        let dir = TempDir::new("arrfolder");
+        dir.file("download/ep.mkv", 32);
+        let root = dir.path().join("library");
+        // What Sonarr has, under a name no current title produces.
+        dir.file("library/Monster Musume no Oisha-san/Season 1/old.mkv", 1);
+
+        let outcome = place_download(
+            &dir.path().join("download/ep.mkv"),
+            &Placement {
+                root: root.clone(),
+                title: "Monster Girl Doctor".to_owned(),
+                year: None,
+                episode: Some((1, 2)),
+                mode: ImportMode::Hardlink,
+                arr_folder: Some(root.join("Monster Musume no Oisha-san")),
+            },
+        );
+
+        match outcome {
+            ImportOutcome::Imported { path, .. } => assert_eq!(
+                path,
+                root.join("Monster Musume no Oisha-san/Season 1/Monster Girl Doctor - S01E02.mkv"),
+                "the season folder and the file name are still brarr's; only the item folder is not"
+            ),
+            other => panic!("expected an import, got {other:?}"),
+        }
+        assert!(
+            !root.join("Monster Girl Doctor").exists(),
+            "the whole point is that the second folder is not created"
+        );
+    }
+
+    /// A stored path that is no longer there must not be used: it would
+    /// recreate a directory under a dead name and leave the live one
+    /// beside it. The rule takes over, which is the state before B.
+    #[test]
+    fn a_stale_arr_folder_falls_back_to_the_rule() {
+        let dir = TempDir::new("stalearr");
+        dir.file("download/ep.mkv", 32);
+        let root = dir.path().join("library");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let outcome = place_download(
+            &dir.path().join("download/ep.mkv"),
+            &Placement {
+                root: root.clone(),
+                title: "The Bear".to_owned(),
+                year: None,
+                episode: Some((2, 3)),
+                mode: ImportMode::Hardlink,
+                arr_folder: Some(root.join("a folder that was deleted")),
+            },
+        );
+
+        match outcome {
+            ImportOutcome::Imported { path, .. } => {
+                assert_eq!(path, root.join("The Bear/Season 02/The Bear - S02E03.mkv"));
+            }
+            other => panic!("expected an import, got {other:?}"),
+        }
     }
 
     /// Conservative in the same way the season rule is: it only ever
@@ -1847,6 +1986,7 @@ mod tests {
                 year: Some(1999),
                 episode: None,
                 mode: ImportMode::Hardlink,
+                arr_folder: None,
             },
         );
 
@@ -1881,6 +2021,7 @@ mod tests {
                 year: Some(2023),
                 episode: None,
                 mode: ImportMode::Hardlink,
+                arr_folder: None,
             },
         );
 
@@ -1912,6 +2053,7 @@ mod tests {
                 year: None,
                 episode: None,
                 mode: ImportMode::Hardlink,
+                arr_folder: None,
             },
         );
 
@@ -1943,6 +2085,7 @@ mod tests {
                 year: Some(2021),
                 episode: None,
                 mode: ImportMode::Hardlink,
+                arr_folder: None,
             },
         );
 
@@ -1971,6 +2114,7 @@ mod tests {
                 year: Some(1999),
                 episode: None,
                 mode: ImportMode::Hardlink,
+                arr_folder: None,
             },
         );
 

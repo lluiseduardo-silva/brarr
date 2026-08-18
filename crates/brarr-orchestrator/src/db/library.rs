@@ -196,6 +196,25 @@ pub struct LibraryItem {
     pub profile_id: Option<Uuid>,
     /// Destination directory handed to the download client.
     pub root_folder: Option<String>,
+    /// Name to use for this title's folder on disk, when it should not
+    /// be [`Self::title`].
+    ///
+    /// The \*arr builds its folder from TheTVDB's **English** name while
+    /// brarr's `title` is TMDB's, in the operator's language, so the two
+    /// disagree for 64 of this catalogue's 176 series — `Os Simpsons`
+    /// against `The Simpsons`. No rule over names bridges that; the fix
+    /// is to name the folder from the same place they do. Filled by
+    /// [`crate::folder_names`].
+    pub folder_title: Option<String>,
+    /// The folder an \*arr reports for this title, in **brarr's**
+    /// namespace.
+    ///
+    /// Outranks every rule, because it is not a rule: it is where the
+    /// files actually are. It is what covers a folder made by hand, or
+    /// one holding a name TheTVDB has since changed — a folder is a
+    /// snapshot of the title on the day it was created, and this
+    /// operator has four of those.
+    pub arr_folder: Option<String>,
     /// How much of the title to chase. Governs the default for season
     /// and episode rows [`sync_seasons`] has never seen — **not** a
     /// summary of what is monitored now. See the migration.
@@ -420,6 +439,8 @@ fn row_to_item(row: &SqliteRow) -> Result<LibraryItem, AppError> {
         monitored: monitored != 0,
         profile_id: opt_uuid_at(row, "profile_id")?,
         root_folder: row.try_get("root_folder")?,
+        folder_title: row.try_get("folder_title")?,
+        arr_folder: row.try_get("arr_folder")?,
         monitor_scope: MonitorScope::from_label(&scope_raw)?,
         added_at: ts_at(row, "added_at")?,
         metadata_refreshed_at: ts_at(row, "metadata_refreshed_at")?,
@@ -430,7 +451,7 @@ const ITEM_COLUMNS: &str = "id, media_type, title, original_title, \
      year, overview, poster_path, backdrop_path, poster_source, backdrop_source,      descriptive_source, \
      status, runtime_minutes, \
      next_air_date, digital_release_at, physical_release_at, monitored, \
-     profile_id, root_folder, monitor_scope, added_at, metadata_refreshed_at";
+     profile_id, root_folder, monitor_scope, added_at, metadata_refreshed_at, \n     folder_title, arr_folder";
 
 /// Insert a catalogue entry, or refresh the metadata of the one any of
 /// `new.ids` already names.
@@ -722,6 +743,72 @@ pub async fn get_by_id(pool: &Pool, id: Uuid) -> Result<LibraryItem, AppError> {
         Some(r) => row_to_item(&r),
         None => Err(AppError::NotFound(format!("library_item {id}"))),
     }
+}
+
+/// Record the name this title's folder should use on disk.
+///
+/// Deliberately not part of [`upsert`]: the metadata sweep refreshes
+/// what a provider owns, and where files live is placement, which this
+/// module has always treated as state rather than cache. Writing `None`
+/// clears it, which is how "go back to the catalogue title" is spelled.
+///
+/// # Errors
+///
+/// Returns [`AppError::Database`] on SQL failure.
+pub async fn set_folder_title(
+    pool: &Pool,
+    id: Uuid,
+    folder_title: Option<&str>,
+) -> Result<(), AppError> {
+    sqlx::query("UPDATE library_items SET folder_title = ? WHERE id = ?")
+        .bind(folder_title)
+        .bind(id.to_string())
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Record the folder an \*arr reports for this title, in brarr's own
+/// namespace.
+///
+/// # Errors
+///
+/// Returns [`AppError::Database`] on SQL failure.
+pub async fn set_arr_folder(pool: &Pool, id: Uuid, folder: Option<&str>) -> Result<(), AppError> {
+    sqlx::query("UPDATE library_items SET arr_folder = ? WHERE id = ?")
+        .bind(folder)
+        .bind(id.to_string())
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Series carrying a TheTVDB id, for the folder-name sweep.
+///
+/// # Errors
+///
+/// Returns [`AppError::Database`] on SQL failure.
+pub async fn series_with_tvdb_id(
+    pool: &Pool,
+) -> Result<Vec<(Uuid, i64, Option<String>)>, AppError> {
+    let rows = sqlx::query(
+        "SELECT i.id, x.external_id, i.folder_title            FROM library_items i            JOIN library_item_ids x ON x.item_id = i.id AND x.source = 'tvdb'           WHERE i.media_type = 'tv'",
+    )
+    .fetch_all(pool)
+    .await?;
+    let mut out = Vec::with_capacity(rows.len());
+    for r in &rows {
+        let id: String = r.try_get("id")?;
+        let external: String = r.try_get("external_id")?;
+        let Ok(uuid) = Uuid::parse_str(&id) else {
+            continue;
+        };
+        let Ok(tvdb) = external.parse::<i64>() else {
+            continue;
+        };
+        out.push((uuid, tvdb, r.try_get("folder_title")?));
+    }
+    Ok(out)
 }
 
 /// Whether another catalogue entry of the same media type carries this
