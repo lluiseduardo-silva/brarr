@@ -979,18 +979,53 @@ fn season_number(name: &str) -> Option<u16> {
         .flatten()
 }
 
+/// Sonarr and Radarr's colon rule, which is what this operator's library
+/// is actually built on.
+///
+/// **Two programs writing the same library have to agree on this or the
+/// library splits**, and a colon is the one punctuation mark that
+/// appears in a large share of titles and is illegal on Windows.
+/// [`sanitize`] used to turn it into a space and collapse the run, so
+/// `Mushoku Tensei: Jobless Reincarnation` became `Mushoku Tensei
+/// Jobless Reincarnation` while Sonarr wrote `Mushoku Tensei - Jobless
+/// Reincarnation`: two folders for one series, the same defect as the
+/// year suffix, and invisible to the year rule, which compares only that
+/// one difference. Five series on this operator's disk, one of them with
+/// 52 files on Sonarr's side and 2 on brarr's.
+///
+/// **Read from the source rather than guessed.** Both Sonarr instances
+/// and Radarr report `colonReplacementFormat` = *Smart*: `": "` becomes
+/// `" - "`, and a colon with no space after it becomes a bare `-`. All
+/// six colon-carrying series titles and all 71 film titles in this
+/// catalogue take the first branch, and the film side had already
+/// converged on it — `TRON: Legacy` is `TRON - Legacy (2010)` on disk.
+///
+/// It is a fixed rule rather than a setting because the \*arr's own value
+/// is a setting brarr cannot see at import time; Smart is what both of
+/// them ship as the default and what this library is made of. A library
+/// built under a different one is handled by
+/// [`reuse_existing_item_folder`], which takes the folder that is there.
+fn replace_colons(raw: &str) -> String {
+    raw.replace(": ", " - ").replace(':', "-")
+}
+
 /// Make one path component safe on every filesystem brarr might run on.
 ///
 /// Windows is the strict one and the one this dev machine runs, so its
 /// rules apply everywhere: no `\/:*?"<>|`, no control characters, no
 /// trailing dot or space, and the reserved device names are not
 /// available as a whole name.
+///
+/// The colon is handled before the rest, by [`replace_colons`], because
+/// deleting it is legal and *wrong*: it is what put five series in two
+/// folders each.
 pub(crate) fn sanitize(raw: &str) -> String {
     const ILLEGAL: &[char] = &['<', '>', ':', '"', '/', '\\', '|', '?', '*'];
     const RESERVED: &[&str] = &[
         "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8",
         "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
     ];
+    let raw = replace_colons(raw);
     let mut out = String::with_capacity(raw.len());
     let mut last_was_space = false;
     for c in raw.chars() {
@@ -1203,6 +1238,56 @@ mod tests {
         assert_eq!(reuse_existing_season_folder(&wanted), wanted);
     }
 
+    /// The rule read off both Sonarr instances and Radarr
+    /// (`colonReplacementFormat` = Smart), against the titles that
+    /// actually produced the split.
+    #[test]
+    fn a_colon_becomes_what_the_arr_writes_in_its_place() {
+        // The five that were split on this operator's disk.
+        assert_eq!(
+            sanitize("Mushoku Tensei: Jobless Reincarnation"),
+            "Mushoku Tensei - Jobless Reincarnation"
+        );
+        assert_eq!(
+            sanitize("From Overshadowed to Overpowered: Second Reincarnation of a Talentless Sage"),
+            "From Overshadowed to Overpowered - Second Reincarnation of a Talentless Sage"
+        );
+        assert_eq!(
+            sanitize(
+                "A Livid Lady's Guide to Getting Even: How I Crushed My Homeland with My Mighty Grimoires"
+            ),
+            "A Livid Lady's Guide to Getting Even - How I Crushed My Homeland with My Mighty Grimoires"
+        );
+        // Films had already converged on it — this is `TRON - Legacy` on
+        // disk today, written by Radarr.
+        assert_eq!(sanitize("TRON: Legacy"), "TRON - Legacy");
+        assert_eq!(
+            sanitize("Avatar: The Way of Water"),
+            "Avatar - The Way of Water"
+        );
+
+        // Smart's second branch: a colon with nothing after it is a bare
+        // dash, not " - ", so no trailing space is invented.
+        assert_eq!(sanitize("Re:ZERO"), "Re-ZERO");
+        assert_eq!(sanitize("Nier:Automata Ver1.1a"), "Nier-Automata Ver1.1a");
+
+        // And the deletion that caused all of it must not come back.
+        assert_ne!(
+            sanitize("Mushoku Tensei: Jobless Reincarnation"),
+            "Mushoku Tensei Jobless Reincarnation"
+        );
+    }
+
+    /// The rest of the illegal set still collapses to a space — only the
+    /// colon got a replacement, because only the colon is common enough
+    /// in real titles for the two programs to disagree about it at
+    /// scale.
+    #[test]
+    fn the_other_illegal_characters_are_unchanged() {
+        assert_eq!(sanitize("Where/When?"), "Where When");
+        assert_eq!(sanitize("A<B>C"), "A B C");
+    }
+
     #[test]
     fn season_folders_are_read_in_either_spelling() {
         assert_eq!(season_number("Season 02"), Some(2));
@@ -1224,8 +1309,8 @@ mod tests {
         );
         assert_eq!(
             path,
-            Path::new("/data/filmes/Duna Parte Dois (2024)/Duna Parte Dois (2024).mkv"),
-            "the colon is illegal on Windows and would be a silent failure there"
+            Path::new("/data/filmes/Duna - Parte Dois (2024)/Duna - Parte Dois (2024).mkv"),
+            "the colon is illegal on Windows and would be a silent failure there;              `- ` is what Radarr writes in its place, and this library is Radarr's work"
         );
     }
 
@@ -1334,7 +1419,9 @@ mod tests {
 
     #[test]
     fn sanitising_removes_what_a_filesystem_refuses() {
-        assert_eq!(sanitize("A/B\\C:D*E?F\"G<H>I|J"), "A B C D E F G H I J");
+        // The colon is the exception, and deliberately so: it becomes
+        // what the *arr writes (`-`, no space after), while everything
+        assert_eq!(sanitize("A/B\\C:D*E?F\"G<H>I|J"), "A B C-D E F G H I J");
         assert_eq!(sanitize("trailing dot."), "trailing dot");
         assert_eq!(sanitize("  espaços   demais  "), "espaços demais");
         assert_eq!(sanitize(""), "sem-titulo");
