@@ -29,6 +29,8 @@
 
 pub mod auth;
 
+use std::collections::BTreeSet;
+
 use serde::Deserialize;
 use tracing::debug;
 use url::Url;
@@ -37,8 +39,8 @@ pub use auth::{PinState, PlexIdentity, PlexLogin, PlexPin};
 
 use crate::error::truncate_body;
 use crate::{
-    Library, MediaServer, MediaServerConfig, MediaServerError, MediaServerKind, ServerFuture,
-    ServerStatus, endpoint, http_client,
+    Library, LibraryUpdate, MediaServer, MediaServerConfig, MediaServerError, MediaServerKind,
+    ServerFuture, ServerStatus, endpoint, http_client, known_locations, resolve_targets,
 };
 
 const KIND: MediaServerKind = MediaServerKind::Plex;
@@ -195,111 +197,33 @@ impl MediaServer for PlexClient {
 
     fn notify_updated<'a>(
         &'a self,
-        paths: &'a [String],
+        updates: &'a [LibraryUpdate],
     ) -> ServerFuture<'a, Result<(), MediaServerError>> {
         Box::pin(async move {
-            if paths.is_empty() {
+            if updates.is_empty() {
                 return Ok(());
             }
             let libraries = self.sections().await?;
-            // The work that can be done is done before the complaint: a
-            // second title in the same pass must not be skipped because
-            // the first one had no mapping.
-            let mut unmatched: Option<&str> = None;
-            for path in paths {
-                match pick_library(&libraries, path) {
-                    Some(library) => self.refresh(&library.id, path).await?,
-                    None => unmatched = unmatched.or(Some(path.as_str())),
-                }
-            }
-            if let Some(path) = unmatched {
+            if libraries.is_empty() {
                 return Err(MediaServerError::NoMatchingLibrary {
                     kind: KIND,
-                    path: path.to_owned(),
+                    path: updates[0].path.clone(),
                     known: known_locations(&libraries),
                 });
+            }
+            // Deduped because tier 3 can send the same (section, path)
+            // twice when one section is built from two locations.
+            let mut sent: BTreeSet<(String, String)> = BTreeSet::new();
+            for update in updates {
+                for (library, path) in resolve_targets(&libraries, update) {
+                    if sent.insert((library.id.clone(), path.clone())) {
+                        self.refresh(&library.id, &path).await?;
+                    }
+                }
             }
             Ok(())
         })
     }
-}
-
-/// The library whose location contains `path`, longest location first.
-///
-/// Longest wins for the same reason it does in the orchestrator's path
-/// mapping: with a section on `/mnt/midias` and another on
-/// `/mnt/midias/Animes`, returning whichever came first would resolve by
-/// the order Plex happened to list them.
-#[must_use]
-pub fn pick_library<'a>(libraries: &'a [Library], path: &str) -> Option<&'a Library> {
-    libraries
-        .iter()
-        .filter_map(|library| {
-            library
-                .locations
-                .iter()
-                .filter(|location| covers(location, path))
-                .map(String::len)
-                .max()
-                .map(|len| (len, library))
-        })
-        .max_by_key(|(len, _)| *len)
-        .map(|(_, library)| library)
-}
-
-/// `true` when `path` is `location` or sits under it.
-///
-/// The boundary matters: `/data/down` must not cover `/data/downloads`,
-/// which a bare `starts_with` would wave through. Unlike the
-/// orchestrator's `remote_path`, both sides here are written by the *same
-/// machine* — the location comes from the server and the path was
-/// translated into that server's namespace — so the flavour is inferred
-/// once, from the location, exactly as Sonarr does
-/// (`location.Path.Contains('\\') ? "\\" : "/"`).
-///
-/// Case folding is ASCII-only on the Windows side. A Windows share whose
-/// directories differ only by the case of a non-ASCII letter would be
-/// missed; no such path exists in practice, and the alternative is a
-/// Unicode-folding dependency for a comparison that already has an
-/// operator-visible fallback.
-fn covers(location: &str, path: &str) -> bool {
-    let windows = location.contains('\\');
-    let trimmed = location.trim_end_matches(['/', '\\']);
-    if trimmed.is_empty() {
-        // A location of `/` covers everything, which makes it useless as
-        // a discriminator and dangerous as a default. Refuse it.
-        return false;
-    }
-    let (location, target, separator) = if windows {
-        (
-            trimmed.to_ascii_lowercase().replace('/', "\\"),
-            path.to_ascii_lowercase().replace('/', "\\"),
-            '\\',
-        )
-    } else {
-        // POSIX splits on `/` only: a backslash is a legal filename
-        // character on Linux, and `AC\DC` is one directory.
-        (trimmed.to_owned(), path.to_owned(), '/')
-    };
-    if target == location {
-        return true;
-    }
-    target
-        .strip_prefix(&location)
-        .is_some_and(|rest| rest.starts_with(separator))
-}
-
-/// Locations across every library, for the "nothing matched" message.
-fn known_locations(libraries: &[Library]) -> String {
-    let mut all: Vec<&str> = libraries
-        .iter()
-        .flat_map(|l| l.locations.iter().map(String::as_str))
-        .collect();
-    all.sort_unstable();
-    if all.is_empty() {
-        return "nenhuma".to_owned();
-    }
-    all.join(", ")
 }
 
 #[derive(Debug, Deserialize)]
@@ -340,110 +264,4 @@ struct IdentityPayload {
 struct IdentityContainer {
     #[serde(default)]
     version: Option<String>,
-}
-
-#[cfg(test)]
-mod tests {
-    #![allow(clippy::expect_used, reason = "tests assert on happy paths")]
-
-    use super::*;
-
-    fn library(id: &str, title: &str, locations: &[&str]) -> Library {
-        Library {
-            id: id.to_owned(),
-            title: title.to_owned(),
-            locations: locations.iter().map(|s| (*s).to_owned()).collect(),
-        }
-    }
-
-    /// The three sections this operator really has. Two are `show`, which
-    /// is the whole reason the type cannot pick.
-    fn real_sections() -> Vec<Library> {
-        vec![
-            library("3", "Filmes", &["/mnt/midias/Filmes"]),
-            library("1", "Animes", &["/mnt/midias/Animes"]),
-            library("2", "Series", &["/mnt/midias/Series"]),
-        ]
-    }
-
-    #[test]
-    fn an_episode_reaches_the_shelf_it_lives_on() {
-        let sections = real_sections();
-        let picked = pick_library(&sections, "/mnt/midias/Series/Fringe/Season 02")
-            .expect("a section covers it");
-        assert_eq!(picked.id, "2", "Series, not the other `show` section");
-
-        let anime = pick_library(&sections, "/mnt/midias/Animes/Bleach/Season 01")
-            .expect("a section covers it");
-        assert_eq!(anime.id, "1");
-
-        let movie = pick_library(&sections, "/mnt/midias/Filmes/Scary Movie (2000)")
-            .expect("a section covers it");
-        assert_eq!(movie.id, "3");
-    }
-
-    #[test]
-    fn an_uncovered_path_picks_nothing_rather_than_the_first_section() {
-        assert!(pick_library(&real_sections(), "/midias/Filmes/X").is_none());
-    }
-
-    #[test]
-    fn the_longest_location_wins() {
-        let sections = vec![
-            library("10", "Tudo", &["/mnt/midias"]),
-            library("11", "Animes", &["/mnt/midias/Animes"]),
-        ];
-        let picked =
-            pick_library(&sections, "/mnt/midias/Animes/Bleach").expect("a section covers it");
-        assert_eq!(picked.id, "11", "the specific shelf, not the catch-all");
-    }
-
-    #[test]
-    fn a_prefix_has_to_end_on_a_component_boundary() {
-        assert!(covers("/data/down", "/data/down/x"));
-        assert!(covers("/data/down", "/data/down"));
-        assert!(
-            !covers("/data/down", "/data/downloads/x"),
-            "a bare starts_with would wave this through"
-        );
-    }
-
-    #[test]
-    fn a_backslash_is_a_filename_on_posix() {
-        assert!(
-            !covers("/mnt/midias", "\\mnt\\midias\\Filmes"),
-            "a POSIX location must not match a Windows-shaped path"
-        );
-        // `AC\DC` is one directory on Linux, not two.
-        assert!(covers("/music/AC\\DC", "/music/AC\\DC/Back in Black"));
-    }
-
-    #[test]
-    fn windows_locations_are_case_insensitive_and_take_both_separators() {
-        assert!(covers("C:\\Media\\Movies", "c:/media/movies/Heat (1995)"));
-        assert!(covers("\\\\NAS\\midia", "\\\\NAS\\midia\\Filmes"));
-        assert!(
-            !covers("\\\\NAS\\midia", "/NAS/midia/Filmes"),
-            "a UNC root is a root, not a POSIX path"
-        );
-    }
-
-    #[test]
-    fn a_root_location_is_refused_rather_than_matching_everything() {
-        assert!(!covers("/", "/anything"));
-    }
-
-    #[test]
-    fn trailing_separators_on_a_location_do_not_change_the_answer() {
-        assert!(covers("/mnt/midias/Series/", "/mnt/midias/Series/Fringe"));
-    }
-
-    #[test]
-    fn known_locations_names_them_all_for_the_error() {
-        assert_eq!(
-            known_locations(&real_sections()),
-            "/mnt/midias/Animes, /mnt/midias/Filmes, /mnt/midias/Series"
-        );
-        assert_eq!(known_locations(&[]), "nenhuma");
-    }
 }

@@ -6806,6 +6806,7 @@ fn media_server_routes() -> Router<AppState> {
         .route("/media-servers/{id}/edit", get(media_servers_edit))
         .route("/media-servers/{id}/test", post(media_servers_test))
         .route("/media-servers/{id}/toggle", post(media_servers_toggle))
+        .route("/media-servers/{id}/rescan", post(media_servers_rescan))
         .route(
             "/media-servers/{id}/plex/login",
             post(media_servers_plex_login),
@@ -6970,14 +6971,56 @@ async fn media_servers_test(
                     status.version.clone()
                 };
                 let names: Vec<&str> = status.libraries.iter().map(|l| l.title.as_str()).collect();
-                PingBadge {
-                    ok: true,
-                    label: format!("conectado · {version}"),
-                    detail: if names.is_empty() {
-                        "o servidor respondeu, mas não tem biblioteca nenhuma".to_owned()
-                    } else {
-                        format!("bibliotecas: {}", names.join(", "))
-                    },
+                // The credential is only half of it. A server whose
+                // libraries do not contain brarr's root folders refuses
+                // every notification, and stopping at the token reports
+                // that as healthy — which it did, until a real import
+                // went unnoticed.
+                let roots: Vec<std::path::PathBuf> = root_folders::list_all(state.pool())
+                    .await?
+                    .into_iter()
+                    .map(|r| r.path)
+                    .collect();
+                let rules = media_server_mappings::rules_for_server(state.pool(), row.id).await?;
+                let uncovered = crate::notify::uncovered_roots(&roots, &rules, &status.libraries);
+
+                if names.is_empty() {
+                    PingBadge {
+                        ok: false,
+                        label: "sem biblioteca".to_owned(),
+                        detail: format!(
+                            "o {} respondeu ({version}) mas não serve biblioteca nenhuma, \
+                             então não há o que avisar",
+                            row.kind
+                        ),
+                    }
+                } else if uncovered.is_empty() {
+                    PingBadge {
+                        ok: true,
+                        label: format!("conectado · {version}"),
+                        detail: format!("bibliotecas: {}", names.join(", ")),
+                    }
+                } else {
+                    // Not a failure: without a mapping brarr re-anchors
+                    // the path onto the server's own folder, which is
+                    // what both *arr do and what makes them work with no
+                    // configuration. A mapping only buys precision —
+                    // addressing one library instead of every candidate.
+                    let known: Vec<&str> = status
+                        .libraries
+                        .iter()
+                        .flat_map(|l| l.locations.iter().map(String::as_str))
+                        .collect();
+                    PingBadge {
+                        ok: true,
+                        label: format!("conectado · {version}"),
+                        detail: format!(
+                            "bibliotecas: {}. Nenhuma cobre {} — o brarr vai re-ancorar o                              caminho em {} na hora de avisar. Funciona; um mapeamento de                              caminho deixa exato em vez de por semelhança.",
+                            names.join(", "),
+                            uncovered.join(", "),
+                            known.join(", ")
+                        ),
+                    }
                 }
             }
             Err(e) => PingBadge {
@@ -6998,6 +7041,39 @@ async fn media_servers_test(
         },
     };
     Ok(html_string(render_status_badge(&dom_id, &badge)))
+}
+
+/// Ask a server to rescan every root folder — the recovery button.
+///
+/// Exists because the automatic notification fires once, from the import
+/// pass, and cannot be replayed. A notification refused for a reason the
+/// operator then fixes had nothing to retry it: correcting the mapping
+/// did nothing for the titles already on disk.
+async fn media_servers_rescan(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, AppError> {
+    let uuid = parse_media_server_id(&id)?;
+    crate::notify::rescan_roots(&state, uuid).await?;
+    // The row carries the outcome, so re-read rather than guess: a
+    // failure landed in `last_error` and the badge has to show it.
+    let row = media_servers::get_by_id(state.pool(), uuid).await?;
+    let badge = match row.last_error.as_deref() {
+        None => PingBadge {
+            ok: true,
+            label: "avisado".to_owned(),
+            detail: "o servidor foi mandado varrer as pastas raiz".to_owned(),
+        },
+        Some(error) => PingBadge {
+            ok: false,
+            label: "falhou".to_owned(),
+            detail: error.to_owned(),
+        },
+    };
+    Ok(html_string(render_status_badge(
+        &format!("ms-ping-{uuid}"),
+        &badge,
+    )))
 }
 
 /// How often the sign-in fragment re-asks. See

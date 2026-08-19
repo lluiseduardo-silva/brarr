@@ -14,10 +14,11 @@
 
 use brarr_media_server::plex::{PinState, PlexIdentity, PlexLogin};
 use brarr_media_server::{
-    MediaServer, MediaServerConfig, MediaServerError, MediaServerKind, PlexClient, build,
+    LibraryUpdate, MediaServer, MediaServerConfig, MediaServerError, MediaServerKind, PlexClient,
+    build,
 };
 use url::Url;
-use wiremock::matchers::{body_json_string, header, method, path, query_param};
+use wiremock::matchers::{body_json_string, header, method, path, path_regex, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const TOKEN: &str = "a-plex-token";
@@ -49,6 +50,15 @@ async fn mount_sections(server: &MockServer) {
         )
         .mount(server)
         .await;
+}
+
+/// One changed folder, described the way the notify path describes it.
+fn upd(path: &str, relative: &str, root: &str) -> LibraryUpdate {
+    LibraryUpdate {
+        path: path.to_owned(),
+        relative: relative.to_owned(),
+        root_name: root.to_owned(),
+    }
 }
 
 // ─── Plex ───────────────────────────────────────────────────────────
@@ -94,7 +104,7 @@ async fn plex_refreshes_only_the_section_that_holds_the_path() {
 
     let client = build(config(&server, MediaServerKind::Plex, TOKEN)).unwrap();
     client
-        .notify_updated(&["/mnt/midias/Series/Fringe".to_owned()])
+        .notify_updated(&[upd("/mnt/midias/Series/Fringe", "Fringe", "Series")])
         .await
         .expect("the section covers it");
 
@@ -109,28 +119,28 @@ async fn plex_refreshes_only_the_section_that_holds_the_path() {
 }
 
 #[tokio::test]
-async fn plex_refuses_an_uncovered_path_instead_of_fanning_out() {
+async fn plex_re_anchors_a_path_no_section_covers() {
     let server = MockServer::start().await;
     mount_sections(&server).await;
+    // brarr writes `/midias/...`, this Plex only knows `/mnt/midias/...`.
+    // That used to be refused. It is exactly the configuration both *arr
+    // work under with nothing configured, because `UpdateSectionPath`
+    // builds `location.Path + separator + relativePath` and never sends
+    // its own absolute path — so the tail is re-anchored on the shelf
+    // whose folder is named after brarr's root.
+    Mock::given(method("GET"))
+        .and(path("/library/sections/2/refresh"))
+        .and(query_param("path", "/mnt/midias/Series/Fringe"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&server)
+        .await;
 
     let client = build(config(&server, MediaServerKind::Plex, TOKEN)).unwrap();
-    // `/midias` is brarr's own view; the server sees `/mnt/midias`. This
-    // is exactly what an unset path mapping looks like.
-    let err = client
-        .notify_updated(&["/midias/Series/Fringe".to_owned()])
+    client
+        .notify_updated(&[upd("/midias/Series/Fringe", "Fringe", "Series")])
         .await
-        .expect_err("nothing covers it");
-
-    match err {
-        MediaServerError::NoMatchingLibrary { path, known, .. } => {
-            assert_eq!(path, "/midias/Series/Fringe");
-            assert!(
-                known.contains("/mnt/midias/Series"),
-                "the message has to name what the server does have: {known}"
-            );
-        }
-        other => panic!("expected NoMatchingLibrary, got {other:?}"),
-    }
+        .expect("re-anchored onto the Series shelf");
 
     let refreshes = server
         .received_requests()
@@ -140,34 +150,54 @@ async fn plex_refuses_an_uncovered_path_instead_of_fanning_out() {
         .filter(|r| r.url.path().contains("/refresh"))
         .count();
     assert_eq!(
-        refreshes, 0,
-        "Radarr would have refreshed every location speculatively"
+        refreshes, 1,
+        "the root is called Series and exactly one shelf ends in Series, so no guessing"
     );
 }
 
 #[tokio::test]
-async fn plex_does_the_paths_it_can_before_complaining() {
+async fn a_root_matching_no_shelf_name_reaches_every_shelf() {
     let server = MockServer::start().await;
     mount_sections(&server).await;
     Mock::given(method("GET"))
-        .and(path("/library/sections/3/refresh"))
+        .and(path_regex(r"^/library/sections/\d+/refresh$"))
         .respond_with(ResponseTemplate::new(200))
-        .expect(1)
+        .expect(3)
+        .mount(&server)
+        .await;
+
+    let client = build(config(&server, MediaServerKind::Plex, TOKEN)).unwrap();
+    client
+        .notify_updated(&[upd("/midias/Cartoons/Ducktales", "Ducktales", "Cartoons")])
+        .await
+        .expect("falls back the way Radarr does");
+    // Two of those three name a directory the shelf does not have. The
+    // server ignores them, which is what makes the fallback survivable —
+    // and it is strictly better than refusing to say anything.
+}
+
+#[tokio::test]
+async fn plex_only_refuses_when_the_server_serves_nothing() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/library/sections"))
+        .and(header("X-Plex-Token", TOKEN))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            r#"{"MediaContainer":{"size":0,"Directory":[]}}"#,
+            "application/json",
+        ))
         .mount(&server)
         .await;
 
     let client = build(config(&server, MediaServerKind::Plex, TOKEN)).unwrap();
     let err = client
-        .notify_updated(&[
-            "/midias/Series/Fringe".to_owned(),
-            "/mnt/midias/Filmes/Heat (1995)".to_owned(),
-        ])
+        .notify_updated(&[upd("/midias/Series/Fringe", "Fringe", "Series")])
         .await
-        .expect_err("one of the two had no home");
-
-    assert!(matches!(err, MediaServerError::NoMatchingLibrary { .. }));
-    // The mock's `.expect(1)` is the assertion: the second title was
-    // still refreshed even though the first one had no mapping.
+        .expect_err("there is nowhere to point");
+    assert!(
+        matches!(err, MediaServerError::NoMatchingLibrary { .. }),
+        "got {err:?}"
+    );
 }
 
 #[tokio::test]
@@ -264,7 +294,7 @@ async fn mount_media_browser(server: &MockServer) {
     Mock::given(method("GET"))
         .and(path("/Library/VirtualFolders"))
         .respond_with(ResponseTemplate::new(200).set_body_raw(
-            r#"[{"Name":"Filmes","ItemId":"7","Locations":["/media/Filmes"],"CollectionType":"movies"}]"#,
+            r#"[{"Name":"Filmes","ItemId":"7","Locations":["/media/Filmes"],"CollectionType":"movies"},{"Name":"Series","ItemId":"8","Locations":["/media/Series"],"CollectionType":"tvshows"}]"#,
             "application/json",
         ))
         .mount(server)
@@ -283,14 +313,18 @@ async fn jellyfin_and_emby_run_the_same_code_path() {
         assert_eq!(client.kind(), kind, "the row still knows which it is");
         assert_eq!(status.version, "10.10.7");
         assert_eq!(status.libraries[0].locations, ["/media/Filmes"]);
+        assert_eq!(status.libraries.len(), 2);
     }
 }
 
 #[tokio::test]
 async fn media_browser_sends_one_request_for_the_whole_pass() {
     let server = MockServer::start().await;
+    mount_media_browser(&server).await;
     Mock::given(method("POST"))
         .and(path("/Library/Media/Updated"))
+        // One request for the pass, and the paths are sorted because
+        // they come out of a set — a payload a test can pin.
         .and(body_json_string(
             r#"{"Updates":[{"Path":"/media/Filmes/Heat (1995)","UpdateType":"Created"},{"Path":"/media/Series/Fringe","UpdateType":"Created"}]}"#,
         ))
@@ -302,38 +336,38 @@ async fn media_browser_sends_one_request_for_the_whole_pass() {
     let client = build(config(&server, MediaServerKind::Jellyfin, API_KEY)).unwrap();
     client
         .notify_updated(&[
-            "/media/Filmes/Heat (1995)".to_owned(),
-            "/media/Series/Fringe".to_owned(),
+            upd("/media/Filmes/Heat (1995)", "Heat (1995)", "Filmes"),
+            upd("/media/Series/Fringe", "Fringe", "Series"),
         ])
         .await
         .expect("accepted");
 }
 
 #[tokio::test]
-async fn media_browser_never_asks_the_server_to_list_anything_to_notify() {
-    // Unlike Plex, the path is resolved server-side — so a notify must
-    // not depend on a library listing succeeding.
+async fn media_browser_lists_its_libraries_so_it_can_re_anchor_too() {
+    // This deliberately did not happen before, on the grounds that
+    // `Library/Media/Updated` resolves a path server-side. It does — but
+    // only a path the server recognises, and without a mapping brarr's
+    // own spelling is not one. One GET buys the same zero-configuration
+    // behaviour the *arr get.
     let server = MockServer::start().await;
+    mount_media_browser(&server).await;
     Mock::given(method("POST"))
         .and(path("/Library/Media/Updated"))
+        .and(body_json_string(
+            r#"{"Updates":[{"Path":"/media/Filmes/Heat (1995)","UpdateType":"Created"}]}"#,
+        ))
         .respond_with(ResponseTemplate::new(204))
+        .expect(1)
         .mount(&server)
         .await;
 
     let client = build(config(&server, MediaServerKind::Emby, API_KEY)).unwrap();
     client
-        .notify_updated(&["/media/Filmes/Heat (1995)".to_owned()])
+        // brarr's own spelling; the server's library is `/media/Filmes`.
+        .notify_updated(&[upd("/midias/Filmes/Heat (1995)", "Heat (1995)", "Filmes")])
         .await
-        .expect("accepted");
-
-    let listings = server
-        .received_requests()
-        .await
-        .unwrap()
-        .into_iter()
-        .filter(|r| r.url.path().contains("VirtualFolders"))
-        .count();
-    assert_eq!(listings, 0);
+        .expect("re-anchored");
 }
 
 #[tokio::test]

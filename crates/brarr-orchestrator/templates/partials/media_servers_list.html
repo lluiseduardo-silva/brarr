@@ -118,6 +118,14 @@
                                     class="btn btn-sm btn-secondary">
                                 testar
                             </button>
+                            <button hx-post="/media-servers/{{ s.id }}/rescan"
+                                    hx-target="#ms-ping-{{ s.id }}"
+                                    hx-swap="outerHTML"
+                                    hx-indicator="#ms-ping-{{ s.id }}"
+                                    title="Manda varrer as pastas raiz agora — recupera avisos que falharam antes de você corrigir a configuração"
+                                    class="btn btn-sm btn-secondary">
+                                avisar agora
+                            </button>
                             <button hx-get="/media-servers/{{ s.id }}/edit"
                                     hx-target="#modal-target"
                                     hx-swap="innerHTML"

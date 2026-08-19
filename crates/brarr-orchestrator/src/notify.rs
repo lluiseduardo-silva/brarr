@@ -161,50 +161,170 @@ pub async fn imported(state: &AppState, files: &[PathBuf]) {
     let folders: Vec<PathBuf> = folders.into_iter().collect();
 
     for server in servers {
-        let rules = match media_server_mappings::rules_for_server(state.pool(), server.id).await {
-            Ok(rules) => rules,
-            Err(e) => {
-                warn!(
-                    target: "brarr_orchestrator::notify",
-                    server = %server.name,
-                    error = %e,
-                    "could not read the path mappings"
-                );
-                continue;
-            }
-        };
-        let translated: Vec<String> = folders
-            .iter()
-            .map(|folder| remote_path::to_remote(&rules, folder).remote)
-            .collect();
-
-        let client = match server.to_config().and_then(|config| {
-            brarr_media_server::build(config)
-                .map_err(|e| crate::AppError::InvalidInput(format!("{}: {e}", server.name)))
-        }) {
-            Ok(client) => client,
-            Err(e) => {
-                record_failure(state, server.id, &server.name, &e.to_string()).await;
-                continue;
-            }
-        };
-
-        match client.notify_updated(&translated).await {
-            Ok(()) => {
-                info!(
-                    target: "brarr_orchestrator::notify",
-                    server = %server.name,
-                    kind = server.kind.label(),
-                    folders = translated.len(),
-                    "told the media server the library changed"
-                );
-                if let Err(e) = media_servers::mark_notified(state.pool(), server.id).await {
-                    warn!(target: "brarr_orchestrator::notify", error = %e, "could not record the notification");
-                }
-            }
-            Err(e) => record_failure(state, server.id, &server.name, &e.to_string()).await,
-        }
+        tell(state, &server, &roots, &folders).await;
     }
+}
+
+/// Ask one server to rescan every root folder that maps into it.
+///
+/// The recovery action, and it exists because the automatic path cannot
+/// be replayed: [`imported`] fires once, from the import pass, and a
+/// notification that failed for a reason the operator then *fixes* — a
+/// missing path mapping, most of the time — has nothing to retry it.
+/// Before this, correcting the mapping did nothing for the titles
+/// already on disk, and the only recourse was waiting for the media
+/// server's own scan.
+///
+/// It sends the **root folders** rather than the recently imported
+/// titles: it is bounded by how many roots exist (three here) instead of
+/// by how much went unnoticed, it is idempotent, and "rescan where brarr
+/// puts things" recovers any number of missed notifications at once.
+///
+/// # Errors
+///
+/// Returns [`crate::AppError::Database`] when the server, its mappings
+/// or the root folders cannot be read. The notification itself is
+/// best-effort and reports through the row, like every other one.
+pub async fn rescan_roots(state: &AppState, server_id: uuid::Uuid) -> Result<(), crate::AppError> {
+    let server = media_servers::get_by_id(state.pool(), server_id).await?;
+    let roots: Vec<PathBuf> = root_folders::list_all(state.pool())
+        .await?
+        .into_iter()
+        .map(|r| r.path)
+        .collect();
+    if roots.is_empty() {
+        return Err(crate::AppError::InvalidInput(
+            "nenhuma pasta raiz configurada — não há o que mandar varrer".into(),
+        ));
+    }
+    tell(state, &server, &roots, &roots).await;
+    Ok(())
+}
+
+/// Translate `folders` into one server's namespace and tell it.
+///
+/// Best-effort by construction: every failure lands on the row and none
+/// propagates, because the caller is either an import that already wrote
+/// the file or a button the operator can press again.
+async fn tell(
+    state: &AppState,
+    server: &media_servers::MediaServerRow,
+    roots: &[PathBuf],
+    folders: &[PathBuf],
+) {
+    let rules = match media_server_mappings::rules_for_server(state.pool(), server.id).await {
+        Ok(rules) => rules,
+        Err(e) => {
+            warn!(
+                target: "brarr_orchestrator::notify",
+                server = %server.name,
+                error = %e,
+                "could not read the path mappings"
+            );
+            return;
+        }
+    };
+    let translated: Vec<brarr_media_server::LibraryUpdate> = folders
+        .iter()
+        .map(|folder| library_update(roots, &rules, folder))
+        .collect();
+
+    let client = match server.to_config().and_then(|config| {
+        brarr_media_server::build(config)
+            .map_err(|e| crate::AppError::InvalidInput(format!("{}: {e}", server.name)))
+    }) {
+        Ok(client) => client,
+        Err(e) => {
+            record_failure(state, server.id, &server.name, &e.to_string()).await;
+            return;
+        }
+    };
+
+    match client.notify_updated(&translated).await {
+        Ok(()) => {
+            info!(
+                target: "brarr_orchestrator::notify",
+                server = %server.name,
+                kind = server.kind.label(),
+                folders = translated.len(),
+                "told the media server the library changed"
+            );
+            if let Err(e) = media_servers::mark_notified(state.pool(), server.id).await {
+                warn!(target: "brarr_orchestrator::notify", error = %e, "could not record the notification");
+            }
+        }
+        Err(e) => record_failure(state, server.id, &server.name, &e.to_string()).await,
+    }
+}
+
+/// Describe one changed folder in the three ways a server might need it.
+///
+/// The relative tail is what makes a mapping optional. Both \*arr send
+/// `location.Path + separator + relativePath` and never their own
+/// absolute path, which is why a Sonarr on `/data/Series` and a Plex on
+/// `/mnt/midias/Series` agree with nobody configuring anything. brarr
+/// sends the absolute path *as well*, because when a mapping does exist
+/// it can address exactly one library instead of re-anchoring onto every
+/// candidate.
+fn library_update(
+    roots: &[PathBuf],
+    rules: &[remote_path::PrefixRule],
+    folder: &Path,
+) -> brarr_media_server::LibraryUpdate {
+    let root = roots
+        .iter()
+        .filter(|root| remote_path::is_under(folder, root))
+        .max_by_key(|root| root.as_os_str().len());
+    let (relative, root_name) = match root {
+        Some(root) => (
+            folder
+                .strip_prefix(root)
+                .map(|rest| rest.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            root.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+        ),
+        // Outside every root: the folder's own name is the best tail
+        // there is, and no root name to prefer a library by.
+        None => (
+            folder
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            String::new(),
+        ),
+    };
+    brarr_media_server::LibraryUpdate {
+        path: remote_path::to_remote(rules, folder).remote,
+        relative,
+        root_name,
+    }
+}
+
+/// Root folders that no library on the far side would cover.
+///
+/// The check the connection test was missing. Proving the credential and
+/// listing libraries is not proving the integration works: brarr writes
+/// `/midias/Filmes/…` and this operator's Plex only knows
+/// `/mnt/midias/…`, so a test that stops at the token goes green while
+/// every future notification is going to be refused. It is the same
+/// mistake as testing Plex against `/identity`, one level up — and it
+/// cost a real import before it was noticed.
+///
+/// Returns the paths **as they would be sent**, so the message can show
+/// the operator the two strings that failed to meet.
+#[must_use]
+pub fn uncovered_roots(
+    roots: &[PathBuf],
+    rules: &[remote_path::PrefixRule],
+    libraries: &[brarr_media_server::Library],
+) -> Vec<String> {
+    roots
+        .iter()
+        .map(|root| remote_path::to_remote(rules, root).remote)
+        .filter(|path| brarr_media_server::pick_library(libraries, path).is_none())
+        .collect()
 }
 
 async fn record_failure(state: &AppState, id: uuid::Uuid, name: &str, error: &str) {

@@ -22,14 +22,16 @@
 //! make it is a key that will fail the real work later, and finding that
 //! out on the button beats finding out on the first import.
 
+use std::collections::BTreeSet;
+
 use serde::Deserialize;
 use tracing::debug;
 use url::Url;
 
 use crate::error::truncate_body;
 use crate::{
-    Library, MediaServer, MediaServerConfig, MediaServerError, MediaServerKind, ServerFuture,
-    ServerStatus, endpoint, http_client,
+    Library, LibraryUpdate, MediaServer, MediaServerConfig, MediaServerError, MediaServerKind,
+    ServerFuture, ServerStatus, endpoint, http_client, resolve_targets,
 };
 
 /// What Emby/Jellyfin call a change that added a file.
@@ -190,11 +192,31 @@ impl MediaServer for MediaBrowserClient {
 
     fn notify_updated<'a>(
         &'a self,
-        paths: &'a [String],
+        updates: &'a [LibraryUpdate],
     ) -> ServerFuture<'a, Result<(), MediaServerError>> {
         Box::pin(async move {
-            if paths.is_empty() {
+            if updates.is_empty() {
                 return Ok(());
+            }
+            // Libraries are listed here too, which this deliberately did
+            // not do before. `Library/Media/Updated` resolves a path
+            // server-side, but only a path the server recognises — and
+            // without a mapping brarr's own spelling is not one. Asking
+            // costs a GET and buys the same zero-configuration behaviour
+            // the *arr get from re-anchoring.
+            let libraries = self.virtual_folders().await?;
+            if libraries.is_empty() {
+                return Err(MediaServerError::NoMatchingLibrary {
+                    kind: self.kind(),
+                    path: updates[0].path.clone(),
+                    known: crate::known_locations(&libraries),
+                });
+            }
+            let mut paths: BTreeSet<String> = BTreeSet::new();
+            for update in updates {
+                for (_, path) in resolve_targets(&libraries, update) {
+                    paths.insert(path);
+                }
             }
             // `Updates` is a list in the payload, so one request carries
             // the whole pass. Sonarr sends one element per request only
