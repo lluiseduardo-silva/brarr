@@ -16,6 +16,8 @@ pub mod ignored_paths;
 pub mod item_ids;
 pub mod library;
 pub mod maintenance;
+pub mod media_server_mappings;
+pub mod media_servers;
 pub mod metrics;
 pub mod path_mappings;
 pub mod providers;

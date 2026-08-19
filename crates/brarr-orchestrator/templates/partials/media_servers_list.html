@@ -1,0 +1,150 @@
+{# Media-servers table. Swapped whole rather than per row: the ordering
+   is enabled-first, so one edit can move a different row. #}
+<section id="media-servers-list" class="card-hairline bg-bg-surface border border-border-default rounded-xl overflow-hidden">
+    {% if servers.is_empty() %}
+    <div class="px-6 py-12 flex flex-col items-center text-center gap-3">
+        <div class="w-14 h-14 rounded-full bg-accent-soft flex items-center justify-center text-accent-soft-fg">
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="2" y="3" width="20" height="14" rx="2"/>
+                <path d="M8 21h8M12 17v4"/>
+            </svg>
+        </div>
+        <div>
+            <h3 class="text-base font-semibold text-fg-primary mb-1">Nenhum media server configurado</h3>
+            <p class="text-sm text-fg-secondary max-w-md">
+                Sem isto, um arquivo que o brarr importa só aparece no Plex quando ele
+                resolve varrer sozinho. Era o que o Radarr e o Sonarr faziam em
+                <em>Connect</em>, e saiu junto com eles.
+            </p>
+        </div>
+    </div>
+    {% else %}
+    {# Count and warning live inside the swapped region so they can never
+       go stale — um login do Plex feito nesta mesma tela muda o número. #}
+    <div class="flex items-center justify-between gap-3 px-4 py-3">
+        <span class="text-xs text-fg-muted">{{ servers.len() }} servidor(es) configurado(s)</span>
+        <div class="flex items-center gap-1.5">
+            {% if needs_credential > 0 %}
+            <span class="badge bg-warning-soft text-warning-soft-fg" title="Um servidor ativo sem credencial não recebe aviso nenhum">{{ needs_credential }} sem credencial</span>
+            {% endif %}
+        </div>
+    </div>
+    <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+            <thead class="bg-bg-muted">
+                <tr class="text-left">
+                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Nome</th>
+                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Tipo</th>
+                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Host</th>
+                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Último aviso</th>
+                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Status</th>
+                    <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted text-right">Ações</th>
+                </tr>
+            </thead>
+            <tbody>
+            {% for s in servers %}
+                <tr class="border-t border-border-default {% if !s.enabled %}opacity-55{% endif %}" id="media-server-{{ s.id }}">
+                    <td class="px-4 py-3">
+                        <div class="flex items-center gap-2.5">
+                            <span class="w-2 h-2 rounded-full {% if s.enabled %}bg-success-solid{% else %}bg-fg-muted{% endif %}"></span>
+                            <div>
+                                <div class="font-semibold text-fg-primary">{{ s.name }}</div>
+                                <div class="text-[11px] text-fg-muted">
+                                    {% if s.has_token %}credencial guardada{% else %}sem credencial{% endif %}
+                                </div>
+                            </div>
+                        </div>
+                    </td>
+
+                    <td class="px-4 py-3">
+                        {% if s.kind == "plex" %}
+                        <span class="inline-flex items-center gap-1.5 pl-1 pr-2 py-1 rounded-md bg-warning-soft">
+                            <span class="inline-flex items-center justify-center w-[18px] h-[18px] rounded font-mono font-bold text-[10px] bg-warning-soft-fg text-warning-soft">P</span>
+                            <span class="font-semibold text-[11px] text-warning-soft-fg">{{ s.kind_label }}</span>
+                        </span>
+                        {% else if s.kind == "jellyfin" %}
+                        <span class="inline-flex items-center gap-1.5 pl-1 pr-2 py-1 rounded-md bg-accent-soft">
+                            <span class="inline-flex items-center justify-center w-[18px] h-[18px] rounded font-mono font-bold text-[10px] bg-accent-soft-fg text-accent-soft">J</span>
+                            <span class="font-semibold text-[11px] text-accent-soft-fg">{{ s.kind_label }}</span>
+                        </span>
+                        {% else %}
+                        <span class="inline-flex items-center gap-1.5 pl-1 pr-2 py-1 rounded-md bg-secondary-soft">
+                            <span class="inline-flex items-center justify-center w-[18px] h-[18px] rounded font-mono font-bold text-[10px] bg-secondary-soft-fg text-secondary-soft">E</span>
+                            <span class="font-semibold text-[11px] text-secondary-soft-fg">{{ s.kind_label }}</span>
+                        </span>
+                        {% endif %}
+                    </td>
+
+                    <td class="px-4 py-3 font-mono text-sm text-fg-secondary">
+                        <a href="{{ s.base_url }}" class="hover:text-accent-soft-fg" target="_blank" rel="noopener">{{ s.base_url }}</a>
+                    </td>
+
+                    {# The whole audit trail this feature gets: one answer
+                       to "did the last one work?", on the row. #}
+                    <td class="px-4 py-3">
+                        {% if let Some(error) = s.last_error %}
+                        <div class="text-[11px] text-danger-soft-fg max-w-xs">{{ error }}</div>
+                        {% if let Some(when) = s.last_notified_at %}
+                        <div class="text-[11px] text-fg-muted mt-0.5">último ok <span data-datetime="{{ when }}">{{ when }}</span></div>
+                        {% endif %}
+                        {% else if let Some(when) = s.last_notified_at %}
+                        <span class="text-xs text-fg-secondary" data-datetime="{{ when }}">{{ when }}</span>
+                        {% else %}
+                        <span class="text-xs italic text-fg-muted">nunca</span>
+                        {% endif %}
+                    </td>
+
+                    {# Replaced by the ping badge that POST /test returns. #}
+                    <td class="px-4 py-3">
+                        <span id="ms-ping-{{ s.id }}" class="text-xs italic text-fg-muted">não testado</span>
+                    </td>
+
+                    <td class="px-4 py-3">
+                        <div class="flex items-center justify-end gap-1.5">
+                            {% if s.uses_plex_login %}
+                            <button hx-post="/media-servers/{{ s.id }}/plex/login"
+                                    hx-target="#ms-ping-{{ s.id }}"
+                                    hx-swap="outerHTML"
+                                    title="Abre o plex.tv para autorizar; o token chega sozinho aqui"
+                                    class="btn btn-sm btn-brand">
+                                entrar com o Plex
+                            </button>
+                            {% endif %}
+                            <button hx-post="/media-servers/{{ s.id }}/test"
+                                    hx-target="#ms-ping-{{ s.id }}"
+                                    hx-swap="outerHTML"
+                                    hx-indicator="#ms-ping-{{ s.id }}"
+                                    title="Autentica e lista as bibliotecas do servidor"
+                                    class="btn btn-sm btn-secondary">
+                                testar
+                            </button>
+                            <button hx-get="/media-servers/{{ s.id }}/edit"
+                                    hx-target="#modal-target"
+                                    hx-swap="innerHTML"
+                                    title="Editar nome, URL e credencial"
+                                    class="btn btn-sm btn-secondary">
+                                editar
+                            </button>
+                            <button hx-post="/media-servers/{{ s.id }}/toggle"
+                                    hx-target="#media-servers-list"
+                                    hx-swap="outerHTML"
+                                    title="Para de avisar sem perder a config (drain mode)"
+                                    class="btn btn-sm {% if s.enabled %}btn-toggle-on{% else %}btn-secondary{% endif %}">
+                                {% if s.enabled %}desativar{% else %}ativar{% endif %}
+                            </button>
+                            <button hx-delete="/media-servers/{{ s.id }}"
+                                    hx-target="#media-servers-list"
+                                    hx-swap="outerHTML"
+                                    hx-confirm="Remover este servidor? Os mapeamentos de caminho dele vão junto. Nada é apagado do disco nem do próprio media server."
+                                    class="btn btn-sm btn-danger">
+                                remover
+                            </button>
+                        </div>
+                    </td>
+                </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+</section>

@@ -1,0 +1,135 @@
+{# Media-server path mappings — what brarr calls a directory, and what
+   the media server calls the same place.
+
+   The mirror of `path_mappings.html`, which translates the other way:
+   there brarr reads a path a download client reported, here brarr writes
+   a path a media server has to recognise. Same table shape, same matcher
+   (`remote_path`), opposite direction. #}
+<section id="media-server-mappings-block">
+
+    <section id="media-server-mappings-list" class="card-hairline bg-bg-surface border border-border-default rounded-xl overflow-hidden">
+        {% if mappings.is_empty() %}
+        <div class="px-6 py-10 flex flex-col items-center text-center gap-3">
+            <div class="w-14 h-14 rounded-full bg-accent-soft flex items-center justify-center text-accent-soft-fg">
+                <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M4 7h6l2 2h8"/>
+                    <path d="M14 17h6"/>
+                    <path d="M17 14l3 3-3 3"/>
+                </svg>
+            </div>
+            <div>
+                <h3 class="text-base font-semibold text-fg-primary mb-1">Nenhum mapeamento</h3>
+                <p class="text-sm text-fg-secondary max-w-md">
+                    Só é preciso quando o brarr e o media server enxergam o mesmo disco em
+                    caminhos diferentes — o caso comum é cada um num contêiner com bind mounts
+                    distintos. Se os dois veem o mesmo caminho, não configure nada.
+                </p>
+            </div>
+        </div>
+        {% else %}
+        <div class="overflow-x-auto">
+            <table class="w-full text-sm">
+                <thead class="bg-bg-muted">
+                    <tr class="text-left">
+                        <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">Servidor</th>
+                        <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">O brarr escreve</th>
+                        <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted">O servidor enxerga</th>
+                        <th class="px-4 py-3 font-medium text-xs uppercase tracking-[0.06em] text-fg-muted text-right">Ações</th>
+                    </tr>
+                </thead>
+                <tbody>
+                {% for m in mappings %}
+                    <tr class="border-t border-border-default {% if !m.reachable %}opacity-55{% endif %}" id="media-server-mapping-{{ m.id }}">
+                        <td class="px-4 py-3 text-sm text-fg-secondary">{{ m.server_name }}</td>
+
+                        <td class="px-4 py-3 font-mono text-sm text-fg-primary">
+                            {{ m.local_prefix }}
+                            {% if !m.reachable %}
+                            <div class="text-[11px] text-warning-soft-fg mt-0.5">
+                                caminho inacessível para o brarr agora
+                            </div>
+                            {% endif %}
+                        </td>
+
+                        <td class="px-4 py-3 font-mono text-sm text-fg-secondary">
+                            {{ m.remote_prefix }}
+                            {% if m.specificity == 0 %}
+                            <span class="badge bg-bg-muted text-fg-muted ml-1.5">raiz</span>
+                            {% endif %}
+                        </td>
+
+                        <td class="px-4 py-3">
+                            <div class="flex items-center justify-end gap-1.5">
+                                <button hx-delete="/media-server-mappings/{{ m.id }}"
+                                        hx-target="#media-server-mappings-block"
+                                        hx-swap="outerHTML"
+                                        hx-confirm="Remover este mapeamento? Nada é apagado do disco — os avisos voltam a sair com o caminho do brarr, que o servidor pode não reconhecer."
+                                        class="btn btn-sm btn-danger">
+                                    remover
+                                </button>
+                            </div>
+                        </td>
+                    </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% if mappings.len() > 1 %}
+        <div class="px-4 py-2.5 border-t border-border-default text-xs text-fg-muted">
+            Quando mais de uma regra cobre o mesmo caminho, vence a <strong class="text-fg-secondary">mais específica</strong>,
+            não a mais antiga.
+        </div>
+        {% endif %}
+        {% endif %}
+    </section>
+
+    {% if !mapping_servers.is_empty() %}
+    <section class="card-hairline bg-bg-surface border border-border-default rounded-xl mt-4">
+        <form hx-post="/media-server-mappings"
+              hx-target="#media-server-mappings-block"
+              hx-swap="outerHTML"
+              hx-on::after-request="if(event.detail.successful) this.reset()"
+              class="grid grid-cols-1 md:grid-cols-6 gap-3 px-5 py-4">
+
+            <label class="block md:col-span-2">
+                <span class="block mb-1.5 text-xs font-medium uppercase tracking-[0.06em] text-fg-muted">Servidor</span>
+                <select name="server_id" required
+                        class="w-full px-3 h-10 rounded-md bg-bg-canvas border border-border-strong text-sm text-fg-primary focus:outline-none focus:border-accent-solid">
+                    {% for s in mapping_servers %}
+                    <option value="{{ s.id }}">{{ s.name }}</option>
+                    {% endfor %}
+                </select>
+            </label>
+
+            <label class="block md:col-span-2">
+                <span class="block mb-1.5 text-xs font-medium uppercase tracking-[0.06em] text-fg-muted">Caminho no brarr</span>
+                <input name="local_prefix" required placeholder="/midias"
+                       class="w-full px-3 h-10 rounded-md bg-bg-canvas border border-border-strong text-sm text-fg-primary font-mono placeholder:text-fg-muted focus:outline-none focus:border-accent-solid">
+            </label>
+
+            <label class="block md:col-span-2">
+                <span class="block mb-1.5 text-xs font-medium uppercase tracking-[0.06em] text-fg-muted">Caminho no servidor</span>
+                <input name="remote_prefix" required placeholder="/mnt/midias"
+                       class="w-full px-3 h-10 rounded-md bg-bg-canvas border border-border-strong text-sm text-fg-primary font-mono placeholder:text-fg-muted focus:outline-none focus:border-accent-solid">
+            </label>
+
+            <div class="md:col-span-6 flex justify-end">
+                <button type="submit" class="btn btn-md btn-brand w-full md:w-auto">
+                    Adicionar mapeamento
+                </button>
+            </div>
+        </form>
+        <div class="px-5 pb-4 text-xs text-fg-muted leading-relaxed">
+            O <strong class="text-fg-secondary">caminho no servidor</strong> é o que aparece na biblioteca
+            dele — no Plex, em <span class="font-mono">Gerenciar biblioteca → Editar → Pastas</span>. Ele não é
+            conferido no disco: é de outra máquina, e normalmente não existe aqui.
+            O <strong class="text-fg-secondary">caminho no brarr</strong> é conferido agora, e é o caminho
+            <strong class="text-fg-secondary">dentro do contêiner do brarr</strong> — em geral a sua pasta raiz
+            ou o diretório acima dela.
+            Aceita formato Windows (<span class="font-mono">C:\Media</span>) e de rede
+            (<span class="font-mono">\\NAS\midia</span>) do lado do servidor.
+        </div>
+    </section>
+    {% endif %}
+
+</section>

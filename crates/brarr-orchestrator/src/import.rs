@@ -227,6 +227,11 @@ pub async fn import_pending(state: &AppState) -> Result<ImportSummary, AppError>
     }
     let pending = grabs::awaiting_import(state.pool()).await?;
     let mut summary = ImportSummary::default();
+    // Collected across the pass rather than sent per file: three
+    // episodes of one series are one thing for a media server to look
+    // at, and `AlreadyPresent` deliberately contributes nothing — the
+    // file was already there, so the server already knows about it.
+    let mut landed: Vec<PathBuf> = Vec::new();
     for grab in pending.into_iter().take(MAX_IMPORTS_PER_PASS) {
         summary.considered += 1;
         match import_grab(state, &grab).await? {
@@ -240,6 +245,7 @@ pub async fn import_pending(state: &AppState) -> Result<ImportSummary, AppError>
                     mode = mode.label(),
                     "imported"
                 );
+                landed.push(path);
             }
             ImportOutcome::AlreadyPresent { path } => {
                 summary.adopted += 1;
@@ -277,6 +283,11 @@ pub async fn import_pending(state: &AppState) -> Result<ImportSummary, AppError>
             }
         }
     }
+    // After the loop, and deliberately not inside `import_grab`: the
+    // unit a media server wants is the title, and a pass can land three
+    // episodes of one. Best-effort — a server that is down cannot fail
+    // an import that already wrote the file.
+    crate::notify::imported(state, &landed).await;
     Ok(summary)
 }
 

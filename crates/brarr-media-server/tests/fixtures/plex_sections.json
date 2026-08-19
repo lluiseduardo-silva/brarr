@@ -1,0 +1,87 @@
+{
+    "MediaContainer": {
+        "size": 3,
+        "allowSync": false,
+        "title1": "Plex Library",
+        "Directory": [
+            {
+                "allowSync": true,
+                "filters": true,
+                "refreshing": false,
+                "key": "3",
+                "type": "movie",
+                "title": "Filmes",
+                "agent": "tv.plex.agents.movie",
+                "scanner": "Plex Movie",
+                "language": "pt-BR",
+                "metadataAgentProviderGroupId": 1,
+                "uuid": "88250281-91ac-46c3-a8dc-f87ac236e101",
+                "updatedAt": 1786931515,
+                "createdAt": 1780288025,
+                "scannedAt": 1786840053,
+                "content": true,
+                "directory": true,
+                "contentChangedAt": 259173,
+                "hidden": 0,
+                "Location": [
+                    {
+                        "id": 3,
+                        "path": "/mnt/midias/Filmes"
+                    }
+                ]
+            },
+            {
+                "allowSync": true,
+                "filters": true,
+                "refreshing": false,
+                "key": "1",
+                "type": "show",
+                "title": "Animes",
+                "agent": "tv.plex.agents.series",
+                "scanner": "Plex TV Series",
+                "language": "pt-BR",
+                "metadataAgentProviderGroupId": 2,
+                "uuid": "fadf3c3a-56a4-4018-886b-83b788006b0b",
+                "updatedAt": 1787090912,
+                "createdAt": 1780288005,
+                "scannedAt": 1787090850,
+                "content": true,
+                "directory": true,
+                "contentChangedAt": 264839,
+                "hidden": 0,
+                "Location": [
+                    {
+                        "id": 1,
+                        "path": "/mnt/midias/Animes"
+                    }
+                ]
+            },
+            {
+                "allowSync": true,
+                "filters": true,
+                "refreshing": false,
+                "key": "2",
+                "type": "show",
+                "title": "Series",
+                "agent": "tv.plex.agents.series",
+                "scanner": "Plex TV Series",
+                "language": "pt-BR",
+                "metadataAgentProviderGroupId": 2,
+                "uuid": "f9428172-c1cc-4c16-b2e6-e92d6d17f070",
+                "updatedAt": 1786897000,
+                "createdAt": 1780288015,
+                "scannedAt": 1786840115,
+                "content": true,
+                "directory": true,
+                "contentChangedAt": 257226,
+                "hidden": 0,
+                "Location": [
+                    {
+                        "id": 2,
+                        "path": "/mnt/midias/Series"
+                    }
+                ]
+            }
+        ]
+    }
+}

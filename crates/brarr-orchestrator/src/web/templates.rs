@@ -468,6 +468,125 @@ pub struct RootFoldersListPartial {
     pub root_folders: Vec<RootFolderView>,
 }
 
+/// `/media-servers` — Plex, Jellyfin and Emby.
+#[derive(Debug, Template)]
+#[template(path = "media_servers.html")]
+pub struct MediaServersTemplate {
+    /// Every configured server, enabled first.
+    pub servers: Vec<MediaServerView>,
+    /// How many enabled rows still have no credential. Inside the swap
+    /// target for the same reason the download-client coverage badges
+    /// are — see [`MediaServersListPartial`].
+    pub needs_credential: usize,
+    /// Path-rewrite rules. Askama renders an `{% include %}` against the
+    /// *parent* context, so the partial's fields live here too.
+    pub mappings: Vec<MediaServerMappingView>,
+    /// Servers available in the "add mapping" select.
+    pub mapping_servers: Vec<MediaServerOption>,
+}
+
+/// HTMX partial returned after every write on `/media-servers`.
+///
+/// Carries `needs_credential` for the same reason the download-client
+/// partial carries its coverage flags: a count rendered in the page
+/// header sits outside the swap and would still read the old number
+/// after a sign-in.
+#[derive(Debug, Template)]
+#[template(path = "partials/media_servers_list.html")]
+pub struct MediaServersListPartial {
+    /// Every configured server, enabled first.
+    pub servers: Vec<MediaServerView>,
+    /// See [`MediaServersTemplate::needs_credential`].
+    pub needs_credential: usize,
+}
+
+/// One row in the media-servers table.
+#[derive(Debug)]
+pub struct MediaServerView {
+    /// Stringified UUID.
+    pub id: String,
+    /// Operator-chosen display name.
+    pub name: String,
+    /// Persisted kind label (`"plex"` / `"jellyfin"` / `"emby"`) — the
+    /// template branches on this.
+    pub kind: String,
+    /// Kind spelled the way the vendor spells it (`"Plex"`).
+    pub kind_label: String,
+    /// Base URL of the server.
+    pub base_url: String,
+    /// `false` ⇒ drained: keeps its config but hears about nothing.
+    pub enabled: bool,
+    /// Whether a credential is stored. Never the credential itself.
+    pub has_token: bool,
+    /// `true` for Plex, which signs in through plex.tv rather than
+    /// taking a key the operator pastes.
+    pub uses_plex_login: bool,
+    /// When the last notification succeeded (ISO-8601), if ever.
+    pub last_notified_at: Option<String>,
+    /// Why the last notification failed, cleared by the next success.
+    pub last_error: Option<String>,
+}
+
+/// Modal returned by `GET /media-servers/{id}/edit`.
+#[derive(Debug, Template)]
+#[template(path = "partials/edit_media_server_modal.html")]
+pub struct EditMediaServerModalPartial {
+    /// Stringified UUID.
+    pub id: String,
+    /// Current name.
+    pub name: String,
+    /// Persisted kind label — the credential field branches on it.
+    pub kind: String,
+    /// Kind as the vendor spells it.
+    pub kind_label: String,
+    /// Current base URL.
+    pub base_url: String,
+    /// Whether a credential is stored. **A boolean, never the value** —
+    /// the form must not echo a secret back, which is what lets a blank
+    /// field mean "keep the stored one".
+    pub has_token: bool,
+    /// `true` for Plex: the modal points at the sign-in instead of
+    /// pretending a pasted token is the normal path.
+    pub uses_plex_login: bool,
+}
+
+/// HTMX partial for the media-server path mappings.
+#[derive(Debug, Template)]
+#[template(path = "partials/media_server_mappings.html")]
+pub struct MediaServerMappingsPartial {
+    /// Configured rules.
+    pub mappings: Vec<MediaServerMappingView>,
+    /// Servers available in the "add mapping" select.
+    pub mapping_servers: Vec<MediaServerOption>,
+}
+
+/// One row in the media-server path-mapping table.
+#[derive(Debug)]
+pub struct MediaServerMappingView {
+    /// Stringified UUID.
+    pub id: String,
+    /// Which server this rewrites for.
+    pub server_name: String,
+    /// Prefix as the media server writes it.
+    pub remote_prefix: String,
+    /// Prefix in brarr's namespace.
+    pub local_prefix: String,
+    /// How many components the rule pins — the number "longest wins"
+    /// compares. `0` means it anchors only a root.
+    pub specificity: usize,
+    /// Whether brarr can see the local side right now.
+    pub reachable: bool,
+}
+
+/// One option in the "add mapping" server select.
+#[derive(Debug)]
+pub struct MediaServerOption {
+    /// Stringified UUID.
+    pub id: String,
+    /// Display name.
+    pub name: String,
+}
+
 /// The add-with-options dialog, returned by
 /// `GET /library/add/options` and re-rendered on a validation failure so
 /// the operator's picks survive.

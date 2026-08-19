@@ -43,8 +43,8 @@ use crate::auth::{BypassConfig, TrustedPeers};
 use crate::db::quality_profiles;
 use crate::db::settings;
 use crate::db::{
-    arr_instances, decisions, download_clients, grabs, item_ids, library, path_mappings, providers,
-    push_history, root_folders, searches,
+    arr_instances, decisions, download_clients, grabs, item_ids, library, media_server_mappings,
+    media_servers, path_mappings, providers, push_history, root_folders, searches,
 };
 use crate::metadata::art;
 use crate::metadata::registry::Registry;
@@ -61,21 +61,22 @@ use crate::web::templates::{
     ArrImportRootView, ArrImportTemplate, ArrImportTitleView, ArrInstanceView,
     ArrInstancesListPartial, ArrInstancesTemplate, ArrRootOption, DashboardTemplate, DecisionView,
     DownloadClientView, DownloadClientsListPartial, DownloadClientsTemplate,
-    EditArrInstanceModalPartial, EditDownloadClientModalPartial, EditProviderModalPartial,
-    EndpointHealthView, EndpointRequestView, EpisodeView, ErrorTemplate, GrabView, HealthTemplate,
-    ImportDirEntry, ImportIgnoredView, ImportModalPartial, ImportOutcomeView,
-    ImportPickEpisodePartial, ImportPickTitlePartial, ImportReportPartial, ImportRowPartial,
-    ImportRowView, InteractiveReleaseView, InteractiveResultsPartial,
+    EditArrInstanceModalPartial, EditDownloadClientModalPartial, EditMediaServerModalPartial,
+    EditProviderModalPartial, EndpointHealthView, EndpointRequestView, EpisodeView, ErrorTemplate,
+    GrabView, HealthTemplate, ImportDirEntry, ImportIgnoredView, ImportModalPartial,
+    ImportOutcomeView, ImportPickEpisodePartial, ImportPickTitlePartial, ImportReportPartial,
+    ImportRowPartial, ImportRowView, InteractiveReleaseView, InteractiveResultsPartial,
     LibraryAddOptionsModalPartial, LibraryAddTemplate, LibraryDetailTemplate, LibraryDetailView,
     LibraryGrabsModalPartial, LibraryItemView, LibrarySeasonPartial, LibraryTemplate,
-    LoginTemplate, NewProfileModalPartial, NewSearchModalPartial, PathMappingClientOption,
-    PathMappingView, PathMappingsPartial, PickEpisodeView, PickTitleView, ProfileEditorTemplate,
-    ProfileView, ProfilesTemplate, ProviderHealthView, ProviderView, ProvidersListPartial,
-    ProvidersTemplate, PushGroupView, PushHistoryView, PushesFilterView, PushesTemplate,
-    RecentSearchView, ReleasesTemplate, RootFolderView, RootFoldersListPartial,
-    SearchDetailTemplate, SearchesFilterView, SearchesIndexTemplate, SeasonMarkView, SeasonView,
-    SettingsFlash, SettingsTemplate, SettingsValues, StuckImportView, TmdbHitView,
-    WebhookEventView, WebhooksTemplate,
+    LoginTemplate, MediaServerMappingView, MediaServerMappingsPartial, MediaServerOption,
+    MediaServerView, MediaServersListPartial, MediaServersTemplate, NewProfileModalPartial,
+    NewSearchModalPartial, PathMappingClientOption, PathMappingView, PathMappingsPartial,
+    PickEpisodeView, PickTitleView, ProfileEditorTemplate, ProfileView, ProfilesTemplate,
+    ProviderHealthView, ProviderView, ProvidersListPartial, ProvidersTemplate, PushGroupView,
+    PushHistoryView, PushesFilterView, PushesTemplate, RecentSearchView, ReleasesTemplate,
+    RootFolderView, RootFoldersListPartial, SearchDetailTemplate, SearchesFilterView,
+    SearchesIndexTemplate, SeasonMarkView, SeasonView, SettingsFlash, SettingsTemplate,
+    SettingsValues, StuckImportView, TmdbHitView, WebhookEventView, WebhooksTemplate,
 };
 use crate::{AppError, AppState};
 use brarr_core::{Block, MediaType, MetadataSource, Ordering, OrderingFamily, TmdbId};
@@ -98,6 +99,7 @@ pub fn router(state: AppState, static_dir: &std::path::Path) -> Router {
         .route("/providers/{id}/toggle", post(providers_toggle))
         .merge(arr_routes())
         .merge(download_client_routes())
+        .merge(media_server_routes())
         .route("/decisions/{id}/push/{arr_id}", post(decisions_push))
         .route("/pushes", get(pushes_index))
         .route("/profiles", get(profiles_index).post(profiles_create))
@@ -6781,6 +6783,524 @@ fn download_client_view(row: crate::db::download_clients::DownloadClientRow) -> 
         enabled: row.enabled,
         created_at: format_ts(row.created_at),
     }
+}
+
+// ---------------------------------------------------------------------
+// Media servers — Plex / Jellyfin / Emby CRUD, plus the Plex sign-in.
+//
+// Same shape as the download clients: every mutation answers with the
+// whole list partial, because the ordering is enabled-first and one edit
+// can move a different row.
+// ---------------------------------------------------------------------
+
+fn media_server_routes() -> Router<AppState> {
+    Router::new()
+        .route(
+            "/media-servers",
+            get(media_servers_index).post(media_servers_create),
+        )
+        .route(
+            "/media-servers/{id}",
+            delete(media_servers_delete).put(media_servers_update),
+        )
+        .route("/media-servers/{id}/edit", get(media_servers_edit))
+        .route("/media-servers/{id}/test", post(media_servers_test))
+        .route("/media-servers/{id}/toggle", post(media_servers_toggle))
+        .route(
+            "/media-servers/{id}/plex/login",
+            post(media_servers_plex_login),
+        )
+        .route(
+            "/media-servers/{id}/plex/login/status",
+            get(media_servers_plex_login_status),
+        )
+        .route("/media-server-mappings", post(media_server_mappings_create))
+        .route(
+            "/media-server-mappings/{id}",
+            delete(media_server_mappings_delete),
+        )
+}
+
+async fn media_servers_index(State(state): State<AppState>) -> Result<Response, AppError> {
+    let servers = media_server_views(&state).await?;
+    let needs_credential = credential_gap(&servers);
+    let (mappings, mapping_servers) = media_server_mapping_block(&state).await?;
+    html(&MediaServersTemplate {
+        servers,
+        needs_credential,
+        mappings,
+        mapping_servers,
+    })
+}
+
+/// How many enabled servers have no credential to notify with.
+///
+/// Only enabled rows count, for the same reason `protocol_coverage`
+/// ignores drained clients: a server that hears about nothing cannot be
+/// missing anything.
+fn credential_gap(servers: &[MediaServerView]) -> usize {
+    servers.iter().filter(|s| s.enabled && !s.has_token).count()
+}
+
+#[derive(Debug, Deserialize)]
+struct MediaServerForm {
+    name: String,
+    /// Only read on create — the edit modal has no kind field, because
+    /// switching kind would change both the dialect and the
+    /// authentication scheme under a credential obtained for the old one.
+    #[serde(default)]
+    kind: Option<String>,
+    base_url: String,
+    #[serde(default)]
+    token: Option<String>,
+}
+
+impl MediaServerForm {
+    /// Trimmed field, with empty read as absent — the convention
+    /// [`crate::db::media_servers`] applies before it writes, and what
+    /// makes a blank credential mean "keep the stored one".
+    fn optional(field: Option<&str>) -> Option<&str> {
+        field.map(str::trim).filter(|v| !v.is_empty())
+    }
+}
+
+async fn media_servers_create(
+    State(state): State<AppState>,
+    Form(form): Form<MediaServerForm>,
+) -> Result<Response, AppError> {
+    let kind_raw = form.kind.as_deref().unwrap_or_default().trim().to_owned();
+    let kind = brarr_media_server::MediaServerKind::from_label(&kind_raw).ok_or_else(|| {
+        AppError::InvalidInput(format!(
+            "tipo deve ser plex, jellyfin ou emby, veio {kind_raw:?}"
+        ))
+    })?;
+    media_servers::insert(
+        state.pool(),
+        media_servers::NewMediaServer {
+            name: form.name.trim(),
+            kind,
+            base_url: form.base_url.trim(),
+            token: MediaServerForm::optional(form.token.as_deref()),
+        },
+    )
+    .await?;
+    render_media_servers_partial(&state).await
+}
+
+/// Edit a server. A blank credential means "keep the stored one" — the
+/// modal never echoed it back, so blank cannot mean "erase".
+async fn media_servers_update(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Form(form): Form<MediaServerForm>,
+) -> Result<Response, AppError> {
+    let uuid = parse_media_server_id(&id)?;
+    media_servers::update(
+        state.pool(),
+        uuid,
+        media_servers::MediaServerUpdate {
+            name: form.name.trim(),
+            base_url: form.base_url.trim(),
+            token: MediaServerForm::optional(form.token.as_deref()),
+        },
+    )
+    .await?;
+    render_media_servers_partial(&state).await
+}
+
+async fn media_servers_delete(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, AppError> {
+    let uuid = parse_media_server_id(&id)?;
+    if !media_servers::delete_by_id(state.pool(), uuid).await? {
+        return Err(AppError::NotFound(format!("media_server {id}")));
+    }
+    render_media_servers_partial(&state).await
+}
+
+async fn media_servers_toggle(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, AppError> {
+    let uuid = parse_media_server_id(&id)?;
+    let row = media_servers::get_by_id(state.pool(), uuid).await?;
+    media_servers::set_enabled(state.pool(), uuid, !row.enabled).await?;
+    render_media_servers_partial(&state).await
+}
+
+async fn media_servers_edit(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, AppError> {
+    let uuid = parse_media_server_id(&id)?;
+    let row = media_servers::get_by_id(state.pool(), uuid).await?;
+    html(&EditMediaServerModalPartial {
+        id: row.id.to_string(),
+        name: row.name.clone(),
+        kind: row.kind.label().to_owned(),
+        kind_label: row.kind.display_name().to_owned(),
+        base_url: row.base_url.clone(),
+        // A boolean, never the value.
+        has_token: row.has_token(),
+        uses_plex_login: row.kind.uses_plex_login(),
+    })
+}
+
+/// Prove the credential and report what the server serves.
+///
+/// Goes through the real client rather than a bare HTTP probe for the
+/// same reason the download-client test does: Plex answers `200` on
+/// `/identity` to anyone, so a reachability check would paint a wrong
+/// token green.
+async fn media_servers_test(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, AppError> {
+    let uuid = parse_media_server_id(&id)?;
+    let row = media_servers::get_by_id(state.pool(), uuid).await?;
+    let dom_id = format!("ms-ping-{}", row.id);
+
+    let badge = match row.to_config().map(brarr_media_server::build) {
+        Ok(Ok(client)) => match client.test_connection().await {
+            Ok(status) => {
+                let version = if status.version.is_empty() {
+                    "versão não informada".to_owned()
+                } else {
+                    status.version.clone()
+                };
+                let names: Vec<&str> = status.libraries.iter().map(|l| l.title.as_str()).collect();
+                PingBadge {
+                    ok: true,
+                    label: format!("conectado · {version}"),
+                    detail: if names.is_empty() {
+                        "o servidor respondeu, mas não tem biblioteca nenhuma".to_owned()
+                    } else {
+                        format!("bibliotecas: {}", names.join(", "))
+                    },
+                }
+            }
+            Err(e) => PingBadge {
+                ok: false,
+                label: "falhou".to_owned(),
+                detail: e.to_string(),
+            },
+        },
+        Ok(Err(e)) => PingBadge {
+            ok: false,
+            label: "sem credencial".to_owned(),
+            detail: e.to_string(),
+        },
+        Err(e) => PingBadge {
+            ok: false,
+            label: "config inválida".to_owned(),
+            detail: e.to_string(),
+        },
+    };
+    Ok(html_string(render_status_badge(&dom_id, &badge)))
+}
+
+/// How often the sign-in fragment re-asks. See
+/// [`crate::notify::PLEX_LOGIN_POLL`].
+fn plex_login_poll_secs() -> u64 {
+    crate::notify::PLEX_LOGIN_POLL.as_secs()
+}
+
+/// The fragment shown while a Plex sign-in is waiting on the operator.
+///
+/// It replaces itself every few seconds until the status route says the
+/// token landed. Same mechanism as `render_scan_running_badge`, and the
+/// same family: a login genuinely ends, so the terminal answer carries
+/// [`HX_STOP_POLLING`] and the asking stops.
+fn render_plex_login_pending(server: Uuid, sign_in_url: &str) -> String {
+    let dom_id = crate::web::templates::escape(&format!("ms-ping-{server}"));
+    let href = crate::web::templates::escape(sign_in_url);
+    let poll = plex_login_poll_secs();
+    format!(
+        r#"<span id="{dom_id}" class="inline-flex items-center gap-2" hx-get="/media-servers/{server}/plex/login/status" hx-trigger="every {poll}s" hx-swap="outerHTML">"#
+    ) + &format!(
+        r#"<a href="{href}" target="_blank" rel="noopener" class="btn btn-sm btn-brand">autorizar no plex.tv</a>"#
+    ) + r#"<span class="text-xs italic text-fg-muted">esperando você autorizar…</span></span>"#
+}
+
+/// Start a Plex sign-in: ask plex.tv for a PIN and hand back the link.
+async fn media_servers_plex_login(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, AppError> {
+    let uuid = parse_media_server_id(&id)?;
+    let row = media_servers::get_by_id(state.pool(), uuid).await?;
+    if !row.kind.uses_plex_login() {
+        return Err(AppError::InvalidInput(format!(
+            "{} não usa o login do plex.tv — a credencial dele é uma API key",
+            row.kind
+        )));
+    }
+    let dom_id = format!("ms-ping-{uuid}");
+
+    // A second click must not burn a second PIN: the one in flight is
+    // still valid, and plex.tv rate-limits its auth endpoints.
+    if let Some(pending) = state.plex_logins().get(&uuid, std::time::Instant::now()) {
+        if !pending.is_expired(std::time::Instant::now()) {
+            let login = plex_login_client(&state).await?;
+            return Ok(html_string(render_plex_login_pending(
+                uuid,
+                &login.sign_in_url(&pending.code),
+            )));
+        }
+    }
+
+    let login = plex_login_client(&state).await?;
+    let pin = match login.create_pin().await {
+        Ok(pin) => pin,
+        Err(e) => {
+            return Ok(html_string(render_status_badge(
+                &dom_id,
+                &PingBadge {
+                    ok: false,
+                    label: "plex.tv não respondeu".to_owned(),
+                    detail: e.to_string(),
+                },
+            )));
+        }
+    };
+
+    // plex.tv's own clock, not one chosen here: it reports `expiresIn`
+    // and neither *arr reads it, which is why their polls never stop.
+    let lifetime = pin
+        .expires_in_seconds
+        .and_then(|secs| u64::try_from(secs).ok())
+        .map_or(
+            crate::notify::PLEX_LOGIN_TTL,
+            std::time::Duration::from_secs,
+        );
+    let sign_in_url = login.sign_in_url(&pin.code);
+    state.plex_logins().insert(
+        uuid,
+        crate::notify::PendingPlexLogin {
+            pin_id: pin.id,
+            code: pin.code.clone(),
+            deadline: std::time::Instant::now() + lifetime,
+        },
+        std::time::Instant::now(),
+    );
+    Ok(html_string(render_plex_login_pending(uuid, &sign_in_url)))
+}
+
+/// Has the operator authorised the PIN yet?
+///
+/// Answers [`HX_STOP_POLLING`] on anything terminal — token stored, PIN
+/// expired, mailbox gone — so the fragment stops asking. Sonarr's own
+/// poll has no stop condition at all and spins forever when the operator
+/// closes the tab.
+async fn media_servers_plex_login_status(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, AppError> {
+    let uuid = parse_media_server_id(&id)?;
+    let dom_id = format!("ms-ping-{uuid}");
+    let now = std::time::Instant::now();
+
+    let Some(pending) = state.plex_logins().get(&uuid, now) else {
+        return Ok(stop_polling(
+            &dom_id,
+            &PingBadge {
+                ok: false,
+                label: "login expirou".to_owned(),
+                detail: "o PIN do plex.tv vale meia hora; clique em entrar com o Plex de novo"
+                    .to_owned(),
+            },
+        ));
+    };
+    if pending.is_expired(now) {
+        return Ok(stop_polling(
+            &dom_id,
+            &PingBadge {
+                ok: false,
+                label: "login expirou".to_owned(),
+                detail: "o PIN do plex.tv vale meia hora; clique em entrar com o Plex de novo"
+                    .to_owned(),
+            },
+        ));
+    }
+
+    let login = plex_login_client(&state).await?;
+    match login.poll_pin(pending.pin_id).await {
+        Ok(brarr_media_server::plex::PinState::Authorized(token)) => {
+            media_servers::set_token(state.pool(), uuid, &token).await?;
+            Ok(stop_polling(
+                &dom_id,
+                &PingBadge {
+                    ok: true,
+                    label: "conectado".to_owned(),
+                    detail: "token guardado; use \"testar\" para listar as bibliotecas".to_owned(),
+                },
+            ))
+        }
+        Ok(brarr_media_server::plex::PinState::Expired) => Ok(stop_polling(
+            &dom_id,
+            &PingBadge {
+                ok: false,
+                label: "login expirou".to_owned(),
+                detail: "o plex.tv não conhece mais este PIN; clique em entrar com o Plex de novo"
+                    .to_owned(),
+            },
+        )),
+        Ok(brarr_media_server::plex::PinState::Pending) => {
+            // Still waiting: re-render the same fragment, which keeps
+            // its own trigger and so schedules the next ask.
+            Ok(html_string(render_plex_login_pending(
+                uuid,
+                &login.sign_in_url(&pending.code),
+            )))
+        }
+        // A transient plex.tv failure keeps the poll alive on purpose —
+        // giving up on one bad response would strand a login the
+        // operator is in the middle of.
+        Err(e) => {
+            tracing::warn!(
+                target: "brarr_orchestrator::notify",
+                error = %e,
+                "plex.tv poll failed; still waiting"
+            );
+            Ok(html_string(render_plex_login_pending(
+                uuid,
+                &login.sign_in_url(&pending.code),
+            )))
+        }
+    }
+}
+
+/// A badge that also cancels the trigger that asked for it.
+fn stop_polling(dom_id: &str, badge: &PingBadge) -> Response {
+    let body = render_status_badge(dom_id, badge);
+    let mut res = (
+        axum::http::StatusCode::from_u16(HX_STOP_POLLING).unwrap_or(axum::http::StatusCode::OK),
+        body,
+    )
+        .into_response();
+    res.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    res
+}
+
+/// The plex.tv client, carrying this install's persisted identity.
+async fn plex_login_client(
+    state: &AppState,
+) -> Result<brarr_media_server::plex::PlexLogin, AppError> {
+    let identity = crate::notify::plex_identity(state.pool()).await?;
+    brarr_media_server::plex::PlexLogin::new(identity)
+        .map_err(|e| AppError::InvalidInput(format!("não consegui falar com o plex.tv: {e}")))
+}
+
+#[derive(Debug, Deserialize)]
+struct MediaServerMappingForm {
+    server_id: String,
+    remote_prefix: String,
+    local_prefix: String,
+}
+
+async fn media_server_mappings_create(
+    State(state): State<AppState>,
+    Form(form): Form<MediaServerMappingForm>,
+) -> Result<Response, AppError> {
+    let server_id = parse_media_server_id(&form.server_id)?;
+    media_server_mappings::insert(
+        state.pool(),
+        media_server_mappings::NewMediaServerMapping {
+            server_id,
+            remote_prefix: &form.remote_prefix,
+            local_prefix: &form.local_prefix,
+        },
+    )
+    .await?;
+    render_media_server_mappings_partial(&state).await
+}
+
+async fn media_server_mappings_delete(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, AppError> {
+    let uuid = parse_media_server_id(&id)?;
+    if !media_server_mappings::delete_by_id(state.pool(), uuid).await? {
+        return Err(AppError::NotFound(format!("media_server_mapping {id}")));
+    }
+    render_media_server_mappings_partial(&state).await
+}
+
+fn parse_media_server_id(id: &str) -> Result<Uuid, AppError> {
+    Uuid::parse_str(id).map_err(|e| AppError::InvalidInput(format!("id inválido: {e}")))
+}
+
+async fn media_server_views(state: &AppState) -> Result<Vec<MediaServerView>, AppError> {
+    Ok(media_servers::list_all(state.pool())
+        .await?
+        .into_iter()
+        .map(|row| MediaServerView {
+            id: row.id.to_string(),
+            name: row.name.clone(),
+            kind: row.kind.label().to_owned(),
+            kind_label: row.kind.display_name().to_owned(),
+            base_url: row.base_url.clone(),
+            enabled: row.enabled,
+            has_token: row.has_token(),
+            uses_plex_login: row.kind.uses_plex_login(),
+            last_notified_at: row.last_notified_at.map(format_ts),
+            last_error: row.last_error.clone(),
+        })
+        .collect())
+}
+
+async fn media_server_mapping_block(
+    state: &AppState,
+) -> Result<(Vec<MediaServerMappingView>, Vec<MediaServerOption>), AppError> {
+    let servers = media_servers::list_all(state.pool()).await?;
+    let names: std::collections::HashMap<Uuid, String> =
+        servers.iter().map(|s| (s.id, s.name.clone())).collect();
+    let mappings = media_server_mappings::list_all(state.pool())
+        .await?
+        .into_iter()
+        .map(|m| MediaServerMappingView {
+            id: m.id.to_string(),
+            server_name: names
+                .get(&m.server_id)
+                .cloned()
+                .unwrap_or_else(|| "(removido)".to_owned()),
+            remote_prefix: m.remote_prefix.clone(),
+            local_prefix: m.local_prefix.to_string_lossy().into_owned(),
+            specificity: crate::remote_path::specificity(&m.remote_prefix),
+            // Read per render rather than stored: a bind mount can go
+            // away without anything writing to this table.
+            reachable: m.local_prefix.is_dir(),
+        })
+        .collect();
+    let options = servers
+        .into_iter()
+        .map(|s| MediaServerOption {
+            id: s.id.to_string(),
+            name: s.name,
+        })
+        .collect();
+    Ok((mappings, options))
+}
+
+async fn render_media_servers_partial(state: &AppState) -> Result<Response, AppError> {
+    let servers = media_server_views(state).await?;
+    let needs_credential = credential_gap(&servers);
+    html(&MediaServersListPartial {
+        servers,
+        needs_credential,
+    })
+}
+
+async fn render_media_server_mappings_partial(state: &AppState) -> Result<Response, AppError> {
+    let (mappings, mapping_servers) = media_server_mapping_block(state).await?;
+    html(&MediaServerMappingsPartial {
+        mappings,
+        mapping_servers,
+    })
 }
 
 // ---------------------------------------------------------------------

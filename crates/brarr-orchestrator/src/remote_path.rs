@@ -454,6 +454,16 @@ pub fn translate(rules: &[PrefixRule], reported: &str) -> Translation {
 /// Reassemble a parsed path in its own flavour's spelling, with `.` and
 /// `..` already gone. Only ever called for an anchored path.
 fn rebuild(parsed: &Parsed<'_>) -> PathBuf {
+    PathBuf::from(rebuild_str(parsed))
+}
+
+/// [`rebuild`], as a `String`.
+///
+/// The outbound direction needs the text and must not touch `PathBuf`:
+/// the result names a directory on *another* machine, and letting this
+/// one's path type near it invites exactly the native operations that
+/// must never apply to it.
+fn rebuild_str(parsed: &Parsed<'_>) -> String {
     let (root, separator) = match parsed.root {
         Root::Posix => ("/".to_owned(), "/"),
         Root::Drive(letter) => (format!("{letter}:\\"), "\\"),
@@ -462,7 +472,108 @@ fn rebuild(parsed: &Parsed<'_>) -> PathBuf {
         // still the safest thing to hand back.
         Root::Relative => (String::new(), "/"),
     };
-    PathBuf::from(root + &parsed.segments.join(separator))
+    root + &parsed.segments.join(separator)
+}
+
+/// The result of translating one of brarr's own paths outward.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteTranslation {
+    /// The path as the other side writes it. A `String`, not a
+    /// `PathBuf`, for the reason [`PrefixRule::remote_prefix`] is one.
+    pub remote: String,
+    /// Which mapping produced it, or `None` when the path passed through
+    /// untouched.
+    pub applied: Option<AppliedRule>,
+}
+
+/// Rewrite one of brarr's paths into another machine's namespace.
+///
+/// The mirror of [`translate`], and deliberately built on the same
+/// matcher rather than beside it. Both directions answer one question —
+/// "what does the other side call this directory?" — and the sharp edges
+/// were paid for once: component boundaries, longest-wins, a backslash
+/// being a legal POSIX filename character. The module header says a
+/// second table copying the algorithm is how the incident comes back; a
+/// second *direction* copying it is the same mistake rotated.
+///
+/// **Fails open**, for the same reason the inbound direction does: an
+/// operator whose media server mounts the library exactly where brarr
+/// does needs no mapping at all, and that install has to keep working
+/// against an empty table. It stays safe because the far side can still
+/// tell — a path nothing rewrote either matches a library over there
+/// anyway, or produces a refusal that names it.
+#[must_use]
+pub fn to_remote(rules: &[PrefixRule], local: &Path) -> RemoteTranslation {
+    let raw = local.to_string_lossy();
+    let path = parse(&raw);
+    let rooted = !matches!(path.root, Root::Relative);
+    let mut best: Option<(usize, &PrefixRule, String)> = None;
+
+    for candidate in rules {
+        let local_side = candidate.local_prefix.to_string_lossy().into_owned();
+        let Some(depth) = covers(&parse(&local_side), &path) else {
+            continue;
+        };
+        let wins = match &best {
+            None => true,
+            // Same tie-break as inbound, on the side being matched: two
+            // rows differing only in case resolve identically on every
+            // run instead of by row order.
+            Some((current_depth, _, current_side)) => {
+                depth > *current_depth || (depth == *current_depth && &local_side < current_side)
+            }
+        };
+        if wins {
+            best = Some((depth, candidate, local_side));
+        }
+    }
+
+    match best {
+        Some((depth, row, _)) => {
+            let tail: Vec<&str> = path.segments.iter().skip(depth).copied().collect();
+            RemoteTranslation {
+                remote: join_remote(&row.remote_prefix, &tail),
+                applied: Some(AppliedRule {
+                    id: row.id,
+                    remote_prefix: row.remote_prefix.clone(),
+                    local_prefix: row.local_prefix.clone(),
+                }),
+            }
+        }
+        None => RemoteTranslation {
+            remote: if rooted {
+                rebuild_str(&path)
+            } else {
+                raw.trim().to_owned()
+            },
+            applied: None,
+        },
+    }
+}
+
+/// Glue a tail onto a remote prefix using *that prefix's* separator.
+///
+/// The outbound counterpart of [`append_component`], driven by the same
+/// reasoning from the other end: the tail carries no separator, so the
+/// prefix decides the spelling. A Linux brarr feeding a Plex on Windows
+/// has to emit backslashes, and the prefix the operator wrote is the
+/// only place it can learn that.
+fn join_remote(prefix: &str, tail: &[&str]) -> String {
+    let separator = if matches!(detect(prefix.trim()), PathFlavor::Posix) {
+        '/'
+    } else {
+        '\\'
+    };
+    // The stored side is already canonical; re-canonicalising costs
+    // nothing and makes this correct for a hand-built rule too.
+    let mut out = canonical_prefix(prefix).unwrap_or_else(|| prefix.trim().to_owned());
+    for segment in tail {
+        if !out.ends_with(['/', '\\']) {
+            out.push(separator);
+        }
+        out.push_str(segment);
+    }
+    out
 }
 
 /// Rewrite an operator-typed prefix into the canonical form the table
@@ -964,5 +1075,102 @@ mod tests {
             !translate(&rules, foreign).is_foreign(),
             "once a rule applies, the local side is this machine's"
         );
+    }
+
+    // ---------------------------------------------------------------
+    // Outbound — the same matcher, pointed the other way.
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn the_media_server_case_translates() {
+        // One directory, three names: the host has it at /mnt/midias,
+        // Plex sees /mnt/midias, and brarr's container mounts it at
+        // /midias. Without this the refresh names a path no section has.
+        let rules = vec![rule("/mnt/midias", "/midias")];
+        let out = to_remote(&rules, Path::new("/midias/Filmes/Scary Movie (2000)"));
+        assert_eq!(out.remote, "/mnt/midias/Filmes/Scary Movie (2000)");
+        assert!(out.applied.is_some());
+    }
+
+    #[test]
+    fn an_outbound_prefix_must_end_on_a_component_boundary() {
+        let rules = vec![rule("/mnt/midias", "/midias")];
+        let out = to_remote(&rules, Path::new("/midiasx/Filmes/X"));
+        assert!(
+            out.applied.is_none(),
+            "/midias must not cover /midiasx any more than it does inbound"
+        );
+    }
+
+    #[test]
+    fn the_longest_local_prefix_wins_outbound_in_either_order() {
+        let broad = rule("/srv/wrong", "/midias");
+        let narrow = rule("/srv/right", "/midias/Animes");
+
+        for rules in [
+            vec![broad.clone(), narrow.clone()],
+            vec![narrow.clone(), broad.clone()],
+        ] {
+            let out = to_remote(&rules, Path::new("/midias/Animes/Bleach"));
+            assert_eq!(out.remote, "/srv/right/Bleach");
+        }
+    }
+
+    #[test]
+    fn outbound_fails_open_when_both_sides_agree() {
+        // The install where brarr and the media server mount the library
+        // in the same place needs no mapping and has to keep working.
+        let out = to_remote(&[], Path::new("/mnt/midias/Filmes/X"));
+        assert_eq!(out.remote, "/mnt/midias/Filmes/X");
+        assert!(out.applied.is_none());
+    }
+
+    #[test]
+    fn the_remote_prefix_decides_the_separator() {
+        // A Linux brarr feeding a Plex on Windows: the tail carries no
+        // separator, so the prefix is the only thing that can say which
+        // one to write.
+        let rules = vec![rule(r"C:\Media", "/midias")];
+        let out = to_remote(&rules, Path::new("/midias/Filmes/Heat (1995)"));
+        assert_eq!(out.remote, r"C:\Media\Filmes\Heat (1995)");
+
+        let unc = vec![rule(r"\\NAS\midia", "/midias")];
+        assert_eq!(
+            to_remote(&unc, Path::new("/midias/Series/Fringe")).remote,
+            r"\\NAS\midia\Series\Fringe",
+            "a share root is a root, and it is not written with slashes"
+        );
+    }
+
+    #[test]
+    fn a_backslash_in_a_posix_component_survives_going_out() {
+        let rules = vec![rule("/mnt/midias", "/midias")];
+        // `AC\DC` is one directory on Linux; splitting it would send the
+        // server a path with a component that does not exist.
+        assert_eq!(
+            to_remote(&rules, Path::new(r"/midias/Musicas/AC\DC")).remote,
+            r"/mnt/midias/Musicas/AC\DC"
+        );
+    }
+
+    #[test]
+    fn an_exact_match_yields_the_remote_prefix_alone() {
+        let rules = vec![rule("/mnt/midias/Filmes", "/midias/Filmes")];
+        assert_eq!(
+            to_remote(&rules, Path::new("/midias/Filmes")).remote,
+            "/mnt/midias/Filmes"
+        );
+    }
+
+    #[test]
+    fn the_two_directions_are_inverses() {
+        // The property that makes one matcher serving both directions
+        // worth the trouble: a path out and back is the path.
+        let rules = vec![rule("/mnt/midias", "/midias")];
+        let original = Path::new("/midias/Series/Fringe/Season 02");
+        let outward = to_remote(&rules, original);
+        let back = translate(&rules, &outward.remote);
+        assert_eq!(back.local, original);
+        assert!(outward.applied.is_some() && back.applied.is_some());
     }
 }

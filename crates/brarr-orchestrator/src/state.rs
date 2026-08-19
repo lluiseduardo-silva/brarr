@@ -189,6 +189,14 @@ struct Inner {
     /// is one HTTP call *per in-flight grab*, and a season with eight of
     /// them open would pay that on every expand.
     progress: TtlCache<Uuid, u8>,
+    /// Plex sign-ins waiting on a human, keyed by media server.
+    ///
+    /// The PIN lives on plex.tv and brarr holds only its id, so this is
+    /// the same shape as [`Self::scans`]: something started by one
+    /// request, finished by another, with nowhere else to survive in
+    /// between. Losing it on restart is fine and says the right thing —
+    /// the operator starts the sign-in again.
+    plex_logins: TtlCache<Uuid, crate::notify::PendingPlexLogin>,
     runtime: RuntimeConfig,
 }
 
@@ -268,6 +276,7 @@ impl AppState {
                 search_cache: TtlCache::new(SEARCH_CACHE_TTL),
                 scans: TtlCache::new(SCAN_RESULT_TTL),
                 progress: TtlCache::new(crate::queue::PROGRESS_TTL),
+                plex_logins: TtlCache::new(crate::notify::PLEX_LOGIN_TTL),
                 runtime,
             }),
         }
@@ -387,6 +396,13 @@ impl AppState {
     #[must_use]
     pub fn progress(&self) -> &TtlCache<Uuid, u8> {
         &self.inner.progress
+    }
+
+    /// Borrow the Plex sign-in mailbox. Written when the operator starts
+    /// a login, read by the fragment that polls for its token.
+    #[must_use]
+    pub fn plex_logins(&self) -> &TtlCache<Uuid, crate::notify::PendingPlexLogin> {
+        &self.inner.plex_logins
     }
 }
 

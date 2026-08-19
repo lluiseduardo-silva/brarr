@@ -100,6 +100,16 @@ pub const KEY_TVDB_API_KEY: &str = "tvdb_api_key";
 /// blank — see `brarr_tvdb::TvdbAuth::pin`.
 pub const KEY_TVDB_PIN: &str = "tvdb_pin";
 
+/// This install's `X-Plex-Client-Identifier`.
+///
+/// Generated once and never rewritten. It ties a PIN to this app, so a
+/// value that changes between creating a PIN and redeeming it orphans
+/// the token — which is why it lives here, shared by every Plex row,
+/// instead of as a column each row could hold a different copy of.
+/// Sonarr keeps the same thing in its config with `persist: true`
+/// (`ConfigService.cs:392`).
+pub const KEY_PLEX_CLIENT_IDENTIFIER: &str = "plex_client_identifier";
+
 /// `tracing-subscriber` env filter (replaces `RUST_LOG`).
 pub const KEY_LOG_LEVEL: &str = "log_level";
 /// Backtrace mode — `0` / `1` / `full`. Restart required (workspace

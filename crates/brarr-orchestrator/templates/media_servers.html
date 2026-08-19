@@ -1,0 +1,93 @@
+{% extends "base.html" %}
+{% block title %}Media servers — brarr{% endblock %}
+{% block content %}
+
+<div class="flex items-center justify-between gap-4 mb-6">
+    <div>
+        <h1 class="font-semibold text-[28px] leading-9 text-fg-primary">Media servers</h1>
+        {# No count here on purpose: the header sits outside the HTMX
+           swap target, so a number rendered at page load would go stale
+           the moment a server is added or signed in. The live count
+           lives in the list partial. #}
+        <p class="text-base text-fg-secondary mt-1">
+            Depois de importar, o brarr avisa onde olhar — era o que o Radarr e o Sonarr
+            faziam em <em>Connect</em>, e saiu junto com eles.
+        </p>
+    </div>
+    <a href="#new-media-server"
+       class="btn btn-lg btn-brand">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round">
+            <path d="M12 5v14M5 12h14"/>
+        </svg>
+        Adicionar servidor
+    </a>
+</div>
+
+{% include "partials/media_servers_list.html" %}
+
+<section id="new-media-server" class="card-hairline bg-bg-surface border border-border-default rounded-xl mt-6">
+    <header class="px-5 py-4">
+        <h2 class="text-lg font-semibold text-fg-primary">Adicionar servidor</h2>
+    </header>
+    <div class="h-px bg-border-default"></div>
+    <form hx-post="/media-servers"
+          hx-target="#media-servers-list"
+          hx-swap="outerHTML"
+          hx-on::after-request="if(event.detail.successful) this.reset()"
+          class="grid grid-cols-1 md:grid-cols-6 gap-3 px-5 py-4">
+
+        <label class="block md:col-span-3">
+            <span class="block mb-1.5 text-xs font-medium uppercase tracking-[0.06em] text-fg-muted">Nome</span>
+            <input name="name" required placeholder="plex-casa"
+                   class="w-full px-3 h-10 rounded-md bg-bg-canvas border border-border-strong text-sm text-fg-primary placeholder:text-fg-muted focus:outline-none focus:border-accent-solid">
+        </label>
+
+        <label class="block md:col-span-3">
+            <span class="block mb-1.5 text-xs font-medium uppercase tracking-[0.06em] text-fg-muted">Tipo</span>
+            <select name="kind" required
+                    class="w-full px-3 h-10 rounded-md bg-bg-canvas border border-border-strong text-sm text-fg-primary focus:outline-none focus:border-accent-solid">
+                <option value="plex">Plex</option>
+                <option value="jellyfin">Jellyfin</option>
+                <option value="emby">Emby</option>
+            </select>
+        </label>
+
+        <label class="block md:col-span-6">
+            <span class="block mb-1.5 text-xs font-medium uppercase tracking-[0.06em] text-fg-muted">Base URL</span>
+            <input name="base_url" required type="url" placeholder="http://10.0.1.248:32400"
+                   class="w-full px-3 h-10 rounded-md bg-bg-canvas border border-border-strong text-sm text-fg-primary placeholder:text-fg-muted focus:outline-none focus:border-accent-solid">
+        </label>
+
+        <label class="block md:col-span-6">
+            <span class="block mb-1.5 text-xs font-medium uppercase tracking-[0.06em] text-fg-muted">Credencial (Jellyfin / Emby)</span>
+            <input name="token" type="password" autocomplete="off" placeholder="API key do painel do servidor"
+                   class="w-full px-3 h-10 rounded-md bg-bg-canvas border border-border-strong text-sm text-fg-primary placeholder:text-fg-muted focus:outline-none focus:border-accent-solid">
+        </label>
+
+        <div class="md:col-span-6 flex justify-end">
+            <button type="submit" class="btn btn-md btn-brand w-full md:w-auto">
+                Adicionar servidor
+            </button>
+        </div>
+    </form>
+    <div class="px-5 pb-4 text-xs text-fg-muted leading-relaxed">
+        <strong class="text-fg-secondary">Jellyfin e Emby</strong> usam uma API key criada no painel do
+        próprio servidor (<span class="font-mono">Painel → Avançado → Chaves de API</span>).
+        <strong class="text-fg-secondary">O Plex não</strong>: a credencial é um token de conta, e ela vem do
+        botão <em>entrar com o Plex</em> na linha do servidor — cadastre sem preencher nada aqui e faça o login
+        depois. Colar um token à mão também funciona, e é o resgate para quando o navegador atrapalha.
+    </div>
+</section>
+
+<section class="mt-8">
+    <header class="mb-3">
+        <h2 class="text-lg font-semibold text-fg-primary">Mapeamento de caminhos</h2>
+        <p class="text-sm text-fg-secondary mt-1">
+            O aviso diz <em>onde</em> olhar, então o caminho precisa estar escrito do jeito que o media server
+            enxerga. Se o brarr e ele montam a mídia no mesmo lugar, não há nada a configurar.
+        </p>
+    </header>
+    {% include "partials/media_server_mappings.html" %}
+</section>
+
+{% endblock %}
