@@ -242,6 +242,26 @@ pub trait MediaServer: Send + Sync {
         &'a self,
         updates: &'a [LibraryUpdate],
     ) -> ServerFuture<'a, Result<(), MediaServerError>>;
+
+    /// Ask the server to rescan everything it serves.
+    ///
+    /// A different call from [`Self::notify_updated`], and not a loop
+    /// over it — measured against a real Emby 4.9.5: handing
+    /// `Library/Media/Updated` the *library's own root* is accepted with
+    /// a `204` and does nothing, while `Library/Refresh` indexed 185
+    /// titles immediately. Neither \*arr has this action at all (they
+    /// only ever report one title at a time), which is why the endpoint
+    /// looked unused when the dialects were first read.
+    ///
+    /// This is the recovery path: the per-import notification fires once
+    /// and cannot be replayed, so an operator who fixes a misconfigured
+    /// mapping needs some way to say "look again".
+    ///
+    /// # Errors
+    ///
+    /// - [`MediaServerError::Auth`] when the token is refused.
+    /// - [`MediaServerError::Transport`] when the host is unreachable.
+    fn rescan_all(&self) -> ServerFuture<'_, Result<(), MediaServerError>>;
 }
 
 /// Build the client matching `config.kind`.

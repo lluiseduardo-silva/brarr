@@ -392,6 +392,58 @@ async fn notifying_nothing_touches_no_network() {
     assert!(server.received_requests().await.unwrap().is_empty());
 }
 
+#[tokio::test]
+async fn rescan_all_is_a_different_call_on_each_dialect() {
+    // Measured against a real Emby 4.9.5 before it was written: handing
+    // `Library/Media/Updated` the library's own root is accepted with a
+    // 204 and indexes nothing, while `Library/Refresh` indexed 185
+    // titles at once. Neither *arr has this action, which is why the
+    // endpoint looked unused when the dialects were first read.
+    let emby = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/Library/Refresh"))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&emby)
+        .await;
+    build(config(&emby, MediaServerKind::Emby, API_KEY))
+        .unwrap()
+        .rescan_all()
+        .await
+        .expect("refreshed");
+    let updates = emby
+        .received_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.url.path().contains("Media/Updated"))
+        .count();
+    assert_eq!(updates, 0, "a rescan is not a loop over notify_updated");
+
+    // Plex has no equivalent endpoint: the same section refresh with the
+    // `path` left off is what its own "Scan Library Files" does.
+    let plex = MockServer::start().await;
+    mount_sections(&plex).await;
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/library/sections/\d+/refresh$"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(3)
+        .mount(&plex)
+        .await;
+    build(config(&plex, MediaServerKind::Plex, TOKEN))
+        .unwrap()
+        .rescan_all()
+        .await
+        .expect("one per section");
+    for request in plex.received_requests().await.unwrap() {
+        assert!(
+            !request.url.query_pairs().any(|(k, _)| k == "path"),
+            "a full scan is the same endpoint without a path: {}",
+            request.url
+        );
+    }
+}
+
 // ─── The Plex sign-in ───────────────────────────────────────────────
 
 fn login(server: &MockServer) -> PlexLogin {

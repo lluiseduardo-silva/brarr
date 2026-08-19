@@ -162,6 +162,19 @@ impl PlexClient {
         Ok(payload.media_container.version.unwrap_or_default())
     }
 
+    /// Ask one section to rescan itself, top to bottom.
+    ///
+    /// The same endpoint as [`Self::refresh`] with the `path` left off —
+    /// which is what the Plex web UI's "Scan Library Files" does.
+    async fn refresh_all(&self, section_id: &str) -> Result<(), MediaServerError> {
+        let url = endpoint(
+            &self.config.base_url,
+            &format!("library/sections/{section_id}/refresh"),
+        )?;
+        self.get_text(url).await?;
+        Ok(())
+    }
+
     /// Ask one section to rescan one directory.
     async fn refresh(&self, section_id: &str, path: &str) -> Result<(), MediaServerError> {
         let mut url = endpoint(
@@ -220,6 +233,15 @@ impl MediaServer for PlexClient {
                         self.refresh(&library.id, &path).await?;
                     }
                 }
+            }
+            Ok(())
+        })
+    }
+
+    fn rescan_all(&self) -> ServerFuture<'_, Result<(), MediaServerError>> {
+        Box::pin(async move {
+            for library in self.sections().await? {
+                self.refresh_all(&library.id).await?;
             }
             Ok(())
         })

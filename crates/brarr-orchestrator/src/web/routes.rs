@@ -7054,7 +7054,7 @@ async fn media_servers_rescan(
     Path(id): Path<String>,
 ) -> Result<Response, AppError> {
     let uuid = parse_media_server_id(&id)?;
-    crate::notify::rescan_roots(&state, uuid).await?;
+    crate::notify::rescan_all(&state, uuid).await?;
     // The row carries the outcome, so re-read rather than guess: a
     // failure landed in `last_error` and the badge has to show it.
     let row = media_servers::get_by_id(state.pool(), uuid).await?;
@@ -7062,7 +7062,7 @@ async fn media_servers_rescan(
         None => PingBadge {
             ok: true,
             label: "avisado".to_owned(),
-            detail: "o servidor foi mandado varrer as pastas raiz".to_owned(),
+            detail: "o servidor foi mandado varrer as bibliotecas dele".to_owned(),
         },
         Some(error) => PingBadge {
             ok: false,

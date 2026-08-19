@@ -140,7 +140,9 @@ Implemented end-to-end pipeline plus rules engine, orchestrator service, and WAS
 
   **E o botão "testar" mentia**: provava a credencial e ficava verde enquanto todo aviso futuro seria recusado — a mesma armadilha do `/identity`, um nível acima. Agora ele confere se as pastas raiz caem em alguma biblioteca e diz o que vai acontecer. Junto veio **"avisar agora"** (`POST /media-servers/{id}/rescan`), porque o aviso automático dispara uma vez e não se repete: corrigir o mapeamento não fazia nada pelo que já estava em disco. Ele manda varrer as **pastas raiz**, não os títulos recentes — limitado por quantas raízes existem em vez de por quanto passou despercebido, e idempotente.
 
-1299 tests pass (`cargo test --workspace --all-targets`). `INITIAL_PROMPT.md` remains the authoritative spec — consult before adding crates, dependencies, or making architectural decisions.
+- **"Varrer tudo" não é um laço sobre "avisei isto"** (v0.21.2, medido contra um Emby 4.9.5 real): `Library/Media/Updated` recebendo a **própria raiz da biblioteca** responde `204` e não indexa nada, enquanto `Library/Refresh` indexou 185 títulos na hora. O botão "avisar agora" mandava as pastas raiz pelo caminho de notificação — certo no Plex (a mesma rota sem `path` é o "Scan Library Files" dele) e inerte no Emby. Virou `MediaServer::rescan_all`, um método próprio com implementação por dialeto. **Nenhum dos dois \*arr tem essa ação** — eles só reportam um título por vez —, e é por isso que o `/Library/Refresh` parecia rota morta na primeira leitura dos dialetos. De passagem ficou provado que o caminho incremental funciona: uma pasta nova + `Media/Updated` **só nela** apareceu no Emby, mas em **~60 s**, porque ele enfileira mudanças de biblioteca em lote (`LibraryMonitorDelay`). Uma medição de 25 s teria concluído o oposto.
+
+1300 tests pass (`cargo test --workspace --all-targets`). `INITIAL_PROMPT.md` remains the authoritative spec — consult before adding crates, dependencies, or making architectural decisions.
 
 ### Running the orchestrator
 

@@ -240,6 +240,14 @@ impl MediaServer for MediaBrowserClient {
             Ok(())
         })
     }
+
+    fn rescan_all(&self) -> ServerFuture<'_, Result<(), MediaServerError>> {
+        Box::pin(async move {
+            let url = self.endpoint("Library/Refresh")?;
+            self.send(self.http.post(url)).await?;
+            Ok(())
+        })
+    }
 }
 
 #[derive(Debug, serde::Serialize)]

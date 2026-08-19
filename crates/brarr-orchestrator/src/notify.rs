@@ -165,39 +165,46 @@ pub async fn imported(state: &AppState, files: &[PathBuf]) {
     }
 }
 
-/// Ask one server to rescan every root folder that maps into it.
+/// Ask one server to rescan everything it serves — the recovery button.
 ///
-/// The recovery action, and it exists because the automatic path cannot
-/// be replayed: [`imported`] fires once, from the import pass, and a
-/// notification that failed for a reason the operator then *fixes* — a
-/// missing path mapping, most of the time — has nothing to retry it.
-/// Before this, correcting the mapping did nothing for the titles
-/// already on disk, and the only recourse was waiting for the media
-/// server's own scan.
+/// Exists because the automatic notification cannot be replayed:
+/// [`imported`] fires once, from the import pass, and a notification
+/// refused for a reason the operator then *fixes* — a wrong mapping,
+/// most of the time — has nothing to retry it.
 ///
-/// It sends the **root folders** rather than the recently imported
-/// titles: it is bounded by how many roots exist (three here) instead of
-/// by how much went unnoticed, it is idempotent, and "rescan where brarr
-/// puts things" recovers any number of missed notifications at once.
+/// It calls [`brarr_media_server::MediaServer::rescan_all`] rather than
+/// re-sending paths, and that distinction was measured rather than
+/// assumed: handing Emby its own library root through
+/// `Library/Media/Updated` is accepted with a `204` and does nothing,
+/// while `Library/Refresh` indexed 185 titles at once.
 ///
 /// # Errors
 ///
-/// Returns [`crate::AppError::Database`] when the server, its mappings
-/// or the root folders cannot be read. The notification itself is
-/// best-effort and reports through the row, like every other one.
-pub async fn rescan_roots(state: &AppState, server_id: uuid::Uuid) -> Result<(), crate::AppError> {
+/// Returns [`crate::AppError::Database`] when the server cannot be read,
+/// and [`crate::AppError::InvalidInput`] when its stored configuration
+/// cannot produce a client. The rescan itself is best-effort and reports
+/// through the row, like every other notification.
+pub async fn rescan_all(state: &AppState, server_id: uuid::Uuid) -> Result<(), crate::AppError> {
     let server = media_servers::get_by_id(state.pool(), server_id).await?;
-    let roots: Vec<PathBuf> = root_folders::list_all(state.pool())
-        .await?
-        .into_iter()
-        .map(|r| r.path)
-        .collect();
-    if roots.is_empty() {
-        return Err(crate::AppError::InvalidInput(
-            "nenhuma pasta raiz configurada — não há o que mandar varrer".into(),
-        ));
+    let client = server.to_config().and_then(|config| {
+        brarr_media_server::build(config)
+            .map_err(|e| crate::AppError::InvalidInput(format!("{}: {e}", server.name)))
+    })?;
+
+    match client.rescan_all().await {
+        Ok(()) => {
+            info!(
+                target: "brarr_orchestrator::notify",
+                server = %server.name,
+                kind = server.kind.label(),
+                "asked the media server to rescan everything"
+            );
+            if let Err(e) = media_servers::mark_notified(state.pool(), server.id).await {
+                warn!(target: "brarr_orchestrator::notify", error = %e, "could not record the rescan");
+            }
+        }
+        Err(e) => record_failure(state, server.id, &server.name, &e.to_string()).await,
     }
-    tell(state, &server, &roots, &roots).await;
     Ok(())
 }
 
