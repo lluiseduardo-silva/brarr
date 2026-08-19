@@ -7015,7 +7015,7 @@ async fn media_servers_test(
                         ok: true,
                         label: format!("conectado · {version}"),
                         detail: format!(
-                            "bibliotecas: {}. Nenhuma cobre {} — o brarr vai re-ancorar o                              caminho em {} na hora de avisar. Funciona; um mapeamento de                              caminho deixa exato em vez de por semelhança.",
+                            "bibliotecas: {}. Nenhuma delas cobre {} — o brarr re-ancora o caminho em {} na hora de avisar, que é o que o *arr faz. Funciona assim; um mapeamento de caminho troca semelhança por exatidão.",
                             names.join(", "),
                             uncovered.join(", "),
                             known.join(", ")
