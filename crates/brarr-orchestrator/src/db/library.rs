@@ -500,7 +500,7 @@ pub async fn upsert(pool: &Pool, new: &NewLibraryItem) -> Result<LibraryItem, Ap
         ));
     }
 
-    let mut tx = pool.begin().await?;
+    let mut tx = crate::db::begin_write(pool).await?;
     let now = OffsetDateTime::now_utc().unix_timestamp();
 
     let id = match find_by_any_id(&mut tx, media_type, &new.ids).await? {
@@ -972,7 +972,7 @@ pub async fn set_monitored_cascading(
     // Season 0 is only spared when turning *on*.
     let floor = if monitored { 0 } else { -1 };
 
-    let mut tx = pool.begin().await?;
+    let mut tx = crate::db::begin_write(pool).await?;
     let mut changed = 0;
     for id in ids {
         changed += sqlx::query("UPDATE library_items SET monitored = ? WHERE id = ?")
@@ -1016,7 +1016,7 @@ pub async fn set_profile_many(
     if ids.is_empty() {
         return Ok(0);
     }
-    let mut tx = pool.begin().await?;
+    let mut tx = crate::db::begin_write(pool).await?;
     let mut changed = 0;
     for id in ids {
         changed += sqlx::query("UPDATE library_items SET profile_id = ? WHERE id = ?")
@@ -1049,7 +1049,7 @@ pub async fn set_root_folder_many(
     if ids.is_empty() {
         return Ok(0);
     }
-    let mut tx = pool.begin().await?;
+    let mut tx = crate::db::begin_write(pool).await?;
     let mut changed = 0;
     for id in ids {
         changed += sqlx::query("UPDATE library_items SET root_folder = ? WHERE id = ?")
@@ -1484,7 +1484,7 @@ pub(crate) async fn write_tree(
     item_id: Uuid,
     seasons: &[DecidedSeason],
 ) -> Result<(), AppError> {
-    let mut tx = pool.begin().await?;
+    let mut tx = crate::db::begin_write(pool).await?;
 
     // Every read from here on goes through `&mut *tx`, never the pool:
     // `open_memory` runs with `max_connections(1)`, so a pool query
