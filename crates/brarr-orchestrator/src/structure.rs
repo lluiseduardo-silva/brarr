@@ -166,7 +166,11 @@ pub struct StructurePlan {
     pub source: MetadataSource,
     /// Every stored episode that survives, and where it lands.
     pub pairs: Vec<Pairing>,
-    /// Stored episodes nothing claimed. **Must be empty to commit.**
+    /// Stored episodes nothing claimed. Pruned by the commit; what
+    /// *refuses* one is [`StructurePlan::grabs_at_risk`] being non-zero,
+    /// not this being non-empty — see [`refusal`]. Still counted for the
+    /// preview, because "the tree lost rows" is worth reading even when
+    /// none of them held a file.
     pub orphans: Vec<Orphan>,
     /// Incoming episodes with no stored counterpart.
     pub added: usize,
@@ -912,6 +916,20 @@ fn guard_source(
 
 /// Why this plan would be refused, or `None` if it would commit.
 ///
+/// **The gate is spent on files, not on rows.** It used to refuse
+/// whenever any stored episode fell outside the incoming tree, while the
+/// sentence it produced reported the acquisitions — so "levando 0
+/// aquisição(ões)" was an ordinary refusal rather than the contradiction
+/// it reads as. The cost is not one skipped write: a provider that
+/// publishes a placeholder and later withdraws it leaves a row nothing
+/// will claim again, and the refusal then repeats on every refresh until
+/// somebody notices the title stopped updating.
+///
+/// The file guarantee never lived here. [`crate::db::library::write_tree`]
+/// counts the item's orphaned episode grabs before and after the prune
+/// **inside the write transaction** and rolls back on a rise; that is the
+/// authoritative net, on real rows, at the moment of the write.
+///
 /// The sentence and the gate are the same code on purpose. A screen that
 /// previews a write has to say what the write would say, and the way
 /// those drift is that one of them is a second copy written later — so
@@ -920,11 +938,11 @@ fn guard_source(
 /// happens to be rendering.
 #[must_use]
 pub fn refusal(plan: &StructurePlan) -> Option<String> {
-    if !plan.orphans.is_empty() {
+    let at_risk = plan.grabs_at_risk();
+    if at_risk > 0 {
         return Some(format!(
-            "recusado: {} episódio(s) armazenado(s) ficariam fora da árvore, levando {} aquisição(ões)",
-            plan.orphans.len(),
-            plan.grabs_at_risk()
+            "recusado: {at_risk} aquisição(ões) perderiam o episódio a que estão ligadas,              em {} episódio(s) armazenado(s) que ficariam fora da árvore",
+            plan.orphans.len()
         ));
     }
 
@@ -2106,6 +2124,72 @@ mod tests {
         apply(&pool, item, &tree(MetadataSource::Tmdb, shrunk))
             .await
             .expect_err("dropping an episode that holds a file is refused");
+        assert_eq!(orphan_count(&pool).await, 0);
+    }
+
+    /// **The gate protects files, so it has to be spent on files.**
+    ///
+    /// It used to refuse on the orphan *count*, while its own sentence
+    /// reported the acquisitions — so a refusal reading "levando 0
+    /// aquisição(ões)" was the ordinary case, not a contradiction anyone
+    /// would notice.
+    ///
+    /// What that costs is not one skipped write. A provider that
+    /// publishes a placeholder and later withdraws it leaves behind a
+    /// stored row nothing will ever claim again, and the refusal repeats
+    /// on **every** refresh: the series stops updating for good. Found
+    /// in production on Frieren — TheTVDB carried an `S03E01` titled
+    /// literally `TBA` for an announced season, then dropped it, and the
+    /// tree had been frozen for eleven days by the time anyone looked.
+    ///
+    /// Nothing here weakens the file guarantee, because this was never
+    /// the thing holding it: [`library::write_tree`] counts the item's
+    /// orphaned episode grabs before and after the prune **inside the
+    /// same transaction** and rolls the whole write back on a rise. That
+    /// one runs on real rows at the moment of the write; this one is its
+    /// preview-side twin, and a preview that refuses what the write
+    /// would accept is just a second copy that drifted.
+    #[tokio::test]
+    async fn a_plan_whose_orphans_hold_no_file_is_applied() {
+        let pool = open_memory().await.unwrap();
+        let item = series_with(&pool, &[3], true).await;
+
+        // Two of the three come back. The third is a row the provider
+        // withdrew, and nothing was ever acquired for it.
+        let shrunk = vec![incoming(
+            1,
+            (1..=2)
+                .map(|n| TreeEpisode {
+                    air_date: Some(day(i64::from(n))),
+                    ..ep(n, &format!("tmdb-{n}"))
+                })
+                .collect(),
+        )];
+
+        let plan = plan(&pool, item, &tree(MetadataSource::Tmdb, shrunk.clone()))
+            .await
+            .unwrap();
+        assert_eq!(plan.orphans.len(), 1, "the row does fall out of the tree");
+        assert_eq!(
+            plan.grabs_at_risk(),
+            0,
+            "but it takes no acquisition with it"
+        );
+        assert_eq!(
+            refusal(&plan),
+            None,
+            "and nothing it would lose is worth freezing the title over"
+        );
+
+        apply(&pool, item, &tree(MetadataSource::Tmdb, shrunk))
+            .await
+            .expect("a withdrawn placeholder must not pin the tree");
+
+        assert_eq!(
+            library::episodes(&pool, item).await.unwrap().len(),
+            2,
+            "the withdrawn row is pruned"
+        );
         assert_eq!(orphan_count(&pool).await, 0);
     }
 }
