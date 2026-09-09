@@ -82,6 +82,15 @@ pub fn router(state: AppState) -> Router<AppState> {
 /// Auth middleware shared by both webhook routes. Mirrors the Torznab
 /// middleware: bypass first (so trusted LAN peers can wire the
 /// webhook without an apikey), then `?apikey=` / bearer fallback.
+#[allow(
+    clippy::result_large_err,
+    reason = "axum's middleware contract: `IntoResponse` is implemented for \
+              `Result<T, E>` where both sides are responses, and the `Err` is \
+              the refusal that axum unwraps and returns on the spot. \
+              `Box<Response>` is not `IntoResponse`, so boxing would mean \
+              hand-unwrapping at every site to shrink a value whose whole life \
+              is one move up the stack."
+)]
 async fn webhook_apikey_middleware(
     State(state): State<AppState>,
     req: Request,

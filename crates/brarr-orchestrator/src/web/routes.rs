@@ -303,6 +303,15 @@ async fn not_found() -> Result<Response, AppError> {
 /// the peer is a trusted reverse proxy) matches a rule in
 /// `BypassConfig::peers`, auth is skipped. This is logged at `info!`
 /// so the bypass is auditable.
+#[allow(
+    clippy::result_large_err,
+    reason = "axum's middleware contract: `IntoResponse` is implemented for \
+              `Result<T, E>` where both sides are responses, and the `Err` is \
+              the refusal that axum unwraps and returns on the spot. \
+              `Box<Response>` is not `IntoResponse`, so boxing would mean \
+              hand-unwrapping at every site to shrink a value whose whole life \
+              is one move up the stack."
+)]
 async fn auth_middleware(
     State(state): State<AppState>,
     req: Request,

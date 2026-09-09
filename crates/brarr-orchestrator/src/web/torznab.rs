@@ -310,6 +310,15 @@ async fn handle_newznab_download(
 /// When [`AuthConfig::Disabled`] is in effect it always passes through.
 /// On failure it returns `401 Unauthorized` with an XML error payload
 /// (Sonarr renders the body in its "Test" UI).
+#[allow(
+    clippy::result_large_err,
+    reason = "axum's middleware contract: `IntoResponse` is implemented for \
+              `Result<T, E>` where both sides are responses, and the `Err` is \
+              the refusal that axum unwraps and returns on the spot. \
+              `Box<Response>` is not `IntoResponse`, so boxing would mean \
+              hand-unwrapping at every site to shrink a value whose whole life \
+              is one move up the stack."
+)]
 async fn apikey_middleware(
     State(state): State<AppState>,
     req: Request,
