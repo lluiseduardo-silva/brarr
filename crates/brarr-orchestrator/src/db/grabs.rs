@@ -171,6 +171,21 @@ pub enum GrabScope {
     Season,
     /// One episode.
     Episode,
+    /// A season pack whose files have been placed.
+    ///
+    /// The acquisition happened; the coverage is carried by the child
+    /// rows the fan-out wrote, one per episode, and **this row covers
+    /// nothing**. [`Self::Season`] is right between the reservation and
+    /// the import — while the pack is downloading it has to cover the
+    /// whole season, or the sweep would grab every episode beside it —
+    /// and wrong the moment the files land, because by then brarr knows
+    /// exactly which episodes it got. A pack that carried 5 of 26 leaves
+    /// 21 uncovered, which is the truth, rather than claiming a season it
+    /// does not hold.
+    ///
+    /// The row keeps `status = 'imported'`, so it keeps its slot in
+    /// `idx_grabs_unique_item` and the same pack is never grabbed twice.
+    Fanned,
 }
 
 impl GrabScope {
@@ -188,6 +203,15 @@ impl GrabScope {
         }
     }
 
+    /// Whether this scope answers for anything at all.
+    ///
+    /// [`Self::Fanned`] is the one that does not, and it is the reason
+    /// the variant exists rather than being spelled as a NULL somewhere.
+    #[must_use]
+    pub const fn covers_anything(self) -> bool {
+        !matches!(self, Self::Fanned)
+    }
+
     /// Persisted label.
     #[must_use]
     pub fn label(self) -> &'static str {
@@ -195,6 +219,7 @@ impl GrabScope {
             Self::Item => "item",
             Self::Season => "season",
             Self::Episode => "episode",
+            Self::Fanned => "fanned",
         }
     }
 
@@ -209,6 +234,7 @@ impl GrabScope {
             "item" => Ok(Self::Item),
             "season" => Ok(Self::Season),
             "episode" => Ok(Self::Episode),
+            "fanned" => Ok(Self::Fanned),
             other => Err(AppError::InvalidInput(format!(
                 "unknown grabs.scope: {other}"
             ))),
@@ -738,6 +764,7 @@ pub async fn active_for_item(pool: &Pool, item_id: Uuid) -> Result<Vec<Grab>, Ap
 /// | `scope = episode`, `episode_id = X` | episode X only |
 /// | `scope = item` | the whole item — a film, or a full-series grab |
 /// | `scope = season`, `season_number = 4` | every episode of season 4 |
+/// | `scope = fanned` | **nothing** — its children answer |
 /// | `scope = episode`, `episode_id` NULL | **nothing** |
 ///
 /// The season row is why the season has to travel with the question. A
@@ -750,6 +777,12 @@ pub async fn active_for_item(pool: &Pool, item_id: Uuid) -> Result<Vec<Grab>, Ap
 /// answering for the entire series, and the library rendered complete.
 /// The scope survives the FK, so a grab that lost its episode now covers
 /// nothing until [`crate::relink`] puts it back.
+///
+/// The `OR` below is a **whitelist of three**, so a `fanned` pack falls
+/// through it and covers nothing without needing a clause of its own.
+/// That is deliberate rather than an oversight: adding
+/// `OR scope = 'fanned'` in any form would be the bug the variant was
+/// introduced to prevent.
 ///
 /// # Errors
 ///
@@ -849,6 +882,11 @@ pub fn covers_target(
         // An episode answers only for itself — and a row that lost its
         // episode answers for nothing, which is the point of the column.
         GrabScope::Episode => target.episode_id.is_some() && episode_id == target.episode_id,
+        // Fanned out: the children answer. This row is history, and the
+        // barrier key it still holds is what stops the same pack being
+        // grabbed twice. Matches the SQL by *omission* — see
+        // [`blocking_for`].
+        GrabScope::Fanned => false,
     }
 }
 
@@ -1098,6 +1136,96 @@ pub async fn mark_imported(pool: &Pool, id: Uuid, path: &str) -> Result<(), AppE
          imported_path = ?, updated_at = ? WHERE id = ?",
     )
     .bind(path)
+    .bind(OffsetDateTime::now_utc().unix_timestamp())
+    .bind(id.to_string())
+    .execute(pool)
+    .await?;
+    if res.rows_affected() == 0 {
+        return Err(AppError::NotFound(format!("grab {id}")));
+    }
+    Ok(())
+}
+
+/// Record one episode of a season pack on its own row.
+///
+/// The child copies everything that identifies the acquisition — the
+/// provider, the release key, the decision, the protocol and the client
+/// item — and adds the one thing the pack could not carry: which episode
+/// this file is. `scope` stays **derived** through [`GrabScope::of`], so
+/// this is not a seventh way to set it by hand.
+///
+/// `client_item_id` is copied on purpose. It is what lets a later
+/// "esquecer" locate the download and prove the library file is brarr's
+/// before removing it. It is invisible to [`crate::queue`], which filters
+/// on `status IN ('reserved', 'sent', 'downloading', 'completed')` — a
+/// child is born `imported` and never enters the queue.
+///
+/// Returns `Ok(None)` when a live grab of the same release already
+/// answers for that episode: the fan-out is a sweep and has to be safe to
+/// re-run over a pack it has already placed.
+///
+/// # Errors
+///
+/// Returns [`AppError::Database`] on SQL failure.
+pub async fn fan_out_episode(
+    pool: &Pool,
+    parent: &Grab,
+    episode_id: Uuid,
+    imported_path: &str,
+) -> Result<Option<Uuid>, AppError> {
+    let id = Uuid::new_v4();
+    let now = OffsetDateTime::now_utc().unix_timestamp();
+    // Bare `ON CONFLICT DO NOTHING`, for the reason `reserve` gives.
+    let res = sqlx::query(
+        "INSERT INTO grabs (             id, item_id, scope, episode_id, season_number, decision_id, provider_id,             provider_name, release_id_remote, release_name, download_url, protocol,             client_id, client_item_id, status, imported_path, parent_grab_id,             grabbed_at, updated_at          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'imported', ?, ?, ?, ?)          ON CONFLICT DO NOTHING",
+    )
+    .bind(id.to_string())
+    .bind(parent.item_id.to_string())
+    .bind(GrabScope::of(Some(episode_id), parent.season_number).label())
+    .bind(episode_id.to_string())
+    .bind(parent.season_number.map(i64::from))
+    .bind(parent.decision_id.map(|d| d.to_string()))
+    .bind(parent.provider_id.map(|p| p.to_string()))
+    .bind(&parent.provider_name)
+    .bind(&parent.release_id_remote)
+    .bind(&parent.release_name)
+    .bind(parent.download_url.as_deref())
+    .bind(parent.protocol.label())
+    .bind(parent.client_id.map(|c| c.to_string()))
+    .bind(parent.client_item_id.as_deref())
+    .bind(imported_path)
+    .bind(parent.id.to_string())
+    .bind(now)
+    .bind(now)
+    .execute(pool)
+    .await?;
+    Ok((res.rows_affected() > 0).then_some(id))
+}
+
+/// The pack's own row, once its files have been placed.
+///
+/// The one place `scope` changes after insert, and it is a **transition**
+/// rather than a derivation: before the import a pack has to cover its
+/// whole season or the sweep would grab every episode beside it; after
+/// it, the children say precisely which episodes arrived. See
+/// [`GrabScope::Fanned`].
+///
+/// `imported_path` is cleared deliberately. [`imported_present`] filters
+/// on it, so a pack with no path of its own drops out of the verification
+/// pass and each child is stat'ed instead — which is the whole win, and
+/// the reason the season folder was not recorded here: `verify::is_gone`
+/// answers `false` for a directory, so a folder that still exists would
+/// have masked every deleted episode inside it forever.
+///
+/// # Errors
+///
+/// Returns [`AppError::NotFound`] when the grab is gone, or
+/// [`AppError::Database`] on SQL failure.
+pub async fn mark_fanned_out(pool: &Pool, id: Uuid, report: Option<&str>) -> Result<(), AppError> {
+    let res = sqlx::query(
+        "UPDATE grabs SET status = 'imported', scope = 'fanned', error = NULL,          import_wait_reason = NULL, imported_path = NULL, pack_report = ?,          updated_at = ? WHERE id = ?",
+    )
+    .bind(report)
     .bind(OffsetDateTime::now_utc().unix_timestamp())
     .bind(id.to_string())
     .execute(pool)
@@ -2045,6 +2173,132 @@ mod tests {
         assert!(imported_present(&pool).await.unwrap().is_empty());
     }
 
+    /// A pack that has been placed is stat'ed through its children, not
+    /// through a path of its own. Recording the season folder here was
+    /// the cheap alternative and it is unsound: `verify::is_gone` answers
+    /// `false` for a directory, so a folder that still exists would mask
+    /// every episode deleted inside it, forever — the same class of lie
+    /// as one file answering for a season.
+    #[tokio::test]
+    async fn a_fanned_pack_is_verified_through_its_children() {
+        let pool = open_memory().await.unwrap();
+        let (_, provider_id) = fixture(&pool).await;
+        let series = library::upsert(&pool, &Seed::series(30991, "Cowboy Bebop").build())
+            .await
+            .unwrap();
+        library::sync_seasons(
+            &pool,
+            series.id,
+            &[NewSeason {
+                season_number: 1,
+                episode_count: 2,
+                air_date: None,
+                episodes: vec![seed::episode(1), seed::episode(2)],
+            }],
+        )
+        .await
+        .unwrap();
+        let eps = library::episodes(&pool, series.id).await.unwrap();
+
+        let mut pack = new_grab(series.id, provider_id, "cowboy-s01");
+        pack.season_number = Some(1);
+        let pack = reserve(&pool, &pack).await.unwrap().unwrap();
+
+        for (n, ep) in eps.iter().enumerate() {
+            let path = format!("/midias/Animes/Cowboy Bebop/Season 01/E{n}.mkv");
+            assert!(
+                fan_out_episode(&pool, &pack, ep.id, &path)
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+        }
+        mark_fanned_out(&pool, pack.id, None).await.unwrap();
+
+        let checked = imported_present(&pool).await.unwrap();
+        assert_eq!(checked.len(), 2, "one row per file, and not the pack");
+        assert!(
+            !checked.iter().any(|g| g.id == pack.id),
+            "the pack has no path of its own to stat"
+        );
+
+        // Each child answers for its own episode and nothing else.
+        for (n, ep) in eps.iter().enumerate() {
+            let holding = blocking_for(&pool, series.id, GrabTarget::episode(ep.id, 1))
+                .await
+                .unwrap();
+            assert_eq!(holding.len(), 1, "episode {n} is held by exactly one row");
+            assert_eq!(holding[0].scope, GrabScope::Episode);
+        }
+    }
+
+    /// The fan-out is a sweep, so placing a pack twice must write one set
+    /// of rows. The second pass is refused by the same partial unique
+    /// index that stops the scanner grabbing an episode twice.
+    #[tokio::test]
+    async fn fanning_the_same_episode_twice_writes_one_row() {
+        let pool = open_memory().await.unwrap();
+        let (_, provider_id) = fixture(&pool).await;
+        let series = library::upsert(&pool, &Seed::series(30992, "Tremembé").build())
+            .await
+            .unwrap();
+        library::sync_seasons(
+            &pool,
+            series.id,
+            &[NewSeason {
+                season_number: 1,
+                episode_count: 1,
+                air_date: None,
+                episodes: vec![seed::episode(1)],
+            }],
+        )
+        .await
+        .unwrap();
+        let ep = library::episodes(&pool, series.id).await.unwrap()[0].id;
+
+        let mut pack = new_grab(series.id, provider_id, "tremembe-s01");
+        pack.season_number = Some(1);
+        let pack = reserve(&pool, &pack).await.unwrap().unwrap();
+
+        assert!(
+            fan_out_episode(&pool, &pack, ep, "/midias/a.mkv")
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            fan_out_episode(&pool, &pack, ep, "/midias/a.mkv")
+                .await
+                .unwrap()
+                .is_none(),
+            "the second pass has to be a no-op, not a second row"
+        );
+        assert_eq!(for_item(&pool, series.id).await.unwrap().len(), 2);
+    }
+
+    /// Fanning out gives up the coverage and keeps the barrier. The row
+    /// still occupies `idx_grabs_unique_item`, so the same pack cannot be
+    /// downloaded a second time while its files are on disk.
+    #[tokio::test]
+    async fn a_fanned_pack_keeps_its_barrier_key() {
+        let pool = open_memory().await.unwrap();
+        let (item_id, provider_id) = fixture(&pool).await;
+
+        let mut pack = new_grab(item_id, provider_id, "pack");
+        pack.season_number = Some(1);
+        let pack = reserve(&pool, &pack).await.unwrap().unwrap();
+        mark_fanned_out(&pool, pack.id, Some("2 arquivos sem par"))
+            .await
+            .unwrap();
+
+        let mut again = new_grab(item_id, provider_id, "pack");
+        again.season_number = Some(1);
+        assert!(
+            reserve(&pool, &again).await.unwrap().is_none(),
+            "history that still holds files is not re-acquirable"
+        );
+    }
+
     #[tokio::test]
     async fn a_season_pack_covers_its_own_season_and_no_other() {
         let pool = open_memory().await.unwrap();
@@ -2328,7 +2582,23 @@ mod tests {
             .await
             .unwrap();
 
+        // The sixth shape: a pack that has been fanned out. It answers
+        // for nothing, and the SQL says so by *omitting* it from the
+        // whitelist rather than by a clause — which is exactly the kind
+        // of asymmetry this matrix exists to catch.
+        let mut fanned = new_grab(series.id, provider_id, "fanned");
+        fanned.season_number = Some(5);
+        let fanned = reserve(&pool, &fanned).await.unwrap().unwrap();
+        mark_fanned_out(&pool, fanned.id, Some("1 arquivo sem par"))
+            .await
+            .unwrap();
+
         let all = for_item(&pool, series.id).await.unwrap();
+        assert!(
+            all.iter()
+                .any(|g| g.id == fanned.id && g.scope == GrabScope::Fanned),
+            "the fanned row has to be in the matrix to be confronted"
+        );
         for target in [
             GrabTarget::item(),
             GrabTarget::episode(e4.id, 4),
