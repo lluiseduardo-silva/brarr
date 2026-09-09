@@ -1163,7 +1163,29 @@ fn marker_at(bytes: &[u8], at: usize) -> Option<Marker> {
     cross_marker(bytes, at)
 }
 
+/// Scan heights that turn up glued to a marker when the release group
+/// forgot the separator, as the digit run they arrive as: `1080p`
+/// reaches [`digits`] as `1080` followed by `p`.
+///
+/// No four-digit height ends in a three-digit one, so a run splits in at
+/// most one place and the reading is never ambiguous.
+const SCAN_HEIGHTS: [&[u8]; 6] = [b"2160", b"1080", b"720", b"576", b"540", b"480"];
+
 /// `s<digits>e<digits>`, any padding.
+///
+/// The marker must end on a boundary, for the reason [`cross_marker`]
+/// gives: a digit run swallows whatever number is glued to it. Measured
+/// on this operator's disk — 26 files named
+/// `Cowboy Bebop S01E011080p BluRay FLAC 5.1 H264 DUAL-Zero-Raws.mkv`
+/// read as season 1 **episode 11080**, and one marker read wrong is not
+/// ambiguous, so `adopt::parse_marker` accepted it and the disk import
+/// answered `S01E11080 não existe no catálogo` — blaming the catalogue
+/// for a parser defect, and leaving all 26 files unadoptable.
+///
+/// Capping the run instead was refused, not overlooked: three digits
+/// turns `e011080` into episode 11, a number that *does* exist in the
+/// catalogue, so the file would be adopted against the wrong episode in
+/// silence. A cap carries no evidence about where the run ends.
 fn season_episode_marker(bytes: &[u8], at: usize) -> Option<Marker> {
     // Glued to a word, it is part of that word: `Seasons01e02` is not a
     // marker, and reading it as one would adopt a file against an episode
@@ -1175,13 +1197,74 @@ fn season_episode_marker(bytes: &[u8], at: usize) -> Option<Marker> {
     if bytes.get(after_season) != Some(&b'e') {
         return None;
     }
-    let (episode, end) = digits(bytes, after_season + 1, usize::MAX)?;
-    let chained = bytes.get(end) == Some(&b'e') && digits(bytes, end + 1, usize::MAX).is_some();
+    let (episode, mut end) = episode_group(bytes, after_season + 1)?;
+
+    // Every further `e<digits>` belongs to this marker. Only the first is
+    // reported — what the sweep has always done — but the whole chain is
+    // consumed, so the boundary below is asked of `S05E33E34` as a whole
+    // and the file still reaches `adopt` as ambiguous rather than as a
+    // name nobody could read.
+    let mut chained = false;
+    while bytes.get(end) == Some(&b'e') {
+        let Some((_, next)) = episode_group(bytes, end + 1) else {
+            break;
+        };
+        chained = true;
+        end = next;
+    }
+    if bytes.get(end).is_some_and(u8::is_ascii_alphanumeric) {
+        return None;
+    }
     Some(Marker {
         season,
         episode,
         chained,
     })
+}
+
+/// One `e<digits>` group: the number it names, and the index just past
+/// the text it owns.
+///
+/// The run is read whole first. When it runs straight into `p` or `i`
+/// and its tail spells a scan height, the height is not part of the
+/// episode: `s01e011080p` is episode 1 at 1080p. The head must be
+/// non-empty — `s01e1080p` names no episode, and manufacturing one out
+/// of the resolution is the failure this guards against. Anything else
+/// glued to the run is left glued, so the caller's boundary check
+/// refuses it: `s01e0110bit` is not episode 110 and is not worth a
+/// guess.
+fn episode_group(bytes: &[u8], from: usize) -> Option<(u16, usize)> {
+    // The run's extent is measured before anything is parsed, which
+    // [`digits`] cannot do: it parses the whole run into a `u16` first,
+    // so `s01e261080p` — run `261080`, past 65 535 — yielded nothing at
+    // all, while `s01e011080p` yielded episode 11080. Two spellings of
+    // one defect, and the split has to see both.
+    let mut end = from;
+    while end < bytes.len() && bytes[end].is_ascii_digit() {
+        end += 1;
+    }
+    if end == from {
+        return None;
+    }
+    if matches!(bytes.get(end), Some(b'p' | b'i')) {
+        for height in SCAN_HEIGHTS {
+            let Some(split) = end.checked_sub(height.len()) else {
+                continue;
+            };
+            if split <= from || bytes.get(split..end) != Some(height) {
+                continue;
+            }
+            // Past the `p`/`i` too: that byte is the resolution's, and
+            // the caller asks for a boundary after it.
+            return Some((number(bytes.get(from..split)?)?, end + 1));
+        }
+    }
+    Some((number(bytes.get(from..end)?)?, end))
+}
+
+/// A run of ASCII digits as a number, or `None` when it does not fit.
+fn number(run: &[u8]) -> Option<u16> {
+    std::str::from_utf8(run).ok()?.parse().ok()
 }
 
 /// `<digits>x<digits>`, the spelling `1x02` uses.
@@ -1603,6 +1686,71 @@ mod tests {
         assert!(!title_matches_episode("Seasons01e02", 1, 2));
         assert!(!title_matches_episode("Show.4x070p", 4, 7));
         assert!(title_matches_episode("[Group] Show - S04E07 [1080p]", 4, 7));
+    }
+
+    /// A release that forgot the separator, verbatim from this
+    /// operator's disk on 2026-09-09: 26 files, `S01E011080p` through
+    /// `S01E261080p`. Read greedily they are episodes 11080..=261080,
+    /// none of which exist, so `adopt::parse_marker` accepted the wrong
+    /// number — one marker read wrong is not ambiguous — and the disk
+    /// import answered `S01E11080 não existe no catálogo`, blaming the
+    /// catalogue for a parser defect and leaving all 26 unadoptable.
+    #[test]
+    fn a_resolution_glued_to_the_marker_is_not_part_of_the_episode() {
+        let found =
+            episode_markers("Cowboy Bebop S01E011080p BluRay FLAC 5.1 H264 DUAL-Zero-Raws.mkv");
+        assert_eq!(found.len(), 1, "the name names one episode, not two");
+        assert_eq!((found[0].season, found[0].episode), (1, 1));
+        assert!(!found[0].chained);
+
+        // The far end of the same release, where the episode is two
+        // digits and the split has to land in a different place.
+        assert!(title_matches_episode(
+            "Cowboy Bebop S01E261080p BluRay FLAC 5.1 H264 DUAL-Zero-Raws.mkv",
+            1,
+            26
+        ));
+        // The heights that are not 1080, and the interlaced spelling.
+        assert!(title_matches_episode("Show.S02E03720p.WEB.mkv", 2, 3));
+        assert!(title_matches_episode("Show.S02E032160p.WEB.mkv", 2, 3));
+        assert!(title_matches_episode("Show.S02E031080i.HDTV.mkv", 2, 3));
+    }
+
+    /// The split needs an episode in front of the height. Without one
+    /// the only number available *is* the resolution, and handing that
+    /// back would invent an episode — the failure the split exists to
+    /// prevent.
+    #[test]
+    fn a_bare_resolution_after_the_marker_names_no_episode() {
+        assert!(episode_markers("Show.S01E1080p.mkv").is_empty());
+        assert!(episode_markers("Show.S1E720p.mkv").is_empty());
+    }
+
+    /// Everything else glued to the run is refused, not split: the
+    /// digits carry no evidence of where they end, and a wrong episode
+    /// costs a wrong barrier key while a refusal costs one click in the
+    /// picker.
+    #[test]
+    fn other_text_glued_to_the_marker_refuses_rather_than_guesses() {
+        assert!(episode_markers("Show.S01E0110bit.mkv").is_empty());
+        assert!(episode_markers("Show.S01E01v2.mkv").is_empty());
+    }
+
+    /// The chain is consumed before the boundary is asked for, so a
+    /// two-episode file is still *reported* as one and still carries
+    /// `chained` — `adopt` has to tell the operator the name cites more
+    /// than one episode, not that it could not read it.
+    #[test]
+    fn a_chained_marker_survives_the_boundary_rule() {
+        let found = episode_markers("Show.S05E33E34.1080p.mkv");
+        assert_eq!(found.len(), 1);
+        assert_eq!((found[0].season, found[0].episode), (5, 33));
+        assert!(found[0].chained);
+
+        let glued = episode_markers("Show.S05E33E341080p.mkv");
+        assert_eq!(glued.len(), 1);
+        assert_eq!((glued[0].season, glued[0].episode), (5, 33));
+        assert!(glued[0].chained, "the glued height must not hide the chain");
     }
 
     #[test]

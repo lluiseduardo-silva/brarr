@@ -225,8 +225,12 @@ pub(crate) fn validate_folder(folder: &Path) -> Result<(), AppError> {
 /// Why a name yielded no usable episode marker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MarkerError {
-    /// No `SxxEyy` / `1x02` anywhere. Absolute anime numbering, single
-    /// file season packs and date-based episodes all land here.
+    /// No `SxxEyy` / `1x02` anywhere the parser will accept. Absolute
+    /// anime numbering, single file season packs and date-based episodes
+    /// all land here — and so does a marker glued to text that changes
+    /// what it says (`S01E0110bit`), which `scan::season_episode_marker`
+    /// refuses rather than guesses at. The two are one variant because
+    /// the operator's next move is the same: pick the episode.
     Absent,
     /// More than one distinct marker, or a chained `S01E01E02`. One file
     /// cannot hold two barrier keys, and recording it against one of the
@@ -1283,6 +1287,33 @@ mod tests {
         );
         // The same marker twice is one decision, not an ambiguity.
         assert_eq!(parse_marker("S04E07/The.Boys.S04E07.mkv"), Ok((4, 7)));
+
+        // The 26 files this parser could not read, verbatim from the
+        // operator's disk. Not ambiguous — one marker, read wrong — so
+        // `parse_marker` answered `Ok((1, 11080))` and `resolve_target`
+        // said `S01E11080 não existe no catálogo`, blaming the catalogue
+        // and leaving every one of them unadoptable.
+        assert_eq!(
+            parse_marker("Cowboy Bebop S01E011080p BluRay FLAC 5.1 H264 DUAL-Zero-Raws.mkv"),
+            Ok((1, 1))
+        );
+        assert_eq!(
+            parse_marker("Cowboy Bebop S01E261080p BluRay FLAC 5.1 H264 DUAL-Zero-Raws.mkv"),
+            Ok((1, 26))
+        );
+        // Any other text glued to the run is refused, not split: the
+        // digits carry no evidence of where they end, and a wrong
+        // episode costs a barrier key while a refusal costs one click.
+        assert_eq!(
+            parse_marker("Show.S01E0110bit.mkv"),
+            Err(MarkerError::Absent)
+        );
+        assert_eq!(parse_marker("Show.S01E01v2.mkv"), Err(MarkerError::Absent));
+        // Chained stays chained with the height glued on.
+        assert_eq!(
+            parse_marker("Show.S05E33E341080p.mkv"),
+            Err(MarkerError::Ambiguous)
+        );
     }
 
     #[test]
