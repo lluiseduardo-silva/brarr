@@ -49,6 +49,7 @@
 //! - **Never guess a destination.** No root folder configured means the
 //!   import waits, not that it picks somewhere plausible.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -61,7 +62,9 @@ use crate::db::grabs::{self, Grab, GrabStatus};
 use crate::db::library::{self, LibraryItem, MediaType};
 use crate::db::root_folders::{self, RootFolder};
 use crate::db::{download_clients, path_mappings, settings};
+use crate::episode_match::EpisodeMatcher;
 use crate::{AppError, AppState};
+use uuid::Uuid;
 
 /// How often the importer looks for finished downloads.
 pub const IMPORT_INTERVAL: Duration = Duration::from_secs(60);
@@ -153,6 +156,24 @@ pub enum ImportOutcome {
         /// — so if the operator deletes it, brarr goes looking again.
         path: PathBuf,
     },
+    /// A season pack: every file it carried, placed against the episode
+    /// it names, each on its own grab row.
+    ///
+    /// The pack row itself stops covering anything the moment this
+    /// lands — see [`grabs::GrabScope::Fanned`]. Before this variant
+    /// existed a pack reached [`Self::Imported`] with the *largest* file
+    /// in it and the movie-shaped destination `{root}/Título/Título.mkv`,
+    /// while `scope = 'season'` went on claiming the whole season: 26
+    /// episodes reported present, one file on disk.
+    FannedOut {
+        /// One per file that found its episode.
+        placed: Vec<PlacedEpisode>,
+        /// Files the pack held that paired with nothing, with the reason.
+        /// **Counted and reported, never silently dropped** — they stay
+        /// in the download folder, seeding, and the disk-import screen
+        /// can still adopt them by hand.
+        unpaired: Vec<(PathBuf, String)>,
+    },
     /// Could not import *yet*: no root folder configured, the client is
     /// unreachable. The grab stays `completed` and the next pass retries.
     Waiting(String),
@@ -175,6 +196,10 @@ pub struct ImportSummary {
     /// what it already has, which is a configuration story, not a
     /// success story.
     pub adopted: usize,
+    /// Season packs opened into per-episode rows.
+    pub fanned: usize,
+    /// Files inside those packs that paired with no episode.
+    pub unpaired: usize,
     /// Grabs left for the next pass.
     pub waiting: usize,
     /// Grabs marked failed.
@@ -262,6 +287,34 @@ pub async fn import_pending(state: &AppState) -> Result<ImportSummary, AppError>
                     "the destination already held a file; adopted it and did not overwrite"
                 );
             }
+            ImportOutcome::FannedOut { placed, unpaired } => {
+                summary.fanned += 1;
+                summary.imported += placed.iter().filter(|p| !p.adopted).count();
+                summary.adopted += placed.iter().filter(|p| p.adopted).count();
+                summary.unpaired += unpaired.len();
+                info!(
+                    target: "brarr_orchestrator::import",
+                    grab_id = %grab.id,
+                    release = %grab.release_name,
+                    placed = placed.len(),
+                    unpaired = unpaired.len(),
+                    "season pack opened into per-episode rows"
+                );
+                // The files nobody could place are the whole reason the
+                // report is persisted; logging them here as well is what
+                // makes them findable while the operator is looking at
+                // the container's output rather than at the UI.
+                for (path, reason) in &unpaired {
+                    warn!(
+                        target: "brarr_orchestrator::import",
+                        grab_id = %grab.id,
+                        file = %path.display(),
+                        reason = %reason,
+                        "a file in the pack paired with no episode"
+                    );
+                }
+                landed.extend(placed.into_iter().filter(|p| !p.adopted).map(|p| p.path));
+            }
             ImportOutcome::Waiting(reason) => {
                 summary.waiting += 1;
                 debug!(
@@ -319,6 +372,23 @@ pub async fn import_grab(state: &AppState, grab: &Grab) -> Result<ImportOutcome,
         ImportOutcome::Waiting(reason) => {
             grabs::set_import_wait_reason(state.pool(), grab.id, Some(reason)).await?;
         }
+        // The pack gives up its coverage to the rows it just wrote. The
+        // children go in first: `mark_fanned_out` is what stops the pack
+        // answering for the season, so doing it the other way round would
+        // leave a window in which the episodes read as missing and the
+        // sweep could start grabbing them.
+        ImportOutcome::FannedOut { placed, unpaired } => {
+            for episode in placed {
+                grabs::fan_out_episode(
+                    state.pool(),
+                    grab,
+                    episode.episode_id,
+                    &episode.path.to_string_lossy(),
+                )
+                .await?;
+            }
+            grabs::mark_fanned_out(state.pool(), grab.id, pack_report(unpaired).as_deref()).await?;
+        }
         ImportOutcome::Permanent(reason) => {
             grabs::set_status(state.pool(), grab.id, GrabStatus::Failed, Some(reason)).await?;
         }
@@ -355,13 +425,12 @@ async fn plan_and_place(state: &AppState, grab: &Grab) -> Result<ImportOutcome, 
         return Ok(ImportOutcome::Waiting(unreachable_path_message(&located)));
     }
 
-    let episode = match grab.episode_id {
-        Some(id) => library::episodes(state.pool(), item.id)
-            .await?
-            .into_iter()
-            .find(|e| e.id == id),
-        None => None,
-    };
+    // Read once and shared: the single-episode path needs one row out of
+    // it, the pack path needs the whole tree to build its matcher.
+    let episodes = library::episodes(state.pool(), item.id).await?;
+    let episode = grab
+        .episode_id
+        .and_then(|id| episodes.iter().find(|e| e.id == id).cloned());
     // **The name on disk is the catalogue's coordinate**, and that is
     // only safe because the catalogue's coordinate is now the one
     // releases use. It used to be translated here for the same reason
@@ -412,8 +481,18 @@ async fn plan_and_place(state: &AppState, grab: &Grab) -> Result<ImportOutcome, 
     // blocking pool: a 60 GB copy on a runtime worker would stall every
     // other task in the process.
     let source = located.path.clone();
-    let outcome = tokio::task::spawn_blocking(move || place_download(&source, &plan))
-        .await
+    // A pack is the one shape whose coordinate lives in `season_number`
+    // rather than in `episode_id`, and this branch is what was missing:
+    // without it a pack arrived here as `marker = None` and every rule
+    // downstream read it as a film — the largest file in the folder,
+    // placed at `{root}/Título/Título.mkv`.
+    let outcome =
+        if let (grabs::GrabScope::Season, Some(season)) = (grab.scope, grab.season_number) {
+            let matcher = EpisodeMatcher::new(&episodes);
+            tokio::task::spawn_blocking(move || place_pack(&source, &plan, season, &matcher)).await
+        } else {
+            tokio::task::spawn_blocking(move || place_download(&source, &plan)).await
+        }
         .map_err(|e| AppError::InvalidInput(format!("tarefa de import falhou: {e}")))?;
 
     // `place_download` only knows a path it could not open. Only here do
@@ -641,19 +720,7 @@ fn place_download(source: &Path, plan: &Placement) -> ImportOutcome {
         }
         Err(PickError::BadContent(reason)) => return ImportOutcome::Permanent(reason),
     };
-    let extension = video.extension().map_or_else(
-        || "mkv".to_owned(),
-        |e| e.to_string_lossy().to_ascii_lowercase(),
-    );
-    let destination = destination(&plan.root, &plan.title, plan.year, plan.episode, &extension);
-    // Observed first, rule second. `arr_folder` is only taken when it is
-    // really there: a stale row must not send a file into a directory
-    // that no longer exists, which would create it under a dead name.
-    let destination = match plan.arr_folder.as_deref() {
-        Some(folder) if folder.is_dir() => graft_onto(folder, &plan.root, &destination),
-        _ => reuse_existing_item_folder(&plan.root, &destination),
-    };
-    let destination = reuse_existing_season_folder(&destination);
+    let destination = destination_for(plan, &video, plan.episode);
 
     // Asked before placing, not discovered by failing to place. `place`
     // keeps its own check for the race, but a file already there is an
@@ -672,6 +739,127 @@ fn place_download(source: &Path, plan: &Placement) -> ImportOutcome {
     }
 }
 
+/// Where one video belongs, with every folder rule applied in order.
+///
+/// Split out so the pack path lands its 26 files under exactly the rules
+/// the single-file path uses. A second copy of this sequence is how a
+/// library ends up with two folders for one show.
+fn destination_for(plan: &Placement, video: &Path, episode: Option<(u16, u16)>) -> PathBuf {
+    let extension = video.extension().map_or_else(
+        || "mkv".to_owned(),
+        |e| e.to_string_lossy().to_ascii_lowercase(),
+    );
+    let computed = destination(&plan.root, &plan.title, plan.year, episode, &extension);
+    // Observed first, rule second. `arr_folder` is only taken when it is
+    // really there: a stale row must not send a file into a directory
+    // that no longer exists, which would create it under a dead name.
+    let grafted = match plan.arr_folder.as_deref() {
+        Some(folder) if folder.is_dir() => graft_onto(folder, &plan.root, &computed),
+        _ => reuse_existing_item_folder(&plan.root, &computed),
+    };
+    reuse_existing_season_folder(&grafted)
+}
+
+/// One episode of a pack, placed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlacedEpisode {
+    /// The catalogue row this file is.
+    pub episode_id: Uuid,
+    /// Where it landed.
+    pub path: PathBuf,
+    /// `true` when a file was already sitting there and this is an
+    /// adoption rather than a write — same rule, and same reason, as
+    /// [`ImportOutcome::AlreadyPresent`].
+    pub adopted: bool,
+}
+
+/// Place every file a season pack carries, one destination per episode.
+///
+/// Reuses [`destination_for`] and [`place`] unchanged, so never-overwrite,
+/// never-leave-a-partial and never-remove-from-the-client all hold here
+/// exactly as they do for a single episode. What differs is only how many
+/// files come out and that each one carries the episode it is.
+fn place_pack(
+    source: &Path,
+    plan: &Placement,
+    season: i32,
+    matcher: &EpisodeMatcher,
+) -> ImportOutcome {
+    let files = match pick_videos(source) {
+        Ok(files) => files,
+        Err(PickError::NotVisible(e)) => {
+            return ImportOutcome::Waiting(format!("não consegui abrir {}: {e}", source.display()));
+        }
+        Err(PickError::BadContent(reason)) => return ImportOutcome::Permanent(reason),
+    };
+
+    let mut placed: Vec<PlacedEpisode> = Vec::new();
+    let mut unpaired: Vec<(PathBuf, String)> = Vec::new();
+    for pairing in pair_pack(&files, season, matcher) {
+        match pairing {
+            PackPairing::Unpaired { path, reason } => unpaired.push((path, reason)),
+            PackPairing::Paired {
+                path,
+                episode_id,
+                marker,
+            } => {
+                let destination = destination_for(plan, &path, Some(marker));
+                if destination.exists() {
+                    placed.push(PlacedEpisode {
+                        episode_id,
+                        path: destination,
+                        adopted: true,
+                    });
+                    continue;
+                }
+                match place(&path, &destination, plan.mode) {
+                    Ok(_) => placed.push(PlacedEpisode {
+                        episode_id,
+                        path: destination,
+                        adopted: false,
+                    }),
+                    // One file that will not go does not sink the pack:
+                    // the other 25 are still the operator's episodes, and
+                    // the reason travels in the report.
+                    Err(reason) => unpaired.push((path, reason)),
+                }
+            }
+        }
+    }
+
+    // Nothing placed is "there was nothing importable in this", which is
+    // what `Permanent` means. Anything placed is a success with a report
+    // attached — partial success plus the reasons beats failing the lot.
+    if placed.is_empty() {
+        return ImportOutcome::Permanent(pack_report(&unpaired).unwrap_or_else(|| {
+            format!("nenhum episódio da temporada {season} foi identificado no pack")
+        }));
+    }
+    ImportOutcome::FannedOut { placed, unpaired }
+}
+
+/// The unpaired files as one durable sentence, or `None` when every file
+/// found its episode.
+fn pack_report(unpaired: &[(PathBuf, String)]) -> Option<String> {
+    if unpaired.is_empty() {
+        return None;
+    }
+    let mut lines: Vec<String> = unpaired
+        .iter()
+        .map(|(path, reason)| {
+            let name = path
+                .file_name()
+                .map_or_else(|| path.to_string_lossy(), |n| n.to_string_lossy());
+            format!("{name}: {reason}")
+        })
+        .collect();
+    lines.sort();
+    Some(lines.join(
+        "
+",
+    ))
+}
+
 /// The release's video file inside a finished download.
 ///
 /// `source` may be the file itself (a single-file torrent) or a folder.
@@ -680,6 +868,51 @@ fn place_download(source: &Path, plan: &Placement) -> ImportOutcome {
 /// names the episode, that one wins — a season pack that slipped through
 /// must not import its first file as episode 7.
 fn pick_video(source: &Path, episode: Option<(u16, u16)>) -> Result<PathBuf, PickError> {
+    let mut candidates = match collect_candidates(source)? {
+        Candidates::One(path) => return Ok(path),
+        Candidates::Many(rows) => rows,
+    };
+
+    if let Some((season, number)) = episode {
+        let named: Vec<&(PathBuf, u64)> = candidates
+            .iter()
+            .filter(|(path, _)| {
+                path.file_name().is_some_and(|n| {
+                    crate::scan::title_matches_episode(&n.to_string_lossy(), season, number)
+                })
+            })
+            .collect();
+        if named.len() == 1 {
+            return Ok(named[0].0.clone());
+        }
+        if named.is_empty() && candidates.len() > 1 {
+            return Err(PickError::BadContent(format!(
+                "{} vídeos em {} e nenhum identifica S{season:02}E{number:02}",
+                candidates.len(),
+                source.display()
+            )));
+        }
+    }
+
+    candidates.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    Ok(candidates[0].0.clone())
+}
+
+/// What a finished download turned out to be.
+enum Candidates {
+    /// A single-file torrent: the download *is* the video.
+    One(PathBuf),
+    /// A folder, and every video in it that is not a sample, unsorted.
+    Many(Vec<(PathBuf, u64)>),
+}
+
+/// Walk a finished download for the videos it holds.
+///
+/// Lifted out of [`pick_video`] unchanged so [`pick_videos`] can reuse
+/// it: the two differ only in how many files they take away, and the
+/// error split below is subtle enough that a second copy of it is how
+/// the incident it encodes comes back.
+fn collect_candidates(source: &Path) -> Result<Candidates, PickError> {
     // One `metadata` call at the top, instead of `is_file()` then
     // `is_dir()`. Those two throw the error away, so "the directory is
     // not there" and "I am not allowed to look" came out identical — and
@@ -691,7 +924,7 @@ fn pick_video(source: &Path, episode: Option<(u16, u16)>) -> Result<PathBuf, Pic
     };
     if meta.is_file() {
         return if is_video(source) {
-            Ok(source.to_path_buf())
+            Ok(Candidates::One(source.to_path_buf()))
         } else {
             Err(PickError::BadContent(format!(
                 "{} não é um arquivo de vídeo",
@@ -725,30 +958,137 @@ fn pick_video(source: &Path, episode: Option<(u16, u16)>) -> Result<PathBuf, Pic
             source.display()
         )));
     }
+    Ok(Candidates::Many(candidates))
+}
 
-    if let Some((season, number)) = episode {
-        let named: Vec<&(PathBuf, u64)> = candidates
-            .iter()
-            .filter(|(path, _)| {
-                path.file_name().is_some_and(|n| {
-                    crate::scan::title_matches_episode(&n.to_string_lossy(), season, number)
-                })
-            })
-            .collect();
-        if named.len() == 1 {
-            return Ok(named[0].0.clone());
+/// Every video a season pack carries, largest first.
+///
+/// The plural sibling of [`pick_video`]. A pack *expects* many videos, so
+/// refusing a multi-video folder here would be refusing the normal case;
+/// which file is which episode is [`pair_pack`]'s question, not this
+/// one's.
+fn pick_videos(source: &Path) -> Result<Vec<PathBuf>, PickError> {
+    Ok(match collect_candidates(source)? {
+        Candidates::One(path) => vec![path],
+        Candidates::Many(mut rows) => {
+            rows.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+            rows.into_iter().map(|(path, _)| path).collect()
         }
-        if named.is_empty() && candidates.len() > 1 {
-            return Err(PickError::BadContent(format!(
-                "{} vídeos em {} e nenhum identifica S{season:02}E{number:02}",
-                candidates.len(),
-                source.display()
-            )));
+    })
+}
+
+/// How one file inside a season pack paired with the catalogue.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PackPairing {
+    /// The name names an episode this catalogue has.
+    Paired {
+        /// The file.
+        path: PathBuf,
+        /// The catalogue row it belongs to.
+        episode_id: Uuid,
+        /// The **catalogue's** coordinate, which is what goes on disk —
+        /// not the one read off the name. Same rule as the single-episode
+        /// path, and for the same reason: the tree is built by whoever
+        /// numbers the series the way releases do, so writing its
+        /// coordinate is what keeps brarr's files beside the neighbours'
+        /// instead of giving Plex a second show.
+        marker: (u16, u16),
+    },
+    /// Nothing usable. **Counted and reported, never guessed at.**
+    Unpaired {
+        /// The file.
+        path: PathBuf,
+        /// What to tell the operator.
+        reason: String,
+    },
+}
+
+impl PackPairing {
+    /// The file this pairing is about, whichever way it went.
+    fn path(&self) -> &Path {
+        match self {
+            Self::Paired { path, .. } | Self::Unpaired { path, .. } => path,
         }
     }
+}
 
-    candidates.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-    Ok(candidates[0].0.clone())
+/// Pair every file of a season pack against the catalogue.
+///
+/// Pure: no pool, no filesystem, so the whole rule is testable against a
+/// list of names. Three questions per file, and a file that fails any of
+/// them is reported rather than placed:
+///
+/// 1. what episode does the name claim ([`crate::adopt::parse_marker`],
+///    which already refuses a chained `S01E01E02` and a name citing two
+///    different episodes);
+/// 2. is that this pack's season — the guard that keeps a bonus disc or a
+///    mis-bundled episode out of a season it does not belong to;
+/// 3. does the catalogue have it ([`EpisodeMatcher::resolve`]).
+///
+/// Two files resolving to one episode make **both** unpaired. Taking the
+/// larger is precisely the rule that put one file in the library and
+/// called it a season.
+fn pair_pack(files: &[PathBuf], season: i32, matcher: &EpisodeMatcher) -> Vec<PackPairing> {
+    let mut paired: Vec<PackPairing> = Vec::with_capacity(files.len());
+    let mut seen: HashMap<Uuid, usize> = HashMap::new();
+    let mut collided: Vec<Uuid> = Vec::new();
+
+    for path in files {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let marker = match crate::adopt::parse_marker(&name) {
+            Ok(marker) => marker,
+            Err(e) => {
+                paired.push(PackPairing::Unpaired {
+                    path: path.clone(),
+                    reason: e.reason().to_owned(),
+                });
+                continue;
+            }
+        };
+        let (named_season, named_episode) = marker;
+        if i32::from(named_season) != season {
+            paired.push(PackPairing::Unpaired {
+                path: path.clone(),
+                reason: format!(
+                    "o nome cita S{named_season:02}E{named_episode:02} e este pack é da temporada {season}"
+                ),
+            });
+            continue;
+        }
+        let Some(episode_id) = matcher.resolve(season, i32::from(named_episode), None) else {
+            paired.push(PackPairing::Unpaired {
+                path: path.clone(),
+                reason: format!("S{named_season:02}E{named_episode:02} não existe no catálogo"),
+            });
+            continue;
+        };
+        if let Some(first) = seen.insert(episode_id, paired.len()) {
+            collided.push(episode_id);
+            let _ = first;
+        }
+        paired.push(PackPairing::Paired {
+            path: path.clone(),
+            episode_id,
+            marker,
+        });
+    }
+
+    // Both sides of a collision are refused, after the fact rather than
+    // during: the first file looks fine until the second one turns up.
+    for episode_id in collided {
+        for row in &mut paired {
+            if matches!(row, PackPairing::Paired { episode_id: e, .. } if *e == episode_id) {
+                *row = PackPairing::Unpaired {
+                    path: row.path().to_path_buf(),
+                    reason: "mais de um arquivo aponta para este episódio".to_owned(),
+                };
+            }
+        }
+    }
+    paired
 }
 
 /// Depth-limited walk. Release folders nest one or two levels at most
@@ -1260,6 +1600,220 @@ mod tests {
     /// The operator's library is Sonarr's work and spells it `Season 2`.
     /// brarr spells it `Season 02`, and two folders for one season is
     /// the confusion this whole block exists to remove.
+    /// The real release, verbatim: 26 files, `S01E01` through `S01E26`,
+    /// the marker glued to the resolution, and the largest file in the
+    /// middle of the run rather than at either end.
+    fn cowboy_bebop_pack(dir: &TempDir) -> PathBuf {
+        let folder = dir.path().join("Cowboy Bebop (1998)");
+        std::fs::create_dir_all(&folder).unwrap();
+        for n in 1..=26u32 {
+            // Episode 23 is the biggest, which is the one the old rule
+            // took and called the whole season.
+            let size = if n == 23 { 4096 } else { 1024 + n as usize };
+            dir.file(
+                &format!(
+                    "Cowboy Bebop (1998)/Cowboy Bebop S01E{n:02}1080p BluRay FLAC 5.1 H264 DUAL-Zero-Raws.mkv"
+                ),
+                size,
+            );
+        }
+        folder
+    }
+
+    fn pack_plan(root: &Path) -> Placement {
+        Placement {
+            root: root.to_path_buf(),
+            title: "Cowboy Bebop".to_owned(),
+            year: None,
+            episode: None,
+            mode: ImportMode::Copy,
+            arr_folder: None,
+        }
+    }
+
+    /// A matcher for one season of `count` episodes, with ids the test
+    /// can recognise by their position.
+    fn one_season(season: i32, count: i32) -> (EpisodeMatcher, Vec<Uuid>) {
+        let ids: Vec<Uuid> = (0..count).map(|_| Uuid::new_v4()).collect();
+        let tree = (1..=count)
+            .filter_map(|n| {
+                let id = ids.get(usize::try_from(n - 1).ok()?)?;
+                Some(((season, n), *id))
+            })
+            .collect();
+        (EpisodeMatcher::from_tree(tree), ids)
+    }
+
+    /// The direct regression. A pack used to reach `pick_video(_, None)`
+    /// and `destination(_, None, _)` — the movie branch — so 26 files
+    /// became `Cowboy Bebop/Cowboy Bebop.mkv`, the single largest one,
+    /// while `scope = 'season'` went on claiming all 26 episodes.
+    #[test]
+    fn a_season_pack_places_every_episode_and_never_takes_the_movie_branch() {
+        let dir = TempDir::new("pack");
+        let source = cowboy_bebop_pack(&dir);
+        let root = dir.path().join("Animes");
+        std::fs::create_dir_all(&root).unwrap();
+        let (matcher, ids) = one_season(1, 26);
+
+        let ImportOutcome::FannedOut { placed, unpaired } =
+            place_pack(&source, &pack_plan(&root), 1, &matcher)
+        else {
+            panic!("a pack has to fan out");
+        };
+
+        assert_eq!(placed.len(), 26, "every file the pack carried");
+        assert!(unpaired.is_empty());
+
+        let movie_shaped = root.join("Cowboy Bebop").join("Cowboy Bebop.mkv");
+        assert!(
+            !movie_shaped.exists(),
+            "the movie-shaped destination is what this bug was"
+        );
+
+        for (n, id) in ids.iter().enumerate() {
+            let number = n + 1;
+            let expected = root
+                .join("Cowboy Bebop")
+                .join("Season 01")
+                .join(format!("Cowboy Bebop - S01E{number:02}.mkv"));
+            assert!(expected.is_file(), "{} was not placed", expected.display());
+            let row = placed
+                .iter()
+                .find(|p| p.episode_id == *id)
+                .expect("every episode got a row");
+            assert_eq!(row.path, expected);
+            assert!(!row.adopted);
+        }
+    }
+
+    /// A file that pairs with nothing is reported and left where it is.
+    /// Nothing is guessed, and the rest of the pack still imports.
+    #[test]
+    fn a_file_that_pairs_with_nothing_is_reported_not_dropped() {
+        let dir = TempDir::new("pack-ova");
+        let source = cowboy_bebop_pack(&dir);
+        let ova = dir.file(
+            "Cowboy Bebop (1998)/Cowboy Bebop OVA - Ein Summer Vacation.mkv",
+            2048,
+        );
+        let root = dir.path().join("Animes");
+        std::fs::create_dir_all(&root).unwrap();
+        let (matcher, _) = one_season(1, 26);
+
+        let ImportOutcome::FannedOut { placed, unpaired } =
+            place_pack(&source, &pack_plan(&root), 1, &matcher)
+        else {
+            panic!("a pack has to fan out");
+        };
+
+        assert_eq!(placed.len(), 26);
+        assert_eq!(unpaired.len(), 1);
+        assert_eq!(unpaired[0].0, ova);
+        assert!(ova.is_file(), "it stays in the download, seeding");
+
+        let report = pack_report(&unpaired).unwrap();
+        assert!(report.contains("Summer Vacation"), "{report}");
+    }
+
+    /// Both sides of a collision are refused. Taking the larger is the
+    /// rule that put one file in the library and called it a season.
+    #[test]
+    fn two_files_naming_one_episode_are_both_refused() {
+        let dir = TempDir::new("pack-dupe");
+        let source = dir.path().join("pack");
+        std::fs::create_dir_all(&source).unwrap();
+        let a = dir.file("pack/Show.S01E01.1080p.WEB.mkv", 4096);
+        let b = dir.file("pack/Show.S01E01.1080p.BluRay.mkv", 1024);
+        dir.file("pack/Show.S01E02.1080p.WEB.mkv", 2048);
+        let root = dir.path().join("Series");
+        std::fs::create_dir_all(&root).unwrap();
+        let (matcher, _) = one_season(1, 2);
+
+        let ImportOutcome::FannedOut { placed, unpaired } =
+            place_pack(&source, &pack_plan(&root), 1, &matcher)
+        else {
+            panic!("a pack has to fan out");
+        };
+
+        assert_eq!(placed.len(), 1, "only the unambiguous episode is placed");
+        assert_eq!(unpaired.len(), 2);
+        assert!(unpaired.iter().any(|(p, _)| *p == a));
+        assert!(unpaired.iter().any(|(p, _)| *p == b));
+    }
+
+    /// A pack that carries less than its season claims exactly what it
+    /// carried. The scope demotion is what makes that true downstream,
+    /// but the placement half has to be honest first.
+    #[test]
+    fn a_partial_pack_places_only_what_it_holds() {
+        let dir = TempDir::new("pack-partial");
+        let source = dir.path().join("pack");
+        std::fs::create_dir_all(&source).unwrap();
+        for n in 1..=5u32 {
+            dir.file(&format!("pack/Show.S01E{n:02}.1080p.WEB.mkv"), 1024);
+        }
+        // An episode of another season, bundled in by mistake. Its
+        // marker reads fine; it simply is not this pack's season.
+        let stray = dir.file("pack/Show.S02E01.1080p.WEB.mkv", 1024);
+        let root = dir.path().join("Series");
+        std::fs::create_dir_all(&root).unwrap();
+        let (matcher, _) = one_season(1, 26);
+
+        let ImportOutcome::FannedOut { placed, unpaired } =
+            place_pack(&source, &pack_plan(&root), 1, &matcher)
+        else {
+            panic!("a pack has to fan out");
+        };
+
+        assert_eq!(placed.len(), 5);
+        assert_eq!(unpaired.len(), 1);
+        assert_eq!(unpaired[0].0, stray);
+        assert!(
+            unpaired[0].1.contains("temporada 1"),
+            "the reason names the mismatch: {}",
+            unpaired[0].1
+        );
+    }
+
+    /// A pack with nothing identifiable in it is `Permanent`, and the
+    /// reason is the report rather than a shrug.
+    #[test]
+    fn a_pack_that_identifies_nothing_fails_with_the_reasons() {
+        let dir = TempDir::new("pack-nothing");
+        let source = dir.path().join("pack");
+        std::fs::create_dir_all(&source).unwrap();
+        dir.file("pack/Yu-Gi-Oh! Duel Monsters - 224.mkv", 1024);
+        let root = dir.path().join("Animes");
+        std::fs::create_dir_all(&root).unwrap();
+        let (matcher, _) = one_season(1, 26);
+
+        let ImportOutcome::Permanent(reason) = place_pack(&source, &pack_plan(&root), 1, &matcher)
+        else {
+            panic!("nothing placed is a permanent failure");
+        };
+        assert!(reason.contains("Yu-Gi-Oh"), "{reason}");
+    }
+
+    /// `pick_videos` is the plural sibling and shares the sample rule.
+    #[test]
+    fn pick_videos_returns_every_video_largest_first_and_no_sample() {
+        let dir = TempDir::new("videos");
+        let source = dir.path().join("rel");
+        std::fs::create_dir_all(&source).unwrap();
+        dir.file("rel/small.mkv", 512);
+        dir.file("rel/big.mkv", 4096);
+        dir.file("rel/Sample/thing.mkv", 8192);
+        dir.file("rel/notes.txt", 10);
+
+        let found = pick_videos(&source).unwrap();
+        let names: Vec<String> = found
+            .iter()
+            .filter_map(|p| Some(p.file_name()?.to_string_lossy().into_owned()))
+            .collect();
+        assert_eq!(names, vec!["big.mkv", "small.mkv"]);
+    }
+
     #[test]
     fn an_existing_season_folder_wins_over_our_spelling() {
         let dir = TempDir::new("season-folder");
