@@ -417,6 +417,8 @@ mod tests {
             file_missing_at: None,
             import_wait_reason: None,
             import_attempted_at: None,
+            parent_grab_id: None,
+            pack_report: None,
             grabbed_at: now,
             updated_at: now - Duration::from_secs((updated_minutes_ago * 60).unsigned_abs()),
         }

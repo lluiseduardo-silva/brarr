@@ -72,13 +72,15 @@
                         </td>
                         <td class="px-4 py-2.5 text-[11px] font-mono text-fg-secondary whitespace-nowrap">{{ g.grabbed_at }}</td>
                         <td class="px-4 py-2.5 text-right">
-                            {# Only an adoption can be undone. A tracker grab is
-                               acquisition history and is never deleted from here. #}
-                            {% if g.is_local %}
-                            <button hx-delete="/library/adoption/{{ g.id }}"
-                                    hx-confirm="{% if g.in_place %}Esquecer este arquivo? Ele continua no disco, intacto.{% else %}Remover o vínculo que o brarr criou? O arquivo de origem continua no lugar.{% endif %}"
+                            {# Qual desfazer esta linha oferece — e a frase que
+                               o acompanha — é decidido em `grab_undo`. Uma adoção
+                               desfaz o que o brarr escreveu; histórico de
+                               aquisição nunca é apagado, só esquecido. #}
+                            {% if let Some(u) = g.undo %}
+                            <button hx-delete="{{ u.href }}"
+                                    hx-confirm="{{ u.confirm }}"
                                     class="btn btn-sm btn-ghost">
-                                remover
+                                {{ u.label }}
                             </button>
                             {% endif %}
                         </td>

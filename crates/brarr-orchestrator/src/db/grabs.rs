@@ -303,6 +303,17 @@ pub struct Grab {
     /// clock a stuck grab keeps its place at the head of the import
     /// queue forever and starves everything behind it.
     pub import_attempted_at: Option<OffsetDateTime>,
+    /// The pack this row came out of, when a fan-out wrote it.
+    ///
+    /// Read to tell a child from the pack itself: forgetting a pack takes
+    /// its episodes with it, so the undo is offered on the parent only.
+    pub parent_grab_id: Option<Uuid>,
+    /// Files the pack held that paired with no episode, and why.
+    ///
+    /// The durable half of "count and report, never silently drop" — a
+    /// `warn!` does not survive long enough for an operator looking at a
+    /// season three episodes short.
+    pub pack_report: Option<String>,
     /// When the reservation was taken.
     pub grabbed_at: OffsetDateTime,
     /// Last status change.
@@ -338,7 +349,7 @@ pub struct NewGrab<'a> {
 const GRAB_COLUMNS: &str = "id, item_id, scope, episode_id, season_number, decision_id, provider_id, \
      provider_name, release_id_remote, release_name, download_url, protocol, \
      client_id, client_item_id, status, error, imported_path, file_missing_at, \
-     import_wait_reason, import_attempted_at, grabbed_at, updated_at";
+     import_wait_reason, import_attempted_at, parent_grab_id, pack_report,      grabbed_at, updated_at";
 
 fn opt_uuid_at(row: &SqliteRow, col: &str) -> Result<Option<Uuid>, AppError> {
     let raw: Option<String> = row.try_get(col)?;
@@ -386,6 +397,10 @@ fn row_to_grab(row: &SqliteRow) -> Result<Grab, AppError> {
             .try_get::<Option<i64>, _>("file_missing_at")?
             .and_then(|ts| OffsetDateTime::from_unix_timestamp(ts).ok()),
         import_wait_reason: row.try_get("import_wait_reason")?,
+        parent_grab_id: row
+            .try_get::<Option<String>, _>("parent_grab_id")?
+            .and_then(|raw| Uuid::parse_str(&raw).ok()),
+        pack_report: row.try_get("pack_report")?,
         import_attempted_at: row
             .try_get::<Option<i64>, _>("import_attempted_at")?
             .and_then(|ts| OffsetDateTime::from_unix_timestamp(ts).ok()),
@@ -1276,6 +1291,24 @@ pub async fn mark_file_missing(pool: &Pool, id: Uuid) -> Result<(), AppError> {
         return Err(AppError::NotFound(format!("grab {id}")));
     }
     Ok(())
+}
+
+/// The rows the fan-out wrote for one pack.
+///
+/// Ordered oldest first so a report reads in the order the episodes were
+/// placed rather than in whatever order SQLite felt like.
+///
+/// # Errors
+///
+/// Returns [`AppError::Database`] on SQL failure.
+pub async fn children_of(pool: &Pool, parent: Uuid) -> Result<Vec<Grab>, AppError> {
+    let rows = sqlx::query(&format!(
+        "SELECT {GRAB_COLUMNS} FROM grabs WHERE parent_grab_id = ? ORDER BY grabbed_at"
+    ))
+    .bind(parent.to_string())
+    .fetch_all(pool)
+    .await?;
+    rows.iter().map(row_to_grab).collect()
 }
 
 /// What [`relink_episode`] did.

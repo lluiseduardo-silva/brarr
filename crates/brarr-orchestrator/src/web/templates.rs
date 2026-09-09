@@ -2013,18 +2013,33 @@ pub struct InteractiveReleaseView {
     pub grabbable: bool,
 }
 
+/// The undo offered on one acquisition row.
+#[derive(Debug)]
+pub struct GrabUndo {
+    /// Where the button sends its `DELETE`.
+    pub href: String,
+    /// Button text.
+    pub label: String,
+    /// What the operator is agreeing to, spelled out. Each of the three
+    /// promises something different about the file on disk, which is why
+    /// this is a sentence and not a flag.
+    pub confirm: String,
+}
+
 /// One acquisition row on the detail page.
 #[derive(Debug)]
 pub struct GrabView {
     /// Stringified UUID, for the undo button.
     pub id: String,
-    /// `protocol == "local"`. Not derived in the template: `protocol`
-    /// there is a display string, and comparing it to a literal in the
-    /// markup hides a rule where nobody looks for one.
-    pub is_local: bool,
-    /// Adopted where it stood, so undo has nothing to remove from disk.
-    /// Changes what the confirmation says.
-    pub in_place: bool,
+    /// The undo this row offers, or `None` when it offers none.
+    ///
+    /// Decided in Rust for the reason the old `is_local` field already
+    /// gave: `protocol` here is a display string, and comparing it to a
+    /// literal in the markup hides a rule where nobody looks for one.
+    /// The wording moved along with the decision, because which sentence
+    /// to show *is* the rule — an adoption undo and a forget promise
+    /// different things about the file.
+    pub undo: Option<GrabUndo>,
     /// Release title snapshot.
     pub release_name: String,
     /// Provider name snapshot.

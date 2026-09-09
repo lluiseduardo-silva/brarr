@@ -59,6 +59,7 @@ pub mod deliver;
 pub mod episode_match;
 pub mod error;
 pub mod folder_names;
+pub mod forget;
 pub mod fuzzy;
 pub mod grpc;
 pub mod import;

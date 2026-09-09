@@ -63,7 +63,7 @@ use crate::web::templates::{
     DownloadClientView, DownloadClientsListPartial, DownloadClientsTemplate,
     EditArrInstanceModalPartial, EditDownloadClientModalPartial, EditMediaServerModalPartial,
     EditProviderModalPartial, EndpointHealthView, EndpointRequestView, EpisodeView, ErrorTemplate,
-    GrabView, HealthTemplate, ImportDirEntry, ImportIgnoredView, ImportModalPartial,
+    GrabUndo, GrabView, HealthTemplate, ImportDirEntry, ImportIgnoredView, ImportModalPartial,
     ImportOutcomeView, ImportPickEpisodePartial, ImportPickTitlePartial, ImportReportPartial,
     ImportRowPartial, ImportRowView, InteractiveReleaseView, InteractiveResultsPartial,
     LibraryAddOptionsModalPartial, LibraryAddTemplate, LibraryDetailTemplate, LibraryDetailView,
@@ -213,6 +213,10 @@ fn import_routes() -> Router<AppState> {
         .route("/library/import/row", get(library_import_row))
         .route("/library/import/bulk", post(library_import_bulk))
         .route("/library/adoption/{grab_id}", delete(library_adopt_undo))
+        .route(
+            "/library/grabs/{grab_id}/forget",
+            delete(library_grab_forget),
+        )
 }
 
 /// Everything hanging off a configured Sonarr/Radarr.
@@ -2427,13 +2431,55 @@ async fn library_grabs(
     })
 }
 
+/// The undo one acquisition row offers.
+///
+/// Three shapes, and they promise different things, which is why the
+/// sentence is decided here rather than branched in the markup:
+///
+/// - an in-place adoption wrote nothing, so forgetting it touches no file;
+/// - a linked adoption owns exactly the link brarr made, and `adopt::undo`
+///   removes that after proving it is still the same inode;
+/// - anything else is acquisition history, which is **never deleted** —
+///   [`crate::forget`] marks it instead, and only removes the library file
+///   when it can prove the bytes survive under another name.
+///
+/// A row a fan-out wrote gets none: forgetting a pack takes its episodes
+/// with it, so offering it on both would be the same undo under two names.
+fn grab_undo(g: &grabs::Grab) -> Option<GrabUndo> {
+    if g.protocol == grabs::Protocol::Local {
+        return Some(GrabUndo {
+            href: format!("/library/adoption/{}", g.id),
+            label: "remover".to_owned(),
+            confirm: if grabs::is_in_place(g) {
+                "Esquecer este arquivo? Ele continua no disco, intacto.".to_owned()
+            } else {
+                "Remover o vínculo que o brarr criou? O arquivo de origem continua no lugar."
+                    .to_owned()
+            },
+        });
+    }
+    if g.status != grabs::GrabStatus::Imported
+        || g.file_missing_at.is_some()
+        || g.parent_grab_id.is_some()
+    {
+        return None;
+    }
+    Some(GrabUndo {
+        href: format!("/library/grabs/{}/forget", g.id),
+        label: "esquecer".to_owned(),
+        confirm: "Esquecer esta aquisição? O histórico fica; o arquivo da biblioteca é \
+                  removido se o download ainda existir no disco, e o torrent continua \
+                  semeando."
+            .to_owned(),
+    })
+}
+
 /// Map acquisition rows for the history dialog.
 fn grab_views(rows: Vec<grabs::Grab>) -> Vec<GrabView> {
     rows.into_iter()
         .map(|g| GrabView {
             id: g.id.to_string(),
-            is_local: g.protocol == grabs::Protocol::Local,
-            in_place: grabs::is_in_place(&g),
+            undo: grab_undo(&g),
             release_name: g.release_name,
             provider_name: g.provider_name,
             protocol: g.protocol.label().to_owned(),
@@ -4118,6 +4164,27 @@ async fn library_adopt_undo(
 ) -> Result<Response, AppError> {
     let outcome = crate::adopt::undo(&state, grab_id).await?;
     info!(target: "brarr_orchestrator::web", grab = %grab_id, outcome = %outcome, "adoption undone");
+    Ok(hx_refresh())
+}
+
+/// `DELETE /library/grabs/{grab_id}/forget` — undo one acquisition.
+///
+/// The escape hatch for an import that went wrong. `adopt::undo` refuses
+/// anything that is not a local adoption, deliberately, and
+/// `requeue-import` only reaches a `failed` row — so before this there
+/// was no route at all out of a bad `imported` grab, and the only repair
+/// left was editing sqlite by hand. See [`crate::forget`].
+async fn library_grab_forget(
+    State(state): State<AppState>,
+    Path(grab_id): Path<Uuid>,
+) -> Result<Response, AppError> {
+    let outcome = crate::forget::forget(&state, grab_id).await?;
+    info!(
+        target: "brarr_orchestrator::web",
+        grab = %grab_id,
+        outcome = %outcome.summary(),
+        "acquisition forgotten"
+    );
     Ok(hx_refresh())
 }
 
