@@ -1,8 +1,10 @@
 //! Cliente HTTP async para a API UNIT3D.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use brarr_core::{Release, TmdbId, TrackerSource, TvdbId};
+use brarr_ratelimit::{RateLimiter, observe_headers};
 use reqwest::{Client, header};
 use url::Url;
 
@@ -18,6 +20,14 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 /// default UA. A stable, identifiable string also helps tracker
 /// operators reason about brarr traffic in their logs.
 const USER_AGENT: &str = concat!("brarr/", env!("CARGO_PKG_VERSION"));
+
+/// Espaçamento entre requisições enquanto o tracker não anunciou o dele.
+///
+/// Uma por segundo. Vale até a primeira resposta, que em todo UNIT3D
+/// medido traz `x-ratelimit-limit` e corrige isto para o valor real —
+/// então o número só governa a requisição de abertura, e o certo aí é
+/// ser conservador.
+const DEFAULT_SPACING: Duration = Duration::from_secs(1);
 
 /// Structured outcome of a connectivity probe. Returned by
 /// [`Unit3dClient::ping`] (and the equivalent method on the Newznab
@@ -54,6 +64,14 @@ pub struct Unit3dClient {
     base_url: Url,
     tracker: TrackerSource,
     retry: RetryConfig,
+    /// Espaçador por host. `Arc` porque o orquestrador compartilha um
+    /// único limitador entre todos os clients: dois apontados para a
+    /// mesma origem que espaçassem em separado dobrariam a taxa.
+    limiter: Arc<RateLimiter>,
+    /// Host do `base_url`, extraído uma vez. Vazio se a URL não tiver
+    /// um — o limitador então trata todos assim como um host só, que é
+    /// o conservador.
+    host: String,
 }
 
 impl Unit3dClient {
@@ -86,12 +104,45 @@ impl Unit3dClient {
             .map_err(ClientError::ClientBuild)?;
 
         let base_url = tracker.base_url.clone();
+        let host = base_url.host_str().unwrap_or_default().to_owned();
         Ok(Self {
             http,
             base_url,
             tracker,
             retry: RetryConfig::default(),
+            limiter: Arc::new(RateLimiter::new(DEFAULT_SPACING)),
+            host,
         })
+    }
+
+    /// Compartilhar um limitador com outros clients.
+    ///
+    /// Sem isto cada cliente espaça sozinho, o que basta enquanto houver
+    /// um cliente por host. O orquestrador reconstrói clients ao editar
+    /// um provider e mantém vários vivos ao mesmo tempo, então lá o
+    /// limitador vem de fora e sobrevive a eles.
+    #[must_use]
+    pub fn with_limiter(mut self, limiter: Arc<RateLimiter>) -> Self {
+        self.limiter = limiter;
+        self
+    }
+
+    /// Mandar uma requisição respeitando o ritmo do tracker.
+    ///
+    /// Espera a vez antes de sair e conta ao limitador o que a resposta
+    /// disse — **antes** de qualquer `error_for_status`, que descarta os
+    /// headers junto com a resposta e é exatamente num 429 que eles
+    /// interessam.
+    async fn send(&self, req: reqwest::RequestBuilder) -> Result<reqwest::Response, ClientError> {
+        self.limiter.acquire(&self.host).await;
+        let resp = req.send().await?;
+        let headers = resp
+            .headers()
+            .iter()
+            .filter_map(|(name, value)| value.to_str().ok().map(|v| (name.as_str(), v)));
+        let observed = observe_headers(resp.status().as_u16(), headers);
+        self.limiter.observe(&self.host, &observed);
+        Ok(resp)
     }
 
     /// Substitui a política de retry. Útil em testes (`RetryConfig::disabled()`
@@ -131,7 +182,9 @@ impl Unit3dClient {
     pub async fn ping(&self) -> Result<PingReport, ClientError> {
         let url = self.base_url.join("api/torrents/filter")?;
         let started = std::time::Instant::now();
-        let resp = self.http.get(url).query(&[("tmdbId", 1u32)]).send().await?;
+        let resp = self
+            .send(self.http.get(url).query(&[("tmdbId", 1u32)]))
+            .await?;
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
         let elapsed_ms = u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);
@@ -187,10 +240,7 @@ impl Unit3dClient {
     async fn search_by_tmdb_once(&self, tmdb: TmdbId) -> Result<Vec<Release>, ClientError> {
         let url = self.base_url.join("api/torrents/filter")?;
         let resp = self
-            .http
-            .get(url)
-            .query(&[("tmdbId", tmdb.get())])
-            .send()
+            .send(self.http.get(url).query(&[("tmdbId", tmdb.get())]))
             .await?
             .error_for_status()?;
 
@@ -264,7 +314,7 @@ impl Unit3dClient {
         if let Some(e) = episode {
             req = req.query(&[("episodeNumber", u32::from(e))]);
         }
-        let resp = req.send().await?.error_for_status()?;
+        let resp = self.send(req).await?.error_for_status()?;
         let body = resp.text().await?;
         let envelope: Envelope<Vec<Unit3dTorrent>> = match serde_json::from_str(&body) {
             Ok(v) => v,
@@ -299,9 +349,7 @@ impl Unit3dClient {
     async fn get_torrent_once(&self, id: &str) -> Result<Release, ClientError> {
         let url = self.base_url.join(&format!("api/torrents/{id}"))?;
         let body = self
-            .http
-            .get(url)
-            .send()
+            .send(self.http.get(url))
             .await?
             .error_for_status()?
             .text()

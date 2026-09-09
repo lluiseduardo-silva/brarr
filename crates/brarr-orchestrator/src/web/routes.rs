@@ -604,7 +604,8 @@ async fn providers_probe(
     }
 
     let client = brarr_tracker_newznab::NewznabClient::new(source, &row.api_token)
-        .map_err(|e| AppError::InvalidInput(format!("client build failed: {e}")))?;
+        .map_err(|e| AppError::InvalidInput(format!("client build failed: {e}")))?
+        .with_limiter(state.provider_clients().limiter());
 
     let inspect = if let Some(imdb) = imdb {
         client.inspect_movie_by_imdb(imdb).await
@@ -652,7 +653,7 @@ async fn providers_test(
     let source = brarr_core::TrackerSource::new(row.name.clone(), row.base_url.clone())
         .map_err(|e| AppError::InvalidInput(format!("invalid base_url: {e}")))?;
 
-    let badge = run_provider_ping(&row, source).await;
+    let badge = run_provider_ping(&row, source, state.provider_clients().limiter()).await;
     let html_fragment = render_ping_badge(&row.id.to_string(), &badge);
     let mut resp = (StatusCode::OK, html_fragment).into_response();
     resp.headers_mut().insert(
@@ -4673,6 +4674,7 @@ struct PingBadge {
 async fn run_provider_ping(
     row: &crate::db::providers::ProviderRow,
     source: brarr_core::TrackerSource,
+    limiter: std::sync::Arc<brarr_ratelimit::RateLimiter>,
 ) -> PingBadge {
     if row.is_plugin() {
         return PingBadge {
@@ -4683,7 +4685,9 @@ async fn run_provider_ping(
     }
     let kind = row.kind.to_ascii_lowercase();
     if kind == "newznab" || kind == "torznab" {
-        match brarr_tracker_newznab::NewznabClient::new(source, &row.api_token) {
+        match brarr_tracker_newznab::NewznabClient::new(source, &row.api_token)
+            .map(|c| c.with_limiter(limiter))
+        {
             Ok(client) => match client.ping().await {
                 Ok(r) => PingBadge {
                     ok: r.ok,
@@ -4704,7 +4708,9 @@ async fn run_provider_ping(
         }
     } else {
         // Default to UNIT3D for `unit3d` and any unknown kind.
-        match brarr_tracker_unit3d::Unit3dClient::new(source, &row.api_token) {
+        match brarr_tracker_unit3d::Unit3dClient::new(source, &row.api_token)
+            .map(|c| c.with_limiter(limiter))
+        {
             Ok(client) => match client.ping().await {
                 Ok(r) => PingBadge {
                     ok: r.ok,

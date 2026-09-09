@@ -14,6 +14,7 @@ members = [
     "crates/brarr-arr",
     "crates/brarr-download-client",
     "crates/brarr-media-server",
+    "crates/brarr-ratelimit",
 ]
 
 [workspace.package]

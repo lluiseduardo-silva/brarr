@@ -21,16 +21,43 @@
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
 use brarr_core::TrackerProvider;
+use brarr_ratelimit::RateLimiter;
 use uuid::Uuid;
 
 use crate::db::providers::ProviderRow;
 
+/// Espaçamento inicial de um host sobre o qual nada se sabe ainda.
+///
+/// Uma por segundo. Os UNIT3D corrigem isto para o valor real na
+/// primeira resposta (`x-ratelimit-limit`); os Newznab não anunciam nada
+/// e ficam aqui, então este número é o limite deles e não um
+/// aquecimento.
+const DEFAULT_SPACING: Duration = Duration::from_secs(1);
+
 /// Thread-safe map of `provider id -> (config fingerprint, client)`.
-#[derive(Default)]
 pub struct ProviderClientCache {
     inner: Mutex<HashMap<Uuid, Entry>>,
+    /// O espaçador que todos os clients construídos compartilham.
+    ///
+    /// Mora aqui e não em cada client porque o ritmo é do **host**, e um
+    /// host sobrevive ao client: editar um provider muda o fingerprint e
+    /// descarta a entrada, e um limitador que morresse junto esqueceria
+    /// a penalidade de um 429 no instante em que ela mais importa.
+    /// Também é o que faz dois providers apontados para a mesma origem
+    /// dividirem uma cota em vez de gastarem duas.
+    limiter: Arc<RateLimiter>,
+}
+
+impl Default for ProviderClientCache {
+    fn default() -> Self {
+        Self {
+            inner: Mutex::new(HashMap::new()),
+            limiter: Arc::new(RateLimiter::new(DEFAULT_SPACING)),
+        }
+    }
 }
 
 struct Entry {
@@ -43,6 +70,12 @@ impl ProviderClientCache {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// O espaçador compartilhado, para injetar num client recém-feito.
+    #[must_use]
+    pub fn limiter(&self) -> Arc<RateLimiter> {
+        Arc::clone(&self.limiter)
     }
 
     /// Return the cached client for `id` when present **and** its stored
@@ -78,6 +111,7 @@ impl std::fmt::Debug for ProviderClientCache {
             .map_or_else(|e| e.into_inner().len(), |m| m.len());
         f.debug_struct("ProviderClientCache")
             .field("entries", &len)
+            .field("limiter", &self.limiter)
             .finish()
     }
 }

@@ -23,6 +23,7 @@ brarr-arr = { version = "0.22.0", path = "../brarr-arr" }
 brarr-core = { version = "0.22.0", path = "../brarr-core" }
 brarr-decision-service = { version = "0.22.0", path = "../brarr-decision-service" }
 brarr-download-client = { version = "0.22.0", path = "../brarr-download-client" }
+brarr-ratelimit = { version = "0.22.0", path = "../brarr-ratelimit" }
 brarr-media-server = { version = "0.22.0", path = "../brarr-media-server" }
 brarr-plugin-host = { version = "0.22.0", path = "../brarr-plugin-host" }
 brarr-tracker-newznab = { version = "0.22.0", path = "../brarr-tracker-newznab" }

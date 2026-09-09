@@ -236,3 +236,94 @@ async fn http_404_surfaces_as_client_error() {
         "unexpected error string: {msg}",
     );
 }
+
+/// O tracker anuncia o próprio limite em toda resposta autenticada, e o
+/// cliente tem que ouvir.
+///
+/// Medido na produção em 2026-09-09: capybarabr.com e samaritano.cc
+/// respondem `x-ratelimit-limit: 30`. O brarr descartava o header e
+/// gastava as 25 buscas do ciclo em ~7 s — 83% do teto num minuto, sem
+/// folga — até uma varredura manual de 70 episódios empilhar 59 num
+/// minuto e colher 29 × 429.
+#[tokio::test]
+async fn o_cliente_aprende_o_limite_que_o_tracker_anuncia() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/torrents/filter"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("x-ratelimit-limit", "30")
+                .insert_header("x-ratelimit-remaining", "29")
+                .set_body_string(wrap_as_filter_response(&fixture("shadow.json"))),
+        )
+        .mount(&server)
+        .await;
+
+    let limiter = std::sync::Arc::new(brarr_ratelimit::RateLimiter::new(Duration::from_secs(1)));
+    let client = client_for(&server, "mock").with_limiter(std::sync::Arc::clone(&limiter));
+    let host = Url::parse(&server.uri())
+        .expect("mock URL")
+        .host_str()
+        .expect("host")
+        .to_owned();
+
+    assert_eq!(
+        limiter.spacing_of(&host),
+        None,
+        "nada se sabe antes da primeira resposta"
+    );
+
+    client
+        .search_by_tmdb(TmdbId::new(603).expect("valid"))
+        .await
+        .expect("search");
+
+    let spacing = limiter.spacing_of(&host).expect("o host foi registrado");
+    assert!(
+        spacing > Duration::from_secs(2) && spacing < Duration::from_millis(2_500),
+        "30/min vira ~2,2s entre requisições, não {spacing:?}"
+    );
+}
+
+/// Um 429 traz `Retry-After`, e `error_for_status` descarta a resposta
+/// inteira junto com ele. Observar antes é o que faz o header chegar ao
+/// limitador na única vez em que ele existe.
+#[tokio::test]
+async fn um_429_e_registrado_apesar_de_a_busca_falhar() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/torrents/filter"))
+        .respond_with(
+            ResponseTemplate::new(429)
+                .insert_header("retry-after", "1")
+                .insert_header("x-ratelimit-limit", "30"),
+        )
+        .mount(&server)
+        .await;
+
+    let limiter = std::sync::Arc::new(brarr_ratelimit::RateLimiter::new(Duration::from_millis(1)));
+    let client = client_for(&server, "mock")
+        .with_retry(RetryConfig::disabled())
+        .with_limiter(std::sync::Arc::clone(&limiter));
+    let host = Url::parse(&server.uri())
+        .expect("mock URL")
+        .host_str()
+        .expect("host")
+        .to_owned();
+
+    let err = client
+        .search_by_tmdb(TmdbId::new(603).expect("valid"))
+        .await
+        .expect_err("429 é erro para o chamador");
+    assert!(err.to_string().contains("429"), "{err}");
+
+    // O host ficou calado pelo tempo que ele pediu: a próxima chamada
+    // espera de verdade, e um segundo é o que o header disse.
+    let started = std::time::Instant::now();
+    limiter.acquire(&host).await;
+    assert!(
+        started.elapsed() >= Duration::from_millis(900),
+        "esperou apenas {:?}",
+        started.elapsed()
+    );
+}

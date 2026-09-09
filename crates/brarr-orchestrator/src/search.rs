@@ -668,12 +668,16 @@ async fn build_provider(
     // future divergence (e.g. download URL shape, category defaults).
     let built: Arc<dyn TrackerProvider> =
         if pr.kind.eq_ignore_ascii_case("newznab") || pr.kind.eq_ignore_ascii_case("torznab") {
-            let client = NewznabClient::new(source, &pr.api_token).map_err(|e| e.to_string())?;
+            let client = NewznabClient::new(source, &pr.api_token)
+                .map_err(|e| e.to_string())?
+                .with_limiter(clients.limiter());
             Arc::new(client)
         } else {
             // Default to UNIT3D for unknown kinds — gives a useful error
             // if the token is wrong instead of silently swallowing.
-            let client = Unit3dClient::new(source, &pr.api_token).map_err(|e| e.to_string())?;
+            let client = Unit3dClient::new(source, &pr.api_token)
+                .map_err(|e| e.to_string())?
+                .with_limiter(clients.limiter());
             Arc::new(client)
         };
     clients.put(pr.id, fingerprint, Arc::clone(&built));

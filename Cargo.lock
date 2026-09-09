@@ -467,6 +467,7 @@ dependencies = [
  "brarr-download-client",
  "brarr-media-server",
  "brarr-plugin-host",
+ "brarr-ratelimit",
  "brarr-tmdb",
  "brarr-tracker-newznab",
  "brarr-tracker-unit3d",
@@ -520,6 +521,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "brarr-ratelimit"
+version = "0.22.0"
+dependencies = [
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "brarr-tmdb"
 version = "0.22.0"
 dependencies = [
@@ -540,6 +549,7 @@ name = "brarr-tracker-newznab"
 version = "0.22.0"
 dependencies = [
  "brarr-core",
+ "brarr-ratelimit",
  "quick-xml",
  "reqwest",
  "serde",
@@ -557,6 +567,7 @@ version = "0.22.0"
 dependencies = [
  "brarr-core",
  "brarr-mediainfo",
+ "brarr-ratelimit",
  "reqwest",
  "serde",
  "serde_json",

@@ -6,6 +6,7 @@ use std::time::Duration;
 use brarr_core::{
     ImdbId, ProviderError, ProviderFuture, Release, TmdbId, TrackerProvider, TrackerSource, TvdbId,
 };
+use brarr_ratelimit::{RateLimiter, observe_headers};
 use reqwest::Client;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
@@ -25,6 +26,15 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 /// `brarr/<crate-version>` string so the indexer logs us as a known
 /// client and operators can see traffic by UA in their dashboards.
 const USER_AGENT: &str = concat!("brarr/", env!("CARGO_PKG_VERSION"));
+
+/// Espaçamento entre requisições a um mesmo indexador.
+///
+/// Ao contrário do UNIT3D, **nenhum** dos Newznab medidos anuncia limite
+/// em header nenhum — e um deles, curupira.cc, devolveu 29 × 429 mesmo
+/// assim. Sem anúncio não há o que aprender, então este valor não é um
+/// aquecimento: é o limite, para sempre. Uma por segundo é folgado para
+/// o uso normal (uma busca por alvo) e mata a rajada.
+const DEFAULT_SPACING: Duration = Duration::from_secs(1);
 
 /// Raw + parsed snapshot of a single search call, returned by the
 /// `inspect_*` methods. Surfaced through the orchestrator's
@@ -263,6 +273,11 @@ pub struct NewznabClient {
     /// each. The orchestrator caches the client per provider, so in
     /// practice this is once per process.
     caps: Arc<Mutex<Option<Capabilities>>>,
+    /// Espaçador por host, compartilhado com os demais clients quando o
+    /// orquestrador o injeta.
+    limiter: Arc<RateLimiter>,
+    /// Host do `base_url`, extraído uma vez.
+    host: String,
 }
 
 impl NewznabClient {
@@ -291,13 +306,45 @@ impl NewznabClient {
             .timeout(DEFAULT_TIMEOUT)
             .build()
             .map_err(ClientError::ClientBuild)?;
+        let tracker_host = tracker.base_url.host_str().unwrap_or_default().to_owned();
         Ok(Self {
             http,
             base_url: tracker.base_url.clone(),
             tracker,
             apikey: apikey.to_string(),
             caps: Arc::new(Mutex::new(None)),
+            limiter: Arc::new(RateLimiter::new(DEFAULT_SPACING)),
+            host: tracker_host,
         })
+    }
+
+    /// Compartilhar um limitador com outros clients.
+    ///
+    /// Sem isto cada cliente espaça sozinho, o que basta enquanto houver
+    /// um cliente por host. O orquestrador mantém vários vivos e os
+    /// reconstrói ao editar um provider, então lá o limitador vem de
+    /// fora e sobrevive a eles.
+    #[must_use]
+    pub fn with_limiter(mut self, limiter: Arc<RateLimiter>) -> Self {
+        self.limiter = limiter;
+        self
+    }
+
+    /// Mandar uma requisição respeitando o ritmo do indexador.
+    ///
+    /// Conta ao limitador o que a resposta disse **antes** de qualquer
+    /// `error_for_status`: um Newznab não anuncia teto, mas um 429 ainda
+    /// pode trazer `Retry-After`, e é a única vez que ele fala.
+    async fn send(&self, req: reqwest::RequestBuilder) -> Result<reqwest::Response, ClientError> {
+        self.limiter.acquire(&self.host).await;
+        let resp = req.send().await?;
+        let headers = resp
+            .headers()
+            .iter()
+            .filter_map(|(name, value)| value.to_str().ok().map(|v| (name.as_str(), v)));
+        let observed = observe_headers(resp.status().as_u16(), headers);
+        self.limiter.observe(&self.host, &observed);
+        Ok(resp)
     }
 
     /// What this indexer says it can be asked, read once and reused.
@@ -319,9 +366,7 @@ impl NewznabClient {
         }
         let url = self.build_url("caps", &[])?;
         let body = self
-            .http
-            .get(url)
-            .send()
+            .send(self.http.get(url))
             .await?
             .error_for_status()?
             .text()
@@ -356,7 +401,7 @@ impl NewznabClient {
     pub async fn ping(&self) -> Result<PingReport, ClientError> {
         let url = self.build_url("caps", &[])?;
         let started = std::time::Instant::now();
-        let resp = self.http.get(url).send().await?;
+        let resp = self.send(self.http.get(url)).await?;
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
         let elapsed_ms = u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);
@@ -543,9 +588,7 @@ impl NewznabClient {
 
     async fn fetch_raw(&self, url: Url) -> Result<InspectResult, ClientError> {
         let resp = self
-            .http
-            .get(url.clone())
-            .send()
+            .send(self.http.get(url.clone()))
             .await?
             .error_for_status()?;
         let status = resp.status().as_u16();
@@ -608,7 +651,7 @@ impl NewznabClient {
             url = %redacted,
             "newznab request"
         );
-        let resp = self.http.get(url).send().await?.error_for_status()?;
+        let resp = self.send(self.http.get(url)).await?.error_for_status()?;
         let body = resp.text().await?;
         let feed = parse_feed(&body)?;
         info!(

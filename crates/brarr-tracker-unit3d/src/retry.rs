@@ -65,7 +65,16 @@ impl RetryConfig {
 ///   ou compressão indevida pelo proxy.
 ///
 /// Permanentes (não retenta):
-/// - `Http` com 4xx — auth, not-found, rate limit semântico do tracker.
+/// - `Http` com 4xx — auth, not-found, e **429**.
+///
+/// O 429 continua aqui de propósito, agora que existe
+/// [`brarr_ratelimit`]. A divisão de trabalho é: o limitador já
+/// registrou o `Retry-After` e vai segurar a *próxima* requisição a este
+/// host pelo tempo pedido; retentar aqui dentro faria a busca corrente
+/// dormir esse tempo e estourar o orçamento por provider do
+/// orquestrador (15 s), trocando uma busca perdida por quatro timeouts.
+/// Com o espaçamento em vigor um 429 deixa de ser rotina; quando um
+/// escapa, o certo é perder esta busca e calar o host.
 /// - `BadUrl`, `Conversion`, `InvalidToken`, `ClientBuild`.
 #[must_use]
 pub fn is_transient(err: &ClientError) -> bool {
