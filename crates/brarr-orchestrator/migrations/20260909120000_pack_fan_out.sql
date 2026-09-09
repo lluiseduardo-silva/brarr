@@ -61,8 +61,16 @@
 -- O CHECK de `scope` não é alterável no SQLite, então isto é o rebuild de
 -- 12 passos, na forma de `20260805120000`: tabela nova, cópia, drop,
 -- rename, e **todos** os índices recriados.
-
-PRAGMA foreign_keys = OFF;
+--
+-- Sem `PRAGMA foreign_keys = OFF` em volta, como o rebuild anterior
+-- também não tem. Dentro de uma transação — que é como o sqlx roda toda
+-- migration — esse pragma é **no-op**, então escrevê-lo prometeria uma
+-- proteção que não existe. E não é preciso: nenhuma outra tabela
+-- referencia `grabs`, e o `ALTER TABLE ... RENAME` reescreve a
+-- auto-referência de `parent_grab_id` sozinho. Verificado contra cópia da
+-- produção: 7401 linhas entram, 7401 saem, `integrity_check` ok,
+-- `foreign_key_check` vazio, os 13 índices de volta e o FK apontando para
+-- `grabs`.
 
 CREATE TABLE grabs_new (
     id                TEXT    PRIMARY KEY NOT NULL,
@@ -166,5 +174,3 @@ CREATE INDEX idx_grabs_awaiting_import
     WHERE status = 'completed';
 
 CREATE INDEX idx_grabs_parent ON grabs(parent_grab_id);
-
-PRAGMA foreign_keys = ON;
