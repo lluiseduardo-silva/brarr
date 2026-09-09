@@ -675,3 +675,113 @@ async fn an_unreadable_folder_is_a_form_error() {
         "and nothing is offered for import"
     );
 }
+
+/// Adopting a file that sits **outside** the library writes a brand-new
+/// path into it, and the media server has to be told.
+///
+/// `notify::imported` fired from exactly one place — the automatic
+/// importer — on the stated ground that the other `mark_imported` call
+/// sites "record files that were already on disk". That is true of
+/// `AdoptAction::InPlace`, which touches nothing, and false of
+/// `AdoptAction::Link`, which hardlinks a download into
+/// `{root}/Título/Season NN/…`. Plex does not watch folders by default,
+/// so the episode arrived on disk, in the right place, and stayed
+/// invisible until something else happened to trigger a scan.
+#[tokio::test]
+async fn linking_a_file_into_the_library_tells_the_media_server() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let h = spawn("notify").await;
+    let item = add_series(&h.state).await;
+
+    let server = MockServer::start().await;
+    // The dialect asks who serves what before it reports anything: a
+    // path the server does not recognise is re-anchored onto a library
+    // it does.
+    Mock::given(method("GET"))
+        .and(path("/Library/VirtualFolders"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!([{
+                "Name": "Series",
+                "ItemId": "7",
+                "Locations": [h.base.join("midias").to_string_lossy()],
+            }])),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/Library/Media/Updated"))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .named("the library changed")
+        .mount(&server)
+        .await;
+
+    db::media_servers::insert(
+        h.state.pool(),
+        db::media_servers::NewMediaServer {
+            name: "emby",
+            kind: brarr_media_server::MediaServerKind::Emby,
+            base_url: &server.uri(),
+            token: Some("k"),
+        },
+    )
+    .await
+    .unwrap();
+
+    // Outside every root folder — this is a download, not a file the
+    // server has ever indexed.
+    let file = h
+        .base
+        .join("torrents")
+        .join("The.Boys.S04E07.1080p.WEB-DL-NTb.mkv");
+    std::fs::write(&file, b"video").unwrap();
+
+    let client = reqwest::Client::new();
+    let dir = h.base.join("torrents").to_string_lossy().to_string();
+    let body = client
+        .get(format!("http://{}/library/import", h.addr))
+        .query(&[("folder", dir.clone()), ("scan", "1".to_owned())])
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    let fps = fingerprints(&body);
+    let sels = selections(&body, "The.Boys.S04E07");
+    assert_eq!(sels.len(), 1, "the file is importable: {body}");
+
+    let report = client
+        .post(format!("http://{}/library/import", h.addr))
+        .form(&[
+            ("folder", dir),
+            ("action", "import".to_owned()),
+            ("sel", sels[0].clone()),
+            ("fp", fps[0].clone()),
+        ])
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        report.contains("vinculado"),
+        "the file was linked in: {report}"
+    );
+
+    let stored = grabs::for_item(h.state.pool(), item).await.unwrap();
+    assert_eq!(stored.len(), 1);
+
+    // The row records the notification, which is the durable half: the
+    // mock proves the request went out, this proves brarr believes it
+    // did and will not send it again.
+    let servers = db::media_servers::list_all(h.state.pool()).await.unwrap();
+    assert!(
+        servers[0].last_notified_at.is_some(),
+        "the media server was told: last_error = {:?}",
+        servers[0].last_error
+    );
+}

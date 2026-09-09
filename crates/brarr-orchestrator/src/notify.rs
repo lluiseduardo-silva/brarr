@@ -5,17 +5,28 @@
 //! Emby/Jellyfin; without it, a file brarr just imported stays invisible
 //! until the media server happens to scan on its own.
 //!
-//! ## One trigger, and it is not `mark_imported`
+//! ## The trigger is "brarr wrote a path", not `mark_imported`
 //!
-//! Four call sites write `grabs::mark_imported`, and only one of them
-//! means a file arrived: the automatic importer. The other three record
-//! files that were *already on disk* — `arr_import::record` adopting a
-//! Sonarr catalogue, the manual adoption screen, and `AlreadyPresent`,
-//! which is brarr finding a file already sitting at the destination. The
-//! media server indexed those long ago, and `arr_import` runs for every
-//! series every half hour with no cap at all: 468 titles on this stack.
-//! Hooking the funnel would trade one useful notification for thousands
-//! of useless ones.
+//! Four call sites write `grabs::mark_imported` and the funnel is the
+//! wrong place to hook: `arr_import::record` runs for every series every
+//! half hour with no cap at all — 468 titles on this stack — and
+//! `AlreadyPresent` is brarr finding a file already sitting at the
+//! destination. The media server indexed both long ago, and reporting
+//! them would trade one useful notification for thousands of useless
+//! ones.
+//!
+//! So [`imported`] is called from the two places that put a path in the
+//! library that was not there before: the automatic importer
+//! (`import::import_pending`) and the manual adoption screen
+//! (`adopt::commit`) — the latter **only** for its `Linked` rows, where
+//! a download outside the library is hardlinked into it. Its `InPlace`
+//! rows write nothing and are correctly silent.
+//!
+//! That second half was missing until three series were adopted by hand
+//! and stayed invisible in Plex: the episodes were on disk, in the right
+//! folder, with the right name, and nothing had told the server to look.
+//! A media server watching its folders would have hidden the gap, which
+//! is exactly why it went unnoticed for a Plex that does not.
 //!
 //! ## Best-effort, always
 //!

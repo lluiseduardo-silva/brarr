@@ -1037,6 +1037,23 @@ impl Report {
     pub fn count(&self, status: CommitStatus) -> usize {
         self.outcomes.iter().filter(|o| o.status == status).count()
     }
+
+    /// The paths this run **wrote** into the library.
+    ///
+    /// [`CommitStatus::Linked`] only, and that is the whole distinction:
+    /// a linked file is a path that did not exist a moment ago, while
+    /// [`CommitStatus::InPlace`] records a file the media server has
+    /// been serving all along and [`CommitStatus::Skipped`] wrote
+    /// nothing at all. Feeding the other two to `notify::imported`
+    /// would be the flood its module doc refuses.
+    #[must_use]
+    fn landed(&self) -> Vec<PathBuf> {
+        self.outcomes
+            .iter()
+            .filter(|o| o.status == CommitStatus::Linked)
+            .map(|o| PathBuf::from(&o.detail))
+            .collect()
+    }
 }
 
 /// Write what the operator confirmed.
@@ -1092,6 +1109,18 @@ pub async fn commit(
         };
         report.outcomes.push(apply(state, row, pick).await?);
     }
+    // After the loop and not inside `apply`, for the same reason
+    // `import_pending` does it after its own: the unit a media server
+    // wants is the title, and one confirmation routinely lands a whole
+    // season of them.
+    //
+    // `notify`'s doc used to count this screen among the call sites that
+    // "record files that were already on disk". That holds for
+    // `AdoptAction::InPlace` and never held for `AdoptAction::Link`,
+    // which hardlinks a download into the library at a path nothing has
+    // indexed. Plex does not watch folders unless the operator turned
+    // that on, so those episodes landed correctly and stayed invisible.
+    crate::notify::imported(state, &report.landed()).await;
     Ok(report)
 }
 
