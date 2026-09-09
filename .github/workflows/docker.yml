@@ -23,18 +23,25 @@
 
 name: docker
 
-# DESABILITADA — só roda por acionamento manual. Mesma razão da `ci.yml`:
-# os runners hospedados não são alocados, e a falha acontece antes de
-# qualquer passo.
+# Reativada em 2026-09-09, junto com a `ci.yml` e pela mesma razão.
 #
-# A imagem é construída e publicada da máquina local, com as **seis
-# tags** que este workflow geraria (`X.Y.Z`, `X.Y`, `X`, `latest`,
-# `main`, `sha-<short>`) e com `--label org.opencontainers.image.source`,
-# que é o que vincula o pacote ao repositório e faz herdar a
-# visibilidade. Sem o label o pacote nasce órfão na conta.
+# O gatilho de **tag** é o que importa aqui: é ele que produz a imagem de
+# release com as seis tags (`X.Y.Z`, `X.Y`, `X`, `latest`, `main`,
+# `sha-<short>`). Enquanto esteve parada, a imagem saía da máquina local
+# com `--label org.opencontainers.image.source` passado à mão — é esse
+# label que vincula o pacote ao repositório e faz herdar a visibilidade,
+# e sem ele o pacote nasce órfão na conta. O `metadata-action` abaixo o
+# escreve sozinho, que é meio motivo para preferir a pipeline.
 #
-# Para reativar: devolver os gatilhos `push` e `pull_request` abaixo.
+# Se a indisponibilidade de runner voltar, o caminho manual continua
+# válido: `docker build` + `docker push` com as mesmas tags e aquele
+# label.
 on:
+  push:
+    branches: [master, main]
+    tags: ["v*"]
+  pull_request:
+    branches: [master, main]
   workflow_dispatch:
 
 env:
